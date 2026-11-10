@@ -48,6 +48,12 @@ startup, so after the one restart for this restructure, every feature only needs
 - **Output**: `ns.Print(msg)` prints to chat; `ns.Escape(text)` before showing any text from the AI.
   Once W7 lands, `ns.ShowMessage(text, style, sender)` shows a message the way W7 does. Other
   features call it when present and fall back to `ns.Print`.
+- **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
+  `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
+  for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and
+  `ns.ShowMessage` render tokens in chat as item links through `ns.Chat(line)`, which holds a line up
+  to 1 s while its items load, keeping chat order. `ns.OnItemsLoaded(fn)` runs once items shown
+  before they loaded arrive, so features can redraw.
 - **Map helpers** (`Map.lua`, for routes, areas, reminders): `ns.Map.Locate(zone, x, y, mapID)` turns a zone
   name and 0-100 coordinates into a location, or nil if the zone is unknown. Then:
   - `ns.Map.Project(loc, mapID)` gives its x, y on another map.
@@ -68,6 +74,9 @@ startup, so after the one restart for this restructure, every feature only needs
   (`math.floor`), because the test stub runs Lua 5.5.
 
 ### Server (`server/wow_mcp/`)
+- **Item markup**: `item_text.py` has `ITEM` (the token regex, matching Core.lua), `HINT` for tool
+  fields that take AI text, `GUIDANCE` (registered in `tools/messages.py`, order 66) and `shorten()`
+  (truncates without cutting a token).
 - **Registering tools**: in your `tools/<feature>.py`, decorate with `@tool(annotations=ToolAnnotations(...))`
   from `wow_mcp.app`. The module is imported automatically. Add advice for agents with
   `guidance(text, order=N)` (existing: map 10, player 20, quests 30; use 40–90).
@@ -88,6 +97,8 @@ startup, so after the one restart for this restructure, every feature only needs
 ### Tests (`server/tests/`)
 - Add the game APIs your feature needs to `stub/apis/<feature>.lua`. All files there are loaded
   automatically. Mimic the real client's behaviour, including its quirks.
+- Stub items can have an `icon` (file ID); `ITEM_QUALITY_COLORS` and `C_Item.GetItemIconByID` exist.
+  Font strings measure text as shown: colour codes and link data take no room, an inline texture is 12 px.
 - Fixtures (`conftest.py`):
   - `addons`: an installed copy of the addon.
   - `run_client(lua)`: a scripted stub session; time advances with `client.Tick()` / `client.Wait()`.

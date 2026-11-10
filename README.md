@@ -104,6 +104,11 @@ Every tool that reads the game also returns the game version, so agents look thi
 Zone names are resolved in game against the client's own map list, so the agent doesn't need
 uiMapIDs. Unknown zones are reported in your chat.
 
+Items in anything an agent shows in game (plans, messages, routes, areas, reminders, map labels,
+item notes, `/ai` answers) appear with their icon and the game's own name in quality colour.
+Agents write `{item:2318}` or `{item:2318:Light Leather}`; in chat it's a real item link you can
+click or shift-click.
+
 The agent is told which game version you're on, so it looks up the right data. That's e.g.
 "World of Warcraft: Forever 1.60.1 (build 70862, EU region, enUS client)", worked out at startup
 from the install's `.build.info` and the running WoW processes. It's also told which sites cover
@@ -133,10 +138,10 @@ cd server && uv run pytest
 
 Layout: one file per feature on each side, plugged into small registries.
 
-- `addon/WowMCP/`: `Core.lua` (live channel, registries, `/mcp`), `Requests.lua` (what the server
+- `addon/WowMCP/`: `Core.lua` (live channel, registries, `/mcp`, item tokens in AI text), `Requests.lua` (what the server
   can ask for), `Stream.lua` (sending to the server), then one file per feature (`Map.lua`,
   `Player.lua`, `Quests.lua`, ...).
-- `server/wow_mcp/`: `app.py` (shared helpers), `tools/` (one module per feature, picked up
+- `server/wow_mcp/`: `app.py` (shared helpers), `item_text.py` (the item markup, shared by the tools and the bridge), `tools/` (one module per feature, picked up
   automatically), `transport.py` / `stream.py` (the two directions), `game.py`, `install.py`.
 - `server/tests/`: `stub/client.lua` runs the addon in Lua, with game APIs in `stub/apis/` (one file
   per area). There's one `test_<feature>.py` per feature, and `conftest.py` has the fixtures
