@@ -16,3 +16,8 @@ dev = ["pytest>=8"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# Each test installs the addon (thousands of tiny files); /tmp is a tmpfs that runs out of
+# inodes when several runs keep theirs. This folder is cleared at the start of every run.
+addopts = "--basetemp=.pytest-tmp"
