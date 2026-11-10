@@ -124,7 +124,9 @@ async def request(kind: int) -> tuple[dict, str]:
             ) from None
         except stream.StreamError as e:
             raise ToolError(str(e)) from e
-    raise ToolError("The game sent an unexpected reply.")
+    # Usually an addon loaded before this kind existed: it answers with nothing.
+    raise ToolError("The game sent an unexpected reply. If the addon was updated since the player's "
+                    "last /reload, ask them to type /reload; get_status says whether it's current.")
 
 
 def section(reply: dict, name: str) -> Any:
