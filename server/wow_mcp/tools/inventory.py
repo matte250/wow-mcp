@@ -1,5 +1,6 @@
-"""Bags, equipped gear with durability, and the bank as last seen (request kind ITEMS, Inventory.lua)."""
+"""Bags, equipped gear with durability and stats, and the bank as last seen (request kind ITEMS, Inventory.lua)."""
 
+import re
 import time
 from datetime import datetime
 from typing import Annotated, Any, Literal, get_args
@@ -12,7 +13,7 @@ from wow_mcp.app import as_list, guidance, request, section, tool
 
 guidance(
     "For questions about the player's items (do they have X and how many, bag space, what to sell to a vendor, "
-    "their gear, its item level and durability, whether they need repairs), call get_inventory. Pass "
+    "their gear, its stats, item level and durability, whether they need repairs), call get_inventory. Pass "
     "include_bank=true when items they may have stored matter; the bank is as they last saw it, so mention "
     "when that was if it's been a while.",
     order=45,
@@ -28,6 +29,46 @@ SLOTS = {
 }
 KEYRING, BANK, ACCOUNT_BANK = -1, 6, 15  # bag IDs: the keyring, the first bank tab, the first warband bank tab
 
+# GetItemStats names stats by global string; most read well trimmed (ITEM_MOD_STAMINA_SHORT: stamina).
+STAT_NAMES = {
+    "RESISTANCE0_NAME": "armor",
+    "RESISTANCE1_NAME": "holy resistance",
+    "RESISTANCE2_NAME": "fire resistance",
+    "RESISTANCE3_NAME": "nature resistance",
+    "RESISTANCE4_NAME": "frost resistance",
+    "RESISTANCE5_NAME": "shadow resistance",
+    "RESISTANCE6_NAME": "arcane resistance",
+    "ITEM_MOD_MANA_REGENERATION_SHORT": "mana per 5 sec",
+    "ITEM_MOD_HEALTH_REGEN_SHORT": "health per 5 sec",
+    "ITEM_MOD_HEALTH_REGENERATION_SHORT": "health per 5 sec",
+}
+Stats = dict[str, int | float]
+STATS_NOTE = (
+    "Stats as the game reports them for this item, e.g. {'stamina': 5, 'damage per second': 7.4}. Effects the "
+    "tooltip only describes in words ('Equip: ...') may be missing; get_item_details has the full tooltip."
+)
+
+
+def stat_name(key: str) -> str:
+    if key in STAT_NAMES:
+        return STAT_NAMES[key]
+    if key.startswith("EMPTY_SOCKET_"):
+        return key.removeprefix("EMPTY_SOCKET_").lower() + " socket"
+    return re.sub(r"^ITEM_MOD_|_SHORT$", "", key).lower().replace("_", " ")
+
+
+def stats(value: Any) -> Stats | None:
+    """The game's stat table ({ ITEM_MOD_STAMINA_SHORT = 5, ... }) with readable names; None if it's empty."""
+    if not isinstance(value, dict):
+        return None
+    named: Stats = {}
+    for key, number in sorted(value.items()):
+        if isinstance(number, (int, float)) and not isinstance(number, bool):
+            name = stat_name(key)
+            total = named.get(name, 0) + number
+            named[name] = int(total) if float(total).is_integer() else round(total, 2)
+    return named or None
+
 
 class Item(BaseModel):
     slot: int = Field(description="Slot within the bag.")
@@ -38,6 +79,9 @@ class Item(BaseModel):
     item_level: int | None = Field(description="Weapons and armor only.")
     sell_price: int | None = Field(description="What a vendor pays for one, in copper. Null if vendors won't buy it "
                                    "or the game hadn't loaded the item yet.")
+    armor: int | None = Field(description="Armor value of gear in the bags (not the bank).")
+    stats: Stats | None = Field(description=f"Weapons and armor in the bags (not the bank), including random "
+                                f"suffixes such as 'of the Bear'. {STATS_NOTE} Null if none.")
 
 
 class Bag(BaseModel):
@@ -60,6 +104,8 @@ class EquippedItem(BaseModel):
                                    "gives no stats until repaired.")
     max_durability: int | None
     count: int | None = Field(description="Ammo only: how much is left in the bags.")
+    armor: int | None
+    stats: Stats | None = Field(description=f"{STATS_NOTE} Includes random suffixes. Null if none.")
 
 
 class Bank(BaseModel):
@@ -78,7 +124,7 @@ class Inventory(BaseModel):
                               "bank since the WowMCP addon was installed.")
 
 
-def _quality(value: Any) -> Quality | None:
+def quality(value: Any) -> Quality | None:
     return QUALITIES[value] if isinstance(value, int) and 0 <= value < len(QUALITIES) else None
 
 
@@ -99,7 +145,8 @@ def _bags(value: Any) -> list[Bag]:
     for raw in as_list(value):
         items = [
             Item(slot=i["slot"], item_id=i["id"], name=i.get("name"), count=i.get("count", 1),
-                 quality=_quality(i.get("quality")), item_level=i.get("ilvl"), sell_price=i.get("sell"))
+                 quality=quality(i.get("quality")), item_level=i.get("ilvl"), sell_price=i.get("sell"),
+                 armor=i.get("armor"), stats=stats(i.get("stats")))
             for i in as_list(raw.get("items"))
         ]
         bags.append(Bag(bag=raw["bag"], name=raw.get("name") or _bag_name(raw["bag"]), slots=raw["size"],
@@ -111,8 +158,9 @@ def _bags(value: Any) -> list[Bag]:
 def _equipment(value: Any) -> list[EquippedItem]:
     return [
         EquippedItem(slot=SLOTS.get(e["slot"], str(e["slot"])), item_id=e["id"], name=e.get("name"),
-                     quality=_quality(e.get("quality")), item_level=e.get("ilvl"), durability=e.get("durability"),
-                     max_durability=e.get("maxDurability"), count=e.get("count"))
+                     quality=quality(e.get("quality")), item_level=e.get("ilvl"), durability=e.get("durability"),
+                     max_durability=e.get("maxDurability"), count=e.get("count"), armor=e.get("armor"),
+                     stats=stats(e.get("stats")))
         for e in sorted(as_list(value), key=lambda e: e["slot"])
     ]
 
@@ -132,9 +180,10 @@ def _bank(value: Any) -> Bank | None:
 async def get_inventory(
     include_bank: Annotated[bool, Field(description="Also return the bank, as the player last saw it.")] = False,
 ) -> Inventory:
-    """Get what the player carries: every item in their bags (count, quality, item level for gear, vendor price),
-    their equipped gear with item level and durability, and optionally their bank as last seen. Use it for
-    "do I have X", "what can I vendor", "do I need repairs", bag space and gear questions."""
+    """Get what the player carries: every item in their bags (count, quality, vendor price; item level, armor and
+    stats for gear), their equipped gear with item level, durability, armor and stats as the game reports them,
+    and optionally their bank as last seen. Use it for "do I have X", "what can I vendor", "do I need repairs",
+    bag space, and as the baseline for gear comparisons (with get_item_details for the other item)."""
     reply, version = await request(kinds.ITEMS)
     bags = _bags(section(reply, "bags"))
     return Inventory(

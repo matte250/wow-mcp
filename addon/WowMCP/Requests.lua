@@ -13,7 +13,7 @@ ns.Kinds = {
 	TRAVEL = 4,     -- Travel.lua: known flight paths
 	KNOWLEDGE = 5,  -- Knowledge.lua: recipes, vendors
 	STATUS = 6,     -- Status.lua: addon build, live channel, slots
-	-- 7 is free.
+	ITEM_DETAILS = 7, -- Inventory.lua: tooltip and stats of the items in the itemLookup payload
 }
 
 local sections = {} -- kind -> { [name] = collect }
