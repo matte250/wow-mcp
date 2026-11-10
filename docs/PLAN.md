@@ -21,6 +21,8 @@ only by the integrator, who merges the workstreams one by one.
 | W13 | Version source hints | – | `tools/sources.py` | guidance only |
 | W14 | Status / version tool | `Status.lua` | `tools/status.py` | kind `STATUS` |
 | W15 | Item stats from the game | `Inventory.lua` | `tools/items.py`, `tools/inventory.py` | payload key `itemLookup`, kind `ITEM_DETAILS` |
+| W16 | Quest rewards (XP, money, items) | `Quests.lua` | `tools/quests.py` | kind `QUESTS` |
+| W17 | Plans: step checklists that track themselves | `Plans.lua` | `tools/plans.py` | payload key `plan`, STATE section `plan` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
 (W3 already has `test_quests.py` and `stub/apis/quests.lua`; W8 owns `test_stream.py` changes).
@@ -52,6 +54,11 @@ startup, so after the one restart for this restructure, every feature only needs
   - `ns.Map.Distance(loc)` gives yards from the player.
   - `ns.Map.SetWaypoint(loc)` sets the game's waypoint.
   - `ns.Map.Resolve(zone, mapID)` returns the map info.
+- **Guiding** (for plans or anything else that drives the navigator): `ns.Routes.Guide(places,
+  {key, title, loop, onArrive, front})` shows places with the navigator, waypoint and map lines,
+  and `ns.Routes.Unguide()` hands back to the plain route. `ns.Areas.Guide(list, key, title)` and
+  `ns.Areas.Unguide()` do the same for areas. A newer `show_route` route shows over the guide until
+  it's finished or hidden.
 - **Core state** (read only): `ns.run` (`live`, `liveProblem`, `seq`, `req`), `ns.SlotsLeft()`,
   `ns.SLOT_COUNT`, and `ns.BUILD` (from `Build.lua`, which the installer generates).
 - **Sending to the server**: `ns.Stream.Send(id, value)` (replies; Requests.lua does this for you).
@@ -119,6 +126,10 @@ restricted content. Wrap anything doubtful in `pcall`.
 - Extend the `quests` section's log entries with `objectives`: text, fulfilled, required,
   finished. Keep `get_quest_status` working unchanged.
 - New tool `get_quest_log()`: each quest with title, ready-to-turn-in, and objective progress.
+- (W16) Log entries also carry rewards: `xp` (`GetQuestLogRewardXP`, already scaled for the
+  character's level), `money` (copper), `items` / `choices` (`{ id, name, count }`), and `rewards` =
+  "loading" | "hidden" | "unknown" when not all were read. Missing values are unknown, never 0.
+  `get_quest_log` asks again (up to 2× 1 s) while any are loading.
 
 ### W4 Reputations
 - Section `factions` on kind REPUTATION: name, standing (localized label), progress within the

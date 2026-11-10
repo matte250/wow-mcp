@@ -89,13 +89,14 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Area | Tools |
 |---|---|
 | Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
-| Routes | `show_route` (numbered stops, lines, navigator arrow), `clear_route` |
+| Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes), `get_plan_progress`, `clear_plan` |
+| Routes | `show_route` (numbered stops, lines, navigator arrow; a plan's current step uses the same navigator), `clear_route` |
 | Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
 | Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
 | Character | `get_character_stats` (money, XP, rested, hearthstone, /played), `get_reputations` |
 | Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession), `get_vendor_items` (vendors you've visited) |
 | Items | `get_inventory` (bags, equipment with durability and stats, `include_bank` for the bank as last seen), `get_item_details` (stats and tooltip text of any item, read from the game), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
-| Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress) |
+| Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress, and rewards: the XP this character gets, money and items, read from the game) |
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
 | Diagnostics | `get_status` (is the addon up to date, live updates, slots left; says when to /reload or reinstall) |
@@ -117,6 +118,7 @@ the tools say so instead of failing silently.
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |
 | `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |
+| `/mcp plan [show, hide, next, prev, <n>, reset, clear]` | The plan window. Click a step to make it current; right-click it or click its box to tick or un-tick it; the wheel scrolls; − collapses |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
 | `/mcp areas [show, clear]` | The highlighted areas |
 | `/mcp messages` | Repeat the last messages from your AI |
