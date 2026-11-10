@@ -27,7 +27,7 @@ local SKILL_IDS = { 164, 165, 171, 182, 186, 197, 202, 333, 393, 129, 185, 356 }
 local plan        -- the payload being shown
 local steps = {}  -- parsed: { n, text, places, loop, areas, conditions = { { kind, value, ..., met, text } } }
 local wanted = {} -- item IDs the plan counts: their names may arrive later
-local session = { turnedIn = {}, learned = {} } -- what events said before the game's own lists catch up
+local session = { turnedIn = {} } -- what events said before the game's own lists catch up
 local problem, reported -- the last error while checking, and the last one printed
 local window
 local hovered     -- the row whose tooltip is showing
@@ -121,22 +121,32 @@ local function SkillRank(name)
 	return best
 end
 
--- A recipe by spell ID or name: known if the spellbook says so, the open profession window does,
--- the player just learned it, or Knowledge.lua saw it in a profession window. Also its name.
+-- Whether a recipe Knowledge.lua lists is the one asked for: by spell ID if both have one, else by name.
+local function IsRecipe(recipe, id, name)
+	if type(recipe) ~= "table" then return false end
+	if id and recipe.id then return recipe.id == id end
+	return Same(recipe.name, name)
+end
+
+-- A recipe by spell ID or name: known if Knowledge.lua saw it in a profession window or saw the
+-- player learn it (since login, or since a profession window last listed it), or the spellbook or
+-- the open profession window says so. Also its name.
 local function Recipe(c)
 	local id = type(c.value) == "number" and c.value or nil
-	local name
+	local name = not id and c.value or nil
+	if id and C_Spell and C_Spell.GetSpellName then
+		local ok, spell = pcall(C_Spell.GetSpellName, id)
+		name = ok and spell or nil
+	end
 	for _, profession in pairs(Professions()) do
 		for _, recipe in ipairs(type(profession) == "table" and profession.recipes or {}) do
-			if (id and recipe.id == id) or (not id and Same(recipe.name, c.value)) then return true, recipe.name end
+			if IsRecipe(recipe, id, name) then return true, recipe.name end
 		end
 	end
+	for _, recipe in ipairs(ns.Knowledge.Learned()) do
+		if IsRecipe(recipe, id, name) then return true, recipe.name or name end
+	end
 	if id then
-		if C_Spell and C_Spell.GetSpellName then
-			local ok, spell = pcall(C_Spell.GetSpellName, id)
-			name = ok and spell or nil
-		end
-		if session.learned[id] then return true, name end
 		if C_SpellBook and C_SpellBook.IsSpellKnown then
 			local ok, known = pcall(C_SpellBook.IsSpellKnown, id)
 			if ok and known then return true, name end
@@ -174,9 +184,15 @@ local POSITION = { at = true, zone = true, subzone = true }
 
 local CHECKS = {}
 
+-- An ID that the game says is another item than the one named is the AI's mistake: the name counts
+-- then (the game counts items the player holds by name), and the step says so.
 function CHECKS.have(c)
-	local have = math.floor(ItemCount(c.value, c.bank))
-	return have >= c.count, string.format("%s %d/%d%s", ItemName(c), math.min(have, c.count), c.count, c.bank and " (with bank)" or "")
+	local name = ItemName(c)
+	local wrong = c.name and not Same(name, c.name)
+	local have = math.floor(ItemCount(wrong and c.name or c.value, c.bank))
+	local text = string.format("%s %d/%d%s", wrong and c.name or name, math.min(have, c.count), c.count, c.bank and " (with bank)" or "")
+	if wrong then text = text .. string.format(" (item %d is %s in this game; counted by name)", c.value, name) end
+	return have >= c.count, text
 end
 
 function CHECKS.at(c, current)
@@ -954,7 +970,9 @@ local events = CreateFrame("Frame")
 for _, event in ipairs({
 	"BAG_UPDATE_DELAYED", "PLAYERBANKSLOTS_CHANGED", "BANKFRAME_OPENED",
 	"QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_LOG_UPDATE", "UNIT_QUEST_LOG_CHANGED",
-	"PLAYER_LEVEL_UP", "SKILL_LINES_CHANGED", "NEW_RECIPE_LEARNED", "LEARNED_SPELL_IN_SKILL_LINE", "TRADE_SKILL_LIST_UPDATE",
+	"PLAYER_LEVEL_UP", "SKILL_LINES_CHANGED", "TRADE_SKILL_LIST_UPDATE",
+	-- Learning: Knowledge.lua keeps what these say (the chat line may be the only one on Forever).
+	"NEW_RECIPE_LEARNED", "LEARNED_SPELL_IN_SKILL_LINE", "CHAT_MSG_SYSTEM",
 	"ZONE_CHANGED", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED_NEW_AREA", "PLAYER_ENTERING_WORLD",
 	"GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT",
 }) do
@@ -965,8 +983,6 @@ events:SetScript("OnEvent", function(_, event, arg1)
 		session.turnedIn[arg1] = true -- the completed-quest flag can lag behind the event
 	elseif event == "PLAYER_LEVEL_UP" then
 		session.level = tonumber(arg1) -- UnitLevel can still say the old level
-	elseif (event == "NEW_RECIPE_LEARNED" or event == "LEARNED_SPELL_IN_SKILL_LINE") and arg1 then
-		session.learned[arg1] = true
 	elseif (event == "GET_ITEM_INFO_RECEIVED" or event == "ITEM_DATA_LOAD_RESULT") and not wanted[arg1] then
 		return
 	end

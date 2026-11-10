@@ -18,10 +18,12 @@ from wow_mcp.tools import areas, messages, plans, reminders, routes
 # How a Lua test script hands control back to publish through the real tools.
 PUBLISH_SCRIPT = """
 import asyncio, json, sys
+from wow_mcp import game
 from wow_mcp.tools import areas, item_notes, map, messages, plans, reminders, routes
+game.running_folders = lambda proc=None: set()  # the stub game waits for this script: it can't check item IDs
 args = json.loads(sys.argv[1])
 if "plan" in args:
-    plans.show_plan(args["plan"]["title"], [plans.Step(**s) for s in args["plan"]["steps"]])
+    asyncio.run(plans.show_plan(args["plan"]["title"], [plans.Step(**s) for s in args["plan"]["steps"]]))
 elif "message" in args:
     messages.show_message(**args["message"])
 elif "route" in args:

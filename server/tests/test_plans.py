@@ -16,16 +16,19 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ValidationError
 
-from wow_mcp.tools import plans
+from wow_mcp import game as wow_game
+from wow_mcp.tools import items, plans
 from wow_mcp.transport import Transport
 
 # How a Lua test script hands control back to publish through the real tools.
 PUBLISH_SCRIPT = """
-import json, sys
+import asyncio, json, sys
+from wow_mcp import game
 from wow_mcp.tools import plans, routes
+game.running_folders = lambda proc=None: set()  # the stub game waits for this script: it can't check item IDs
 args = json.loads(sys.argv[1])
 if "plan" in args:
-    plans.show_plan(args["plan"]["title"], [plans.Step(**s) for s in args["plan"]["steps"]])
+    asyncio.run(plans.show_plan(args["plan"]["title"], [plans.Step(**s) for s in args["plan"]["steps"]]))
 elif args.get("clear_plan"):
     plans.clear_plan()
 elif "route" in args:
@@ -291,6 +294,119 @@ def test_level_skill_and_recipe_steps(game):
         client.LearnRecipe(3816)
         client.Wait(2)
         assert(has("Plan complete:|r Leatherworking 75"))
+        noErrors()
+    """)
+
+
+LEARNING = plan(
+    "Dark Leather Belt",
+    step("Leatherworking to 60", {"skill": "Leatherworking", "rank": 60}),
+    step("Learn Cured Medium Hide and Dark Leather Belt", {"recipe": "Cured Medium Hide"},
+         {"recipe": "dark leather belt"}),
+    step("Learn Serpent Sting", {"recipe": "Serpent Sting"}),
+)
+
+
+@pytest.mark.parametrize("signal", ["event", "skillLine", "chat", "link"])
+def test_recipes_by_name_count_once_learned(game, signal):
+    # Any one of the signals of a learn is enough, without opening the profession window.
+    game(f'local SIGNAL = "{signal}"\n' + r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + LEARNING + r"""]])
+        client.Wait()
+        local f = WowMCPPlanFrame
+        assert(f.Count.text == "2/3" and progress(2) == "Learn: Cured Medium Hide\nLearn: dark leather belt", progress(2))
+        client.LearnRecipe(3817, SIGNAL)
+        client.Tick()
+        assert(progress(2) == "Known: Cured Medium Hide\nLearn: dark leather belt", progress(2))
+        client.LearnRecipe(3766, SIGNAL)
+        client.Tick()
+        assert(row(2).Check:IsShown() and f.Count.text == "3/3", f.Count.text)
+
+        -- A class spell counts for a recipe condition too (there's no NEW_RECIPE_LEARNED for it).
+        client.LearnSpell(1978, SIGNAL == "event" and "skillLine" or SIGNAL)
+        client.Tick()
+        assert(has("Plan complete:|r Dark Leather Belt") and client.tradeSkill == nil, chat())
+        noErrors()
+    """)
+
+
+LEARNED = plan(
+    "Leatherworking recipes",
+    step("Learn Cured Medium Hide", {"recipe": "Cured Medium Hide"}),
+    step("Learn Dark Leather Belt", {"recipe": 3766}),
+    step("Learn Cured Light Hide", {"recipe": "Cured Light Hide"}),
+)
+
+
+def test_learned_recipes_count_after_a_reload(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        -- One learn said only its name (the chat line), the other only its ID (the event).
+        client.LearnRecipe(3817, "chat")
+        client.LearnRecipe(3766, "event")
+        client.Wait()
+        Reload()
+        client.Wait()
+        wipe(client.knownSpells) -- as if the spellbook didn't know recipes: what was saved has to count
+        client.Publish([[""" + LEARNED + r"""]])
+        client.Wait()
+        assert(has("Already done: steps 1, 2.") and progress(3) == "Learn: Cured Light Hide", chat())
+
+        -- The profession window lists them now, instead of the saved learns.
+        client.OpenProfession("Leatherworking")
+        client.Wait(4)
+        client.CloseProfession()
+        assert(#WowMCPDB.knowledge.learned["Thorgrim-Firemaw"] == 0)
+        wipe(client.chat)
+        client.Publish([[""" + LEARNED + r"""]])
+        client.Wait()
+        assert(has("Already done: steps 1, 2."), chat())
+        noErrors()
+    """)
+
+
+BELT = plan(
+    "Dark Leather Belt",
+    step("Craft a Dark Leather Belt", {"have": 4237, "name": "Dark Leather Belt"}),
+    step("Keep a spare in the bank", {"have": 4237, "count": 2, "bank": True, "name": "Dark Leather Belt"}),
+)
+
+
+def test_have_with_another_items_id_counts_the_named_item(game):
+    # The AI's ID is the Handstitched Leather Belt's.
+    game(r"""
+        local ns = client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + BELT + r"""]])
+        client.Wait()
+        local f = WowMCPPlanFrame
+        local WRONG = " (item 4237 is Handstitched Leather Belt in this game; counted by name)"
+        assert(progress(1) == "Dark Leather Belt 0/1" .. WRONG, progress(1))
+        -- What the ID is doesn't count; the named item does.
+        client.AddItem(4237, 1)
+        client.Wait(2)
+        assert(f.Count.text == "1/2", f.Count.text)
+        client.AddItem(4249, 1)
+        client.Wait(2)
+        assert(row(1).Check:IsShown() and progress(2) == "Dark Leather Belt 1/2 (with bank)" .. WRONG, progress(2))
+
+        -- The step's tooltip and get_plan_progress say so too.
+        local lines = {}
+        GameTooltip.AddLine = function(_, text) table.insert(lines, text) end
+        row(2).OnEnter(row(2))
+        assert(table.concat(lines, "\n"):find("Dark Leather Belt 1/2 (with bank)" .. WRONG, 1, true), table.concat(lines, "\n"))
+        local reply
+        ns.Stream.Send = function(_, value) reply = value end
+        ns.Answer(0, ns.Kinds.STATE)
+        assert(reply.plan.steps[2].progress[1].text == "Dark Leather Belt 1/2 (with bank)" .. WRONG)
+
+        -- In the bank too.
+        client.AddItem(4249, 1, 6)
+        client.Wait(2)
+        assert(has("Plan complete:|r Dark Leather Belt"), chat())
         noErrors()
     """)
 
@@ -665,7 +781,7 @@ def test_odd_data_doesnt_stop_the_plan(game):
 def test_show_plan_payload(addons):
     stop = plans.Stop(zone="Orgrimmar", x=50.123, y=50, label="Bank")
     spiders = plans.Area(zone="Durotar", x=55, y=45, radius=6, label="Spiders", color="purple")
-    result = plans.show_plan("Gloves", [
+    result = run(plans.show_plan("Gloves", [
         plans.Step(text="Take out the leather", places=[stop], conditions=[plans.Have(have=2318, count=10, bank=True)]),
         plans.Step(text="Farm silk", places=[stop, stop], loop=True, areas=[spiders],
                    conditions=[{"have": 3182, "count": 2, "name": "Spider's Silk"}]),
@@ -678,7 +794,7 @@ def test_show_plan_payload(addons):
                                             {"recipe": "Light Armor Kit"}]),
         plans.Step(text="Say hi"),
         plans.Step(text="Pet the cat", conditions=[{"manual": True}]),
-    ])
+    ]))
     assert result.startswith(
         "Sent plan #1 'Gloves' with 6 steps to the game:\n"
         "1. Take out the leather [done when: 10 x item 2318 (bags + bank)]\n"
@@ -689,6 +805,9 @@ def test_show_plan_payload(addons):
         "5. Say hi [done when: ticked by the player]\n"
     ), result
     assert "2 step(s) have nothing the game can check, so the player ticks them off." in result
+    # The game isn't running, so the silk's ID couldn't be checked.
+    assert result.endswith("Its item IDs weren't checked against the game. The game isn't running, so it will show "
+                           "when the player next logs in."), result
 
     state = Transport(addons).load_state()
     bank = {"zone": "Orgrimmar", "x": 50.12, "y": 50, "label": "Bank", "note": None, "mapID": None}
@@ -715,6 +834,69 @@ def test_show_plan_payload(addons):
     assert plans.clear_plan() == "Cleared the plan."
     state = Transport(addons).load_state()
     assert state["plan"] == {"id": state["seq"], "steps": []}
+
+
+def test_show_plan_checks_item_ids_in_game(live_game):
+    with live_game(seconds=20):
+        with pytest.raises(ToolError) as error:
+            run(plans.show_plan("Belt", [
+                plans.Step(text="Make the belt", conditions=[{"have": 4237, "name": "Dark Leather Belt"}]),
+                plans.Step(text="Farm silk", conditions=[{"have": 3182, "count": 2, "name": "spiders silk"}]),
+                plans.Step(text="Find the thing", conditions=[{"have": 999999, "name": "Thing"}]),
+                plans.Step(text="Bank one", conditions=[{"have": 4237, "bank": True, "name": "Dark Leather Belt"},
+                                                       {"have": 2318}]),
+            ]))
+        sent = plans.transport().load_state()
+        result = run(plans.show_plan("Belt", [
+            plans.Step(text="Make the belt", conditions=[{"have": 4249, "name": "Dark Leather Belt"}])]))
+        state = plans.transport().load_state()
+    assert str(error.value) == (
+        "Nothing was sent: these 'have' conditions have another item's ID in this game.\n"
+        "step 1: item 4237 is Handstitched Leather Belt, not Dark Leather Belt\n"
+        "step 3: item 999999 (Thing) isn't in this game\n"
+        "step 4: item 4237 is Handstitched Leather Belt, not Dark Leather Belt\n"
+        "Fix the IDs and send the plan again: get_known_recipes has the item each known recipe makes, get_inventory "
+        "and get_vendor_items have the items the player has or has seen for sale, and get_item_details looks up any ID."
+    )
+    # One lookup per plan, for the named items only; the corrected plan went out after its own.
+    assert "plan" not in sent and sent["itemLookup"]["items"] == [4237, 3182, 999999]
+    assert state["itemLookup"] == {"id": 2, "items": [4249]} and state["plan"]["id"] == 3
+    assert result.startswith("Sent plan #3 'Belt'") and "checked" not in result, result
+
+
+def test_show_plan_when_the_game_cant_check_items(addons, monkeypatch):
+    belt = [plans.Step(text="Make the belt", conditions=[{"have": 4249, "name": "Dark Leather Belt"}])]
+
+    async def look_up(ids):
+        raise AssertionError("asked the game")
+
+    monkeypatch.setattr(plans, "look_up", look_up)
+    # Not running: sent as it is.
+    result = run(plans.show_plan("Belt", belt))
+    assert result.endswith("Its item IDs weren't checked against the game. The game isn't running, so it will show "
+                           "when the player next logs in."), result
+
+    # Running, but no named 'have' conditions: nothing to ask.
+    monkeypatch.setattr(wow_game, "running_folders", lambda proc=None: {"_forever_"})
+    leather = [plans.Step(text="Take it out", conditions=[{"have": 2318, "bank": True}])]
+    result = run(plans.show_plan("Leather", leather))
+    assert result.endswith("get_plan_progress shows where they are."), result
+
+    # No answer (e.g. a long fight): sent anyway.
+    async def look_up(ids):
+        raise ToolError("The game didn't answer.")
+
+    monkeypatch.setattr(plans, "look_up", look_up)
+    result = run(plans.show_plan("Belt", belt))
+    assert result.endswith("Its item IDs weren't checked against the game: The game didn't answer."), result
+    assert Transport(addons).load_state()["plan"]["title"] == "Belt"
+
+    # Still loading after the retries.
+    async def look_up(ids):
+        return items.ItemDetailsList(game="WoW", items=[items._details(4249, {"status": "loading"})])
+
+    monkeypatch.setattr(plans, "look_up", look_up)
+    assert run(plans.show_plan("Belt", belt)).endswith("Item 4249 couldn't be checked against the game.")
 
 
 @pytest.mark.parametrize("condition, error", [
@@ -748,17 +930,19 @@ def test_plan_tools_live(live_game, tmp_path):
         end)
     """
     with live_game(setup, seconds=20):
-        result = plans.show_plan("Silk", [
+        result = run(plans.show_plan("Silk", [
             plans.Step(text="Farm 2 Spider's Silk", places=[plans.Stop(zone="Durotar", x=60, y=50, label="Spiders")],
                        conditions=[plans.Have(have=3182, count=2, name="Spider's Silk")]),
             plans.Step(text="Show it to Gornek"),
-        ])
-        assert result.startswith("Sent plan #1 'Silk' with 2 steps"), result
+        ]))
+        # Update 1 asked the game about the silk's ID.
+        assert result.startswith("Sent plan #2 'Silk' with 2 steps"), result
+        assert "checked" not in result
         time.sleep(0.5)
         progress = run(plans.get_plan_progress())
         assert progress.game.startswith("World of Warcraft: Forever")
         assert (progress.active, progress.plan_id, progress.title, progress.current_step, progress.total_steps) == (
-            True, 1, "Silk", 1, 2)
+            True, 2, "Silk", 1, 2)
         assert progress.steps[0].model_dump() == {
             "step": 1, "text": "Farm 2 Spider's Silk", "done": False, "ticked_by_hand": False, "current": True,
             "needs_click": False, "progress": [{"kind": "have", "progress": "Spider's Silk 0/2", "met": False}],
@@ -791,8 +975,8 @@ def test_plan_progress_notes(addons, monkeypatch):
         return reply, "World of Warcraft: Forever 1.60.1"
 
     monkeypatch.setattr(plans, "request", request)
-    plans.show_plan("Old", [plans.Step(text="One")])
-    plans.show_plan("New", [plans.Step(text="Two")])
+    run(plans.show_plan("Old", [plans.Step(text="One")]))
+    run(plans.show_plan("New", [plans.Step(text="Two")]))
 
     reply["plan"] = {"none": True}
     assert "hasn't received the plan yet" in run(plans.get_plan_progress()).note

@@ -1,14 +1,17 @@
 """Plans: step-by-step guides shown in game as a checklist that ticks itself off (payload key "plan",
 Plans.lua). The game reports progress in the "plan" section of request kind STATE."""
 
+import re
 from typing import Annotated, Literal
 
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
 from wow_mcp import item_text, kinds
 from wow_mcp.app import as_list, guidance, request, section, tool, transport
 from wow_mcp.tools.areas import Area
+from wow_mcp.tools.items import MAX_ITEMS, look_up
 from wow_mcp.tools.messages import delivery_note
 from wow_mcp.tools.routes import Stop
 
@@ -20,7 +23,8 @@ guidance(
     "already has and knows, so the plan only covers what's missing: get_inventory (include_bank=True) for "
     "materials, get_vendor_items for what vendors they've visited sell, get_quest_log and get_quest_status for "
     "quests, get_professions and get_known_recipes, get_flight_paths and get_player_location for travel. Prefer "
-    "exact game data for this game version: item IDs for 'have' conditions, quest IDs for quest steps, recipe "
+    "exact game data for this game version: item IDs for 'have' conditions (with the item's name, so the game can "
+    "check the ID; get_known_recipes has the item each recipe makes), quest IDs for quest steps, recipe "
     "spell IDs, real coordinates. Give every step conditions the game can check (have, quest_*, level, skill, "
     "recipe, at, zone) so it ticks off by itself; a step without conditions needs the player to tick it. Put "
     "places on every step the player has to walk to (bank, vendors, trainers, quest givers, flight masters, "
@@ -38,7 +42,11 @@ class _Condition(BaseModel):
 class Have(_Condition):
     """Done when the player has `count` of an item: in their bags, or bags plus bank with bank=true."""
 
-    have: Annotated[int, Field(gt=0, description="Item ID for this game version (e.g. from Wowhead).")]
+    have: Annotated[
+        int,
+        Field(gt=0, description="Item ID for this game version: get_known_recipes has the item each recipe makes, "
+              "get_inventory and get_vendor_items the items the player has or saw for sale; else Wowhead."),
+    ]
     count: Annotated[int, Field(ge=1, le=10000, description="How many they need.")] = 1
     bank: Annotated[
         bool,
@@ -46,7 +54,9 @@ class Have(_Condition):
               "steps that need the items carried (crafting, turning in)."),
     ] = False
     name: Annotated[
-        str | None, Field(max_length=80, description="The item's name, shown until the game has loaded the item.")
+        str | None,
+        Field(max_length=80, description="The item's name as the game shows it. show_plan checks the ID against it, "
+              "and the game counts the named item if the ID turns out to be another."),
     ] = None
 
 
@@ -242,12 +252,59 @@ def describe(c: _Condition) -> str:
     return "ticked by the player"
 
 
+def _same(a: str, b: str) -> bool:
+    """Whether two names are the same the way Plans.lua's Same() sees it: case, a leading 'The' and anything but
+    letters and digits don't count."""
+
+    def normal(name: str) -> str:
+        return re.sub(r"[^0-9a-z]", "", re.sub(r"^the\s+", "", name.lower()))
+
+    return normal(a) == normal(b)
+
+
+async def _check_items(steps: list[Step]) -> str:
+    """Checks the item IDs of named 'have' conditions in the game (one lookup) and raises a ToolError listing the
+    ones that are another item, or none. Returns a note when they couldn't be checked."""
+    named: dict[int, list[tuple[int, str]]] = {}
+    for n, s in enumerate(steps, 1):
+        for c in s.conditions:
+            if isinstance(c, Have) and c.name:
+                named.setdefault(c.have, []).append((n, c.name))
+    if not named:
+        return ""
+    if delivery_note():  # not running, or another version: it can't answer
+        return "Its item IDs weren't checked against the game."
+    ids = list(named)
+    try:
+        found = (await look_up(ids[:MAX_ITEMS])).items
+    except ToolError as e:
+        return f"Its item IDs weren't checked against the game: {e}"
+    wrong = []
+    for item in found:
+        for n, name in named[item.item_id]:
+            if item.status == "unknown":
+                wrong.append((n, f"step {n}: item {item.item_id} ({name}) isn't in this game"))
+            elif item.name and not _same(item.name, name):
+                wrong.append((n, f"step {n}: item {item.item_id} is {item.name}, not {name}"))
+    if wrong:
+        raise ToolError(
+            "Nothing was sent: these 'have' conditions have another item's ID in this game.\n"
+            + "\n".join(text for _, text in sorted(wrong))
+            + "\nFix the IDs and send the plan again: get_known_recipes has the item each known recipe makes, "
+            "get_inventory and get_vendor_items have the items the player has or has seen for sale, and "
+            "get_item_details looks up any ID."
+        )
+    # Still loading, or more than one lookup takes.
+    unchecked = [i.item_id for i in found if not i.name and i.status != "unknown"] + ids[MAX_ITEMS:]
+    return f"Item {', '.join(map(str, unchecked))} couldn't be checked against the game." if unchecked else ""
+
+
 @tool(
     annotations=ToolAnnotations(
         title="Show a plan in game", read_only_hint=False, destructive_hint=False, open_world_hint=False
     )
 )
-def show_plan(
+async def show_plan(
     title: Annotated[
         str,
         Field(min_length=1, max_length=80, description="e.g. 'Leatherworking 113 to 125' or "
@@ -262,7 +319,10 @@ def show_plan(
     chains and leveling routes, gathering. The current step's places drive the navigator arrow and the game's
     waypoint (a looping route for farming spots) and its areas are shaded on the map. Replaces any plan sent
     earlier and the route from show_route. The player can also tick steps off, go back, or hide the window.
+    The item IDs of 'have' conditions with a name are checked in the game first: if one is another item, nothing
+    is sent and the error lists them.
     """
+    checked = await _check_items(steps)
     plan = {
         "title": title,
         "steps": [
@@ -287,13 +347,16 @@ def show_plan(
     if manual:
         result += f"\n{manual} step(s) have nothing the game can check, so the player ticks them off."
     return result + "\nSteps already done in game tick off right away; get_plan_progress shows where they are." \
-        + delivery_note()
+        + (f" {checked}" if checked else "") + delivery_note()
 
 
 class ConditionProgress(BaseModel):
     kind: str = Field(description="have, at, zone, subzone, questAccepted, questTurnedIn, questComplete, "
                       "questObjective, level, skill, recipe or manual.")
-    progress: str = Field(description="As the checklist shows it, e.g. \"Spider's Silk 1/2\" or 'Go to Ironforge'.")
+    progress: str = Field(
+        description="As the checklist shows it, e.g. \"Spider's Silk 1/2\" or 'Go to Ironforge'. A 'have' condition "
+        "whose item ID is another item in game says so, and counts the named item instead."
+    )
     met: bool
 
 
