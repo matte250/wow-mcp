@@ -5,6 +5,7 @@ from typing import Annotated
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
+from wow_mcp import item_text
 from wow_mcp.app import guidance, mismatch_error, tool, transport
 
 guidance(
@@ -31,11 +32,13 @@ class Stop(BaseModel):
     y: Annotated[float, Field(ge=0, le=100, description="Y coordinate on that zone's map, 0-100.")]
     label: Annotated[
         str,
-        Field(min_length=1, max_length=60, description="Short name for the stop, e.g. 'Turn in: Vile Familiars'."),
+        Field(min_length=1, max_length=60, description="Short name for the stop, e.g. 'Turn in: Vile Familiars'. "
+              + item_text.HINT),
     ]
     note: Annotated[
         str | None,
-        Field(max_length=300, description="Optional detail for the stop's tooltip, e.g. 'Inside the inn, upstairs'."),
+        Field(max_length=300, description="Optional detail for the stop's tooltip, e.g. 'Inside the inn, upstairs'. "
+              + item_text.HINT),
     ] = None
     map_id: Annotated[
         int | None,
@@ -55,7 +58,8 @@ def show_route(
     ],
     title: Annotated[
         str | None,
-        Field(max_length=80, description="Name shown on the navigator and in chat, e.g. 'Razor Hill turn-ins'."),
+        Field(max_length=80, description="Name shown on the navigator and in chat, e.g. 'Razor Hill turn-ins'. "
+              + item_text.HINT),
     ] = None,
     loop: Annotated[
         bool, Field(description="Go back to the first stop after the last one, for farming or gathering circuits.")

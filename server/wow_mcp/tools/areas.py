@@ -6,6 +6,7 @@ from typing import Annotated
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field, field_validator
 
+from wow_mcp import item_text
 from wow_mcp.app import guidance, mismatch_error, tool, transport
 
 guidance(
@@ -50,7 +51,9 @@ class Area(BaseModel):
         ),
     ]
     label: Annotated[
-        str, Field(min_length=1, max_length=60, description="Short text shown in the circle, e.g. 'Kolkar Centaurs'.")
+        str,
+        Field(min_length=1, max_length=60, description="Short text shown in the circle, e.g. 'Kolkar Centaurs'. "
+              + item_text.HINT),
     ]
     color: Annotated[
         str | None,
@@ -86,7 +89,9 @@ class Area(BaseModel):
 def highlight_areas(
     areas: Annotated[list[Area], Field(min_length=1, max_length=30, description="The regions to shade.")],
     title: Annotated[
-        str | None, Field(max_length=80, description="Heading printed in the player's chat, e.g. 'Kolkar camps'.")
+        str | None,
+        Field(max_length=80, description="Heading printed in the player's chat, e.g. 'Kolkar camps'. "
+              + item_text.HINT),
     ] = None,
     open_map: Annotated[bool, Field(description="Open the world map on the first area.")] = True,
 ) -> str:

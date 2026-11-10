@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from wow_mcp import stream
+from wow_mcp import item_text, stream
 from wow_mcp.install import ADDONS_DIR_ENV
 from wow_mcp.transport import ADDON, write_atomic
 
@@ -56,7 +56,11 @@ SYSTEM_PROMPT = """\
 The player typed this question into World of Warcraft's chat with /ai while playing. Your final \
 reply is shown to them in the game's chat window, so:
 - Reply in plain text, in at most three short sentences (about 400 characters) unless they ask \
-for more. No Markdown, tables, headings or links: the chat window shows them literally.
+for more. No Markdown, tables, headings or web links: the chat window shows them literally.
+- Write each item you name as {item:<id>}, or {item:<id>:<name>}, with its item ID for their game \
+version, e.g. {item:2318:Light Leather}: the chat shows it as an item link with its icon, which \
+they can click. Their bags and bank (get_inventory), recipes, vendors, quest rewards and \
+get_item_details give item IDs. Items you have no ID for stay plain text.
 - Use the wow tools to look at their game (location, character, quests, bags, ...) when the \
 answer depends on it, instead of asking.
 - When the answer involves places, mark them with show_on_map (nearest_first for "closest" \
@@ -232,14 +236,38 @@ def _pack(pieces: list[str], width: int) -> list[str]:
     return lines
 
 
+# While an answer is split into lines, each item ({item:...}) stands in as one word of the same length,
+# so no split falls inside one.
+ITEM_START, ITEM_REST = "\ue000", "\ue001"
+
+
+def _hide_items(text: str) -> tuple[str, list[str]]:
+    items = item_text.ITEM.findall(text)
+    return item_text.ITEM.sub(lambda m: ITEM_START + ITEM_REST * (len(m[0]) - 1), text), items
+
+
+def _show_items(lines: list[str], items: list[str]) -> list[str]:
+    found = iter(items)
+
+    def back(match: re.Match) -> str:
+        item = next(found)
+        return item if len(match[0]) == len(item) else ""  # cut short at the end: left out
+
+    return [re.sub(f"{ITEM_START}{ITEM_REST}*", back, line) for line in lines]
+
+
 def chat_lines(text: str, width: int = LINE_WIDTH, limit: int = MAX_LINES) -> list[str]:
     """An answer as at most `limit` chat messages of at most `width` characters: plain text, a
     message per paragraph or list item, long ones split between sentences, and cut short with
-    "…" if it's still too long."""
+    "…" if it's still too long. Items ({item:...}) are never split; one longer than a line gets
+    a line of its own."""
+    text, items = _hide_items(plain_text(text))
+    whole = any(len(item) > width for item in items)
     lines = []
-    for paragraph in plain_text(text).splitlines():
+    for paragraph in text.splitlines():
         sentences = re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split()))
-        lines += _pack([piece for s in sentences if s for piece in textwrap.wrap(s, width)], width)
+        pieces = [piece for s in sentences if s for piece in textwrap.wrap(s, width, break_long_words=not whole)]
+        lines += _pack(pieces, width)
     if len(lines) > limit:
         lines = _pack(lines, width)
     if len(lines) > limit:
@@ -248,7 +276,7 @@ def chat_lines(text: str, width: int = LINE_WIDTH, limit: int = MAX_LINES) -> li
         if len(last) > width - 2:
             last = last[: width - 2].rsplit(" ", 1)[0]
         lines[-1] = last + " …"
-    return lines
+    return _show_items(lines, items)
 
 
 def publish_message(text: str, style: str = "chat", sender: str = SENDER) -> int:

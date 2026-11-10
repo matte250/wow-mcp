@@ -94,8 +94,14 @@ function Region:SetJustifyH(justify) self.justify = justify end
 function Region:SetMaxLines(n) self.maxLines = n end
 function Region:SetFontObject(font) self.font = font end
 function Region:SetWordWrap(wrap) self.wordWrap = wrap end
--- Text measures: 7 px per character, 12 px per line; wraps to the width set (if word wrap is on).
-function Region:GetUnboundedStringWidth() return #(self.text or "") * 7 end
+-- Text measures: 7 px per character shown, 12 px per inline texture (height 0: as high as the
+-- line, and square), 12 px per line; wraps to the width set (if word wrap is on). Colours and
+-- links' data take no room.
+function Region:GetUnboundedStringWidth()
+	local text, textures = (self.text or ""):gsub("||", "\1"):gsub("|T.-|t", "")
+	text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|cn[^:]*:", ""):gsub("|r", ""):gsub("|H.-|h", ""):gsub("|h", "")
+	return #text * 7 + textures * 12
+end
 function Region:GetStringHeight()
 	local width, lines = self:GetUnboundedStringWidth(), 1
 	if self.wordWrap and (self.width or 0) > 0 then lines = math.max(1, math.ceil(width / self.width)) end

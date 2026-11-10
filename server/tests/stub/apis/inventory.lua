@@ -12,13 +12,14 @@ ARMOR_TEMPLATE = "%s Armor"
 SELL_PRICE = "Sell Price"
 
 -- Item data. An uncached item has no name anywhere until something asks for it; then it loads
--- loadTime seconds later (default: the next frame), as on the real client. Gear has a class,
+-- loadTime seconds later (default: the next frame), as on the real client. Its icon is known
+-- straight away (icon: a texture file ID; default the question mark, 134400). Gear has a class,
 -- subclass and equip slot, and may have armor, stats (keyed as GetItemStats keys them),
 -- weapon damage { low, high, speed }, a required level and effects (green tooltip lines).
 client.items = {
 	[6948] = { name = "Hearthstone", quality = 1, level = 1, class = 15 },
 	[2589] = { name = "Linen Cloth", quality = 1, level = 5, class = 7, sell = 13 },
-	[2318] = { name = "Light Leather", quality = 1, level = 10, class = 7, sell = 15 },
+	[2318] = { name = "Light Leather", quality = 1, level = 10, class = 7, sell = 15, icon = 134252 },
 	[4865] = { name = "Ruined Pelt", quality = 0, level = 1, class = 15, sell = 5 },
 	[159] = { name = "Refreshing Spring Water", quality = 1, level = 5, class = 0, sell = 1 },
 	[2512] = { name = "Rough Arrow", quality = 1, level = 5, class = 6, subclass = 2, slot = "INVTYPE_AMMO" },
@@ -40,6 +41,13 @@ client.items = {
 		slot = "INVTYPE_HAND", sell = 512, armor = 49, required = 25, bind = "Binds when equipped",
 		stats = { ITEM_MOD_AGILITY_SHORT = 6, ITEM_MOD_STRENGTH_SHORT = 4, ITEM_MOD_ATTACK_POWER_SHORT = 10 },
 		effects = { "Equip: +10 Attack Power." } },
+	-- Leatherworking materials, for item names in AI text (file IDs made up). Medium Leather takes half
+	-- a second to load.
+	[2319] = { name = "Medium Leather", quality = 1, level = 20, class = 7, sell = 25, icon = 134253, uncached = true,
+		loadTime = 0.5 },
+	[2934] = { name = "Ruined Leather Scraps", quality = 0, level = 5, class = 7, sell = 1, icon = 134254 },
+	[2320] = { name = "Coarse Thread", quality = 1, level = 5, class = 7, sell = 2, icon = 132889 },
+	[4232] = { name = "Medium Hide", quality = 1, level = 20, class = 7, sell = 25, icon = 134255 },
 }
 
 -- Random suffixes by ID, as in item links.
@@ -75,6 +83,12 @@ client.atBank = false
 client.armorNotInStats = false
 
 local COLORS = { [0] = "9d9d9d", "ffffff", "1eff00", "0070dd", "a335ee" }
+-- As Blizzard_Colors' ColorManager fills it: { r, g, b, hex = "|cff..." } by quality.
+ITEM_QUALITY_COLORS = {}
+for quality, hex in pairs(COLORS) do
+	ITEM_QUALITY_COLORS[quality] = { r = tonumber(hex:sub(1, 2), 16) / 255, g = tonumber(hex:sub(3, 4), 16) / 255,
+		b = tonumber(hex:sub(5, 6), 16) / 255, hex = "|cff" .. hex }
+end
 local CLASSES = { [0] = "Consumable", [2] = "Weapon", [4] = "Armor", [6] = "Projectile", [7] = "Trade Goods",
 	[12] = "Quest", [13] = "Key", [15] = "Miscellaneous" }
 local SUBCLASSES = { [2] = { [1] = "Two-Handed Axes", [2] = "Bows" }, [4] = { [0] = "Miscellaneous", [2] = "Leather" },
@@ -158,14 +172,18 @@ C_Item = {
 		if not info or not Cached(itemID) then return nil end
 		local typeName, subtypeName = TypeNames(info)
 		return info.name, Link(itemID), info.quality, info.level, info.required or 0, typeName, subtypeName, 1,
-			info.slot or "", 134400, info.sell or 0, info.class, info.subclass or 0
+			info.slot or "", info.icon or 134400, info.sell or 0, info.class, info.subclass or 0
 	end,
 	GetItemInfoInstant = function(item)
 		local itemID = ParseItem(item)
 		local info = client.items[itemID]
 		if not info then return nil end
 		local typeName, subtypeName = TypeNames(info)
-		return itemID, typeName, subtypeName, info.slot or "", 134400, info.class, info.subclass or 0
+		return itemID, typeName, subtypeName, info.slot or "", info.icon or 134400, info.class, info.subclass or 0
+	end,
+	GetItemIconByID = function(item)
+		local info = client.items[ParseItem(item)]
+		return info and (info.icon or 134400)
 	end,
 	IsItemDataCachedByID = function(item)
 		local info = client.items[ParseItem(item)]

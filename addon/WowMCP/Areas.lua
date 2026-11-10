@@ -86,7 +86,7 @@ function Pin:OnAcquired(area, x, y, radius, onOwnMap)
 	local size = 2 * radius * self:GetMap():GetCanvas():GetWidth()
 	self:SetSize(size, size)
 	PlaceOutline(self, size, c)
-	self.Label:SetText((onOwnMap or size >= LABEL_MIN_SIZE) and ns.Escape(area.label) or "")
+	self.Label:SetText((onOwnMap or size >= LABEL_MIN_SIZE) and ns.ItemText(area.label) or "")
 	self:OnCanvasScaleChanged()
 	self:SetPosition(x, y)
 end
@@ -101,7 +101,7 @@ end
 function Pin:OnMouseEnter()
 	local a = self.area
 	GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-	GameTooltip:SetText(ColorCode(a.color) .. ns.Escape(a.label) .. "|r")
+	GameTooltip:SetText(ColorCode(a.color) .. ns.ItemText(a.label) .. "|r")
 	GameTooltip:AddLine(string.format("%s  %.1f, %.1f", ns.Escape(a.zone), a.x * 100, a.y * 100), 0.7, 0.7, 0.7)
 	if a.yards then
 		GameTooltip:AddLine(string.format("About %d yards across", math.floor(2 * a.yards + 0.5)), 0.7, 0.7, 0.7)
@@ -276,6 +276,7 @@ ns.RegisterReceiver("areas", function(payload)
 	if type(payload) == "table" then Areas.Receive(payload) end
 end)
 ns.OnLogin(Areas.Init)
+ns.OnItemsLoaded(RefreshPins) -- labels naming items that were still loading
 ns.RegisterCommand("areas", "/mcp areas [show, clear] - list the highlighted areas, open the map on them, hide them", Areas.Command)
 
 local combat = CreateFrame("Frame")

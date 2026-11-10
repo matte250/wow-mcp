@@ -30,6 +30,7 @@ local wanted = {} -- item IDs the plan counts: their names may arrive later
 local session = { turnedIn = {}, learned = {} } -- what events said before the game's own lists catch up
 local problem, reported -- the last error while checking, and the last one printed
 local window
+local hovered     -- the row whose tooltip is showing
 local first       -- the first step shown in the window; nil follows the current step
 local pending     -- a check is scheduled
 
@@ -312,6 +313,7 @@ end
 
 local Guide, Layout
 
+-- Escaped, with its item tokens for ns.Print or ns.RenderItems to show.
 local function StepText(n)
 	return ns.Escape(steps[n].text)
 end
@@ -449,13 +451,18 @@ local function SavePosition(f)
 	saved.point, saved.relativePoint, saved.x, saved.y = point, relativePoint, x, y
 end
 
+-- A condition's progress line, escaped; an item's starts with its icon.
+local function ConditionText(c)
+	return (c.kind == "have" and ns.ItemIcon(c.value) or "") .. ns.Escape(c.text or "")
+end
+
 local function ProgressText(step)
 	local state = State()
 	if #step.conditions == 0 then return GREY .. "Tick the box when done|r" end
 	local lines = {}
 	for _, c in ipairs(step.conditions) do
 		local color = c.met and GREEN or TODO
-		local text = ns.Escape(c.text or ""):gsub("\n", "|r\n" .. color) -- each line keeps the colour
+		local text = ConditionText(c):gsub("\n", "|r\n" .. color) -- each line keeps the colour
 		lines[#lines + 1] = color .. text .. "|r"
 	end
 	if state.undone[step.n] and Checkable(step) then lines[#lines + 1] = GREY .. "Un-ticked by hand: tick the box when done|r" end
@@ -464,20 +471,21 @@ end
 
 local function RowTooltip(row)
 	row.Hover:Show()
+	hovered = row
 	local step = steps[row.n]
 	if not step then return end
 	local done = State().done[step.n]
 	GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-	GameTooltip:SetText(string.format("%d. %s", step.n, StepText(step.n)), 1, 0.82, 0, 1, true)
+	GameTooltip:SetText(ns.RenderItems(string.format("%d. %s", step.n, StepText(step.n))), 1, 0.82, 0, 1, true)
 	for i, p in ipairs(step.places) do
 		if type(p) == "table" then
-			GameTooltip:AddLine(string.format("%s%s - %s %.1f, %.1f", #step.places > 1 and (i .. ". ") or "", ns.Escape(p.label or "Place"),
+			GameTooltip:AddLine(string.format("%s%s - %s %.1f, %.1f", #step.places > 1 and (i .. ". ") or "", ns.ItemText(p.label or "Place"),
 				ns.Escape(p.zone), tonumber(p.x) or 0, tonumber(p.y) or 0), 0.7, 0.7, 0.7)
-			if p.note then GameTooltip:AddLine(ns.Escape(p.note), 1, 1, 1, true) end
+			if p.note then GameTooltip:AddLine(ns.ItemText(p.note), 1, 1, 1, true) end
 		end
 	end
 	for _, c in ipairs(done and {} or step.conditions) do
-		GameTooltip:AddLine(ns.Escape(c.text or ""), c.met and 0.2 or 1, c.met and 1 or 0.8, c.met and 0.2 or 0.4, true)
+		GameTooltip:AddLine(ConditionText(c), c.met and 0.2 or 1, c.met and 1 or 0.8, c.met and 0.2 or 0.4, true)
 	end
 	if done then
 		GameTooltip:AddLine("Done. Right-click or click the box to mark it not done.", 0.4, 0.8, 1, true)
@@ -531,6 +539,7 @@ local function CreateRow(f)
 	row:SetScript("OnEnter", RowTooltip)
 	row:SetScript("OnLeave", function(self)
 		self.Hover:Hide()
+		hovered = nil
 		GameTooltip:Hide()
 	end)
 	return row
@@ -614,7 +623,7 @@ local function FillRow(row, step, current, done)
 	row.Check:SetShown(done)
 	row.Current:SetShown(current)
 	local color = done and GREY or current and WHITE or LIGHT
-	row.Text:SetText(string.format("%s%d.|r %s%s|r", current and GOLD or color, step.n, color, StepText(step.n)))
+	row.Text:SetText(ns.RenderItems(string.format("%s%d.|r %s%s|r", current and GOLD or color, step.n, color, StepText(step.n))))
 	local progress = current and not done and ProgressText(step)
 	row.Progress:SetText(progress or "")
 	row.Progress:SetShown(progress and true or false)
@@ -635,7 +644,7 @@ function Layout()
 	local f = window
 	f:Show()
 	local collapsed = WindowSaved().collapsed
-	f.Title:SetText(ns.Escape(plan.title or "Plan"))
+	f.Title:SetText(ns.ItemText(plan.title or "Plan"))
 	f.Count:SetText(state.current and string.format("%d/%d", state.current, #steps) or GREEN .. "Done|r")
 	f.Collapse:SetNormalTexture(collapsed and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
 
@@ -932,6 +941,12 @@ ns.RegisterSection(ns.Kinds.STATE, "plan", Progress)
 ns.RegisterCommand("plan", USAGE, Plans.Command)
 ns.OnLogin(function()
 	C_Timer.NewTicker(CHECK_INTERVAL, Plans.Check)
+end)
+-- Items named in steps that were still loading: show their names.
+ns.OnItemsLoaded(function()
+	if not plan then return end
+	Soon()
+	if hovered and hovered:IsShown() and GameTooltip:GetOwner() == hovered then RowTooltip(hovered) end
 end)
 
 -- What can tick a step off. Events only make it quicker: the ticker checks every second anyway.
