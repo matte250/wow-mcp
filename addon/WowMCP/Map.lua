@@ -117,7 +117,7 @@ local function Project(m, mapID)
 	if not m.continent or MapContinent(mapID) ~= m.continent then return end
 	local ok, _, pos = pcall(C_Map.GetMapPosFromWorldPos, m.continent, m.worldPos, mapID)
 	if not ok or not pos then return end
-	local x, y = pos:GetXY()
+	local x, y = pos.x, pos.y
 	if x >= 0 and x <= 1 and y >= 0 and y <= 1 then return x, y end
 end
 
@@ -129,8 +129,8 @@ local function Distance(m)
 	if not pos then return end
 	local ok, continent, world = pcall(C_Map.GetWorldPosFromMapPos, mapID, pos)
 	if not ok or continent ~= m.continent then return end
-	local mx, my = m.worldPos:GetXY()
-	local px, py = world:GetXY()
+	local mx, my = m.worldPos.x, m.worldPos.y
+	local px, py = world.x, world.y
 	return math.sqrt((mx - px) ^ 2 + (my - py) ^ 2)
 end
 
@@ -244,7 +244,7 @@ local function ClearOurWaypoint()
 	if not (ours and C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then return end
 	local point = C_Map.GetUserWaypoint()
 	if not point or point.uiMapID ~= ours.mapID then return end
-	local x, y = point.position:GetXY()
+	local x, y = point.position.x, point.position.y
 	if math.abs(x - ours.x) < 0.001 and math.abs(y - ours.y) < 0.001 then
 		C_Map.ClearUserWaypoint()
 	end

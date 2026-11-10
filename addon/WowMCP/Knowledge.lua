@@ -130,7 +130,7 @@ local function Where()
 	if subzone and subzone ~= "" then where.subzone = subzone end
 	local pos = mapID and C_Map.GetPlayerMapPosition(mapID, "player")
 	if pos then
-		local x, y = pos:GetXY()
+		local x, y = pos.x, pos.y
 		where.x, where.y = Percent(x), Percent(y)
 	end
 	return where

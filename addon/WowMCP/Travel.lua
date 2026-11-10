@@ -47,7 +47,7 @@ local function InZone(mapID, x, y)
 		local pos
 		if continent then pos = select(2, C_Map.GetMapPosFromWorldPos(continent, world, info.mapID)) end
 		if pos then
-			local zx, zy = pos:GetXY()
+			local zx, zy = pos.x, pos.y
 			return info.name, Percent(zx), Percent(zy)
 		end
 	end
@@ -57,7 +57,7 @@ end
 
 local function Entry(mapID, node)
 	local entry = { name = node.name }
-	local ok, zone, x, y = pcall(InZone, mapID, node.position:GetXY())
+	local ok, zone, x, y = pcall(InZone, mapID, node.position.x, node.position.y)
 	if ok then entry.zone, entry.x, entry.y = zone, x, y end
 	return entry
 end

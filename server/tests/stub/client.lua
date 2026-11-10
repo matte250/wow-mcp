@@ -44,6 +44,10 @@ function CreateFromMixins(...)
 	return t
 end
 
+-- What game functions return for positions: plain { x, y } tables. Unlike the addon's own
+-- CreateVector2D objects (and some functions' results), not every one has :GetXY().
+function client.Vector(x, y) return { x = x, y = y } end
+
 function CreateVector2D(x, y)
 	return { x = x, y = y, GetXY = function(self) return self.x, self.y end }
 end

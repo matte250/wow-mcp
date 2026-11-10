@@ -28,8 +28,8 @@ local function Width(mapID)
 		local ok2, c2, right = pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(1, 0.5))
 		widths[mapID] = false
 		if ok1 and ok2 and c1 and c1 == c2 and left and right then
-			local x1, y1 = left:GetXY()
-			local x2, y2 = right:GetXY()
+			local x1, y1 = left.x, left.y
+			local x2, y2 = right.x, right.y
 			widths[mapID] = math.sqrt((x2 - x1) ^ 2 + (y2 - y1) ^ 2)
 		end
 	end

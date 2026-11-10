@@ -27,14 +27,14 @@ function C_Map.GetWorldPosFromMapPos(id, pos)
 	local z = zones[id]
 	if not z then return base.GetWorldPosFromMapPos(id, pos) end
 	local r = z.rect
-	return z.cont, CreateVector2D(r[1] + pos.x * (r[3] - r[1]), r[2] + pos.y * (r[4] - r[2]))
+	return z.cont, client.Vector(r[1] + pos.x * (r[3] - r[1]), r[2] + pos.y * (r[4] - r[2]))
 end
 function C_Map.GetMapPosFromWorldPos(cont, world, id)
 	local z = zones[id]
 	if not z then return base.GetMapPosFromWorldPos(cont, world, id) end
 	if z.cont ~= cont then return end
 	local r = z.rect
-	return id, CreateVector2D((world.x - r[1]) / (r[3] - r[1]), (world.y - r[2]) / (r[4] - r[2]))
+	return id, client.Vector((world.x - r[1]) / (r[3] - r[1]), (world.y - r[2]) / (r[4] - r[2]))
 end
 
 local MAX_MAP_ID = 3000

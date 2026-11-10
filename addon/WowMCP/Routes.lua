@@ -54,7 +54,7 @@ local function Geometry(mapID)
 	if geometry[mapID] == nil then
 		local function At(x, y)
 			local ok, continent, pos = pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(x, y))
-			if ok and continent and pos then return continent, pos:GetXY() end
+			if ok and continent and pos then return continent, pos.x, pos.y end
 		end
 		local continent, ox, oy = At(0, 0)
 		local _, ex, ey = At(1, 0)
@@ -72,7 +72,7 @@ local function Place(stop, mapID)
 	if x then return x, y, true end
 	local g = Geometry(mapID)
 	if not (g and stop.continent == g.continent) then return end
-	local wx, wy = stop.worldPos:GetXY()
+	local wx, wy = stop.worldPos.x, stop.worldPos.y
 	local dx, dy = wx - g.ox, wy - g.oy
 	return (dx * g.ex + dy * g.ey) / (g.ex ^ 2 + g.ey ^ 2), (dx * g.sx + dy * g.sy) / (g.sx ^ 2 + g.sy ^ 2), false
 end
@@ -85,8 +85,8 @@ local function Bearing(stop)
 	local g = mapID and Geometry(mapID)
 	if not (pos and g) then return nil, nil, NO_POSITION end
 	if g.continent ~= stop.continent then return nil, nil, ns.Escape(stop.zone) .. " (another continent)" end
-	local px, py = pos:GetXY()
-	local wx, wy = stop.worldPos:GetXY()
+	local px, py = pos.x, pos.y
+	local wx, wy = stop.worldPos.x, stop.worldPos.y
 	local dx = wx - (g.ox + px * g.ex + py * g.sx)
 	local dy = wy - (g.oy + px * g.ey + py * g.sy)
 	local east = (dx * g.ex + dy * g.ey) / math.sqrt(g.ex ^ 2 + g.ey ^ 2)
@@ -223,7 +223,7 @@ local function ClearWaypoint()
 	if not (ours and C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then return end
 	local point = C_Map.GetUserWaypoint()
 	if not point or point.uiMapID ~= ours.mapID then return end
-	local x, y = point.position:GetXY()
+	local x, y = point.position.x, point.position.y
 	if math.abs(x - ours.x) < 0.001 and math.abs(y - ours.y) < 0.001 then
 		C_Map.ClearUserWaypoint()
 	end

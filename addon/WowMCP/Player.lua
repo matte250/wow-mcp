@@ -22,7 +22,7 @@ local function Location()
 	local pos = mapID and C_Map.GetPlayerMapPosition(mapID, "player")
 	local x, y
 	if pos then
-		x, y = pos:GetXY()
+		x, y = pos.x, pos.y
 		x, y = math.floor(x * 10000 + 0.5) / 100, math.floor(y * 10000 + 0.5) / 100
 	end
 	return {

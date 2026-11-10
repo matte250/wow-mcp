@@ -17,23 +17,27 @@ C_Map = {
 		return m and { mapID = id, name = m.name, mapType = m.mapType, parentMapID = m.parentMapID }
 	end,
 	GetBestMapForUnit = function() return client.player.map end,
-	GetPlayerMapPosition = function(id) return id == client.player.map and CreateVector2D(client.player.x, client.player.y) or nil end,
+	GetPlayerMapPosition = function(id) return id == client.player.map and client.Vector(client.player.x, client.player.y) or nil end,
 	GetWorldPosFromMapPos = function(id, pos)
 		local m = maps[id]
 		if not m or not m.rect then return end
 		local r = m.rect
-		return m.cont, CreateVector2D(r[1] + pos.x * (r[3] - r[1]), r[2] + pos.y * (r[4] - r[2]))
+		return m.cont, client.Vector(r[1] + pos.x * (r[3] - r[1]), r[2] + pos.y * (r[4] - r[2]))
 	end,
 	GetMapPosFromWorldPos = function(cont, world, id)
 		local m = maps[id]
 		if not m or not m.rect or m.cont ~= cont then return end
 		local r = m.rect
-		return id, CreateVector2D((world.x - r[1]) / (r[3] - r[1]), (world.y - r[2]) / (r[4] - r[2]))
+		return id, client.Vector((world.x - r[1]) / (r[3] - r[1]), (world.y - r[2]) / (r[4] - r[2]))
 	end,
 	CanSetUserWaypointOnMap = function(id) return maps[id] ~= nil and maps[id].mapType == 3 end,
 	SetUserWaypoint = function(point) client.waypoint = point return true end,
 	HasUserWaypoint = function() return client.waypoint ~= nil end,
-	GetUserWaypoint = function() return client.waypoint end,
+	-- A copy whose position is a plain table, as the real client returns it.
+	GetUserWaypoint = function()
+		local w = client.waypoint
+		return w and { uiMapID = w.uiMapID, position = client.Vector(w.position.x, w.position.y) }
+	end,
 	ClearUserWaypoint = function() client.waypoint = nil end,
 }
 C_SuperTrack = { SetSuperTrackedUserWaypoint = function(on) client.superTracked = on end }
