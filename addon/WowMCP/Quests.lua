@@ -1,4 +1,4 @@
--- WowMCP quests: completed quests and the quest log with objective progress (request kind QUESTS).
+-- WowMCP quests: completed quests and the quest log with objective progress and rewards (request kind QUESTS).
 
 local _, ns = ...
 
@@ -23,6 +23,58 @@ local function AddDetails(entry, questID)
 		end
 	end
 	entry.objectives = objectives
+end
+
+-- Reward items as { id, name, count } (count left out for one). The client may not have an item's
+-- name yet: it's asked for, so it's likely there when the server asks again.
+local function RewardItems(count, info, questID)
+	local items, missing = {}, false
+	for i = 1, count do
+		local name, _, number, _, _, itemID = info(i, questID)
+		if itemID then
+			local item = { id = itemID, count = (number or 1) > 1 and number or nil }
+			if name and name ~= "" then
+				item.name = name
+			else
+				pcall(C_Item.RequestLoadItemDataByID, itemID)
+				missing = true
+			end
+			items[#items + 1] = item
+		else
+			missing = true
+		end
+	end
+	return items, missing
+end
+
+-- What turning the quest in gives: XP (what this character gets at their level, as the quest log
+-- shows it), money in copper, items, and items to choose from. All of these take the questID
+-- (without one they read the quest selected in the log), so the player's selection stays as it is.
+-- Rewards the client hasn't loaded read as 0, so they're asked for and reported as loading, never
+-- as no reward. entry.rewards is left out when everything's there, else "loading", "hidden" or
+-- (if the game wouldn't give them) "unknown".
+local function AddRewards(entry, questID)
+	local ok, shown = pcall(C_QuestLog.ShouldShowQuestRewards, questID)
+	if ok and shown == false then
+		entry.rewards = "hidden" -- the quest log shows none for this quest
+		return
+	end
+	local xp, money = GetQuestLogRewardXP(questID), GetQuestLogRewardMoney(questID)
+	local numItems, numChoices = GetNumQuestLogRewards(questID), GetNumQuestLogChoices(questID)
+	local loaded
+	ok, loaded = pcall(HaveQuestRewardData, questID)
+	-- Rewards that did come through are there, whatever HaveQuestRewardData says.
+	if not (ok and loaded) and xp == 0 and money == 0 and numItems == 0 and numChoices == 0 then
+		pcall(C_QuestLog.RequestLoadQuestByID, questID)
+		pcall(C_TaskQuest.RequestPreloadRewardData, questID)
+		entry.rewards = "loading"
+		return
+	end
+	entry.xp, entry.money = xp, money
+	local itemsMissing, choicesMissing
+	entry.items, itemsMissing = RewardItems(numItems, GetQuestLogRewardInfo, questID)
+	entry.choices, choicesMissing = RewardItems(numChoices, GetQuestLogChoiceInfo, questID)
+	if itemsMissing or choicesMissing then entry.rewards = "loading" end
 end
 
 -- Every quest the character has turned in, as gaps between the sorted IDs (small numbers
@@ -52,6 +104,7 @@ local function Quests()
 				header = header,
 			}
 			pcall(AddDetails, entry, info.questID)
+			if not pcall(AddRewards, entry, info.questID) then entry.rewards = "unknown" end
 			log[#log + 1] = entry
 		end
 	end

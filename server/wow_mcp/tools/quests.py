@@ -1,6 +1,7 @@
-"""Quest completion and the quest log with objective progress (request kind QUESTS, Quests.lua)."""
+"""Quest completion and the quest log with objective progress and rewards (request kind QUESTS, Quests.lua)."""
 
-from typing import Annotated
+import asyncio
+from typing import Annotated, Any, Literal, get_args
 
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -8,6 +9,9 @@ from pydantic import BaseModel, Field
 
 from wow_mcp import kinds
 from wow_mcp.app import as_list, guidance, request, section, tool
+from wow_mcp.tools.stats import format_money
+
+LOAD_RETRIES, LOAD_WAIT = 2, 1.0  # quest rewards or item names the client is still loading
 
 guidance(
     "To check quest progress (has the player done a quest, can they get a follow-up, which quests in a "
@@ -19,6 +23,15 @@ guidance(
     "ready to turn in), call get_quest_log. Use it before suggesting what to do next or planning a route for "
     "turn-ins and the objectives left.",
     order=35,
+)
+guidance(
+    "For levelling advice (how to reach the next level, which quests to turn in), add up the xp of the quests from "
+    "get_quest_log and compare the total with xp_to_level from get_character_stats. That xp is what the game will "
+    "give this character at their current level. Never estimate quest XP from websites or memory: WoW: Forever "
+    "changed quests, and quest XP scales with level (a quest can give less after a level-up). Only quests that are "
+    "ready_to_turn_in pay out now. Say plainly when a plan doesn't reach the next level, and list what else would "
+    "(more quests, objectives to finish, kills). If a quest's xp is null, say it's unknown instead of guessing.",
+    order=36,
 )
 
 
@@ -42,6 +55,16 @@ class QuestObjective(BaseModel):
     finished: bool
 
 
+class RewardItem(BaseModel):
+    item_id: int
+    name: str | None = Field(description="Null if the game hadn't loaded the item yet; get_item_details has it.")
+    count: int
+
+
+RewardsStatus = Literal["ok", "loading", "hidden", "unknown"]
+REWARDS_STATUSES: tuple[RewardsStatus, ...] = get_args(RewardsStatus)
+
+
 class LoggedQuest(BaseModel):
     quest_id: int
     title: str
@@ -56,11 +79,25 @@ class LoggedQuest(BaseModel):
     objectives: list[QuestObjective] | None = Field(
         description="Empty if the quest only asks to deliver or talk to someone; null if the game didn't give them."
     )
+    xp: int | None = Field(
+        description="XP for turning it in: what the game will give this character at their current level, as the "
+        "quest log shows it. Null if unknown (see rewards_status); don't guess it."
+    )
+    money: str | None = Field(description="Money for turning it in, e.g. '1g 2s 3c'. Null if unknown.")
+    money_copper: int | None = Field(description="The same in copper (1g = 100s = 10000c).")
+    reward_items: list[RewardItem] | None = Field(description="Items it gives. Null if unknown.")
+    reward_choices: list[RewardItem] | None = Field(description="Items to pick one of at turn-in. Null if unknown.")
+    rewards_status: RewardsStatus = Field(
+        description="ok: the rewards as the game gives them; loading: the game was still loading some (they're null, "
+        "or item names are), ask again in a moment; hidden: the game doesn't show this quest's rewards before it's "
+        "turned in; unknown: the game didn't give them."
+    )
 
 
 class QuestLog(BaseModel):
     game: str = Field(description="The WoW version being played; quest IDs are for this version.")
     quests: list[LoggedQuest] = Field(description="In quest log order.")
+    note: str | None = Field(description="Something the player should do first, e.g. /reload for the rewards.")
 
 
 @tool(
@@ -96,8 +133,21 @@ async def get_quest_status(
     )
 
 
+def _reward_items(value: Any) -> list[RewardItem] | None:
+    if value is None:
+        return None
+    return [RewardItem(item_id=i["id"], name=i.get("name"), count=i.get("count") or 1)
+            for i in as_list(value) if isinstance(i, dict) and isinstance(i.get("id"), int)]
+
+
 def _logged_quest(entry: dict) -> LoggedQuest:
     objectives = entry.get("objectives")
+    xp, money = entry.get("xp"), entry.get("money")
+    items, choices = _reward_items(entry.get("items")), _reward_items(entry.get("choices"))
+    # Quests.lua leaves the status out when it read every reward.
+    status = entry.get("rewards")
+    if status not in REWARDS_STATUSES:
+        status = "unknown" if None in (xp, money, items, choices) else "ok"
     return LoggedQuest(
         quest_id=entry["id"],
         title=entry.get("title") or "",
@@ -111,6 +161,12 @@ def _logged_quest(entry: dict) -> LoggedQuest:
                            required=o.get("required") or 0, finished=bool(o.get("finished")))
             for o in as_list(objectives) if isinstance(o, dict)
         ],
+        xp=xp,
+        money=None if money is None else format_money(money),
+        money_copper=money,
+        reward_items=items,
+        reward_choices=choices,
+        rewards_status=status,
     )
 
 
@@ -119,10 +175,27 @@ def _logged_quest(entry: dict) -> LoggedQuest:
 )
 async def get_quest_log() -> QuestLog:
     """Get every quest in the player's quest log: title, level, zone (its quest log header), whether it's ready
-    to turn in or failed, and the progress on each objective. Use it to see what the player is working on and
-    what's left to do."""
-    reply, version = await request(kinds.QUESTS)
-    entries = [q for q in as_list(section(reply, "quests").get("log")) if isinstance(q, dict)]
-    if entries and not any("level" in q for q in entries):
-        raise ToolError("The WowMCP addon in game doesn't send quest objectives yet. Ask the player to type /reload.")
-    return QuestLog(game=version, quests=[_logged_quest(q) for q in entries])
+    to turn in or failed, the progress on each objective, and the rewards: the XP this character gets for turning
+    it in (calculated by the game for their current level), money and items. Use it to see what the player is
+    working on, what's left to do and what turning quests in will give."""
+    load_waits = 0
+    while True:
+        reply, version = await request(kinds.QUESTS)
+        entries = [q for q in as_list(section(reply, "quests").get("log")) if isinstance(q, dict)]
+        if entries and not any("level" in q for q in entries):
+            raise ToolError(
+                "The WowMCP addon in game doesn't send quest objectives yet. Ask the player to type /reload."
+            )
+        # The addon asked the client for what it reported as loading, so it's likely there a moment later.
+        if load_waits < LOAD_RETRIES and any(q.get("rewards") == "loading" for q in entries):
+            load_waits += 1
+            await asyncio.sleep(LOAD_WAIT)
+            continue
+        # An addon loaded before rewards were added sends none for any quest.
+        old = entries and not any("xp" in q or "rewards" in q for q in entries)
+        return QuestLog(
+            game=version,
+            quests=[_logged_quest(q) for q in entries],
+            note="The WowMCP addon in game doesn't send quest rewards yet. Ask the player to type /reload."
+            if old else None,
+        )
