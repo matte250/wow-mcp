@@ -9,55 +9,9 @@ function PlaySound(id)
 	return true, #client.sounds
 end
 
--- Unix time follows the virtual clock (client.now); a test can move client.epoch.
-client.epoch = os.time()
-function time() return math.floor(client.epoch + client.now) end
-date = os.date
-
 -- Player.lua's stubs say where the player is; these follow them.
 function GetZoneText() return GetRealZoneText() end
 function GetMinimapZoneText() return GetSubZoneText() end
-
--- Frames get the region methods; font strings remember what they show (client.fontStrings).
-local Region = {}
-function Region:SetPoint(...) table.insert(self.points, { ... }) end
-function Region:ClearAllPoints() self.points = {} end
-function Region:SetSize(w, h) self.width, self.height = w, h end
-function Region:SetWidth(w) self.width = w end
-function Region:SetAlpha(a) self.alpha = a end
-function Region:GetAlpha() return self.alpha or 1 end
-function Region:Show() self.shown = true end
-function Region:Hide() self.shown = false end
-function Region:IsShown() return self.shown ~= false end
-function Region:SetFrameStrata(strata) self.strata = strata end
-
-local FontString = CreateFromMixins(Region)
-function FontString:SetText(text) self.text = text end
-function FontString:GetText() return self.text end
-function FontString:SetTextColor(r, g, b) self.color = { r, g, b } end
-function FontString:SetJustifyH(justify) self.justify = justify end
-function FontString:SetMaxLines(n) self.maxLines = n end
-
-client.fontStrings = {}
-function Region:CreateFontString(_, _, template)
-	local fs = CreateFromMixins(FontString)
-	fs.template, fs.parent, fs.points = template, self, {}
-	table.insert(client.fontStrings, fs)
-	return fs
-end
-
-local BaseCreateFrame = CreateFrame
-function CreateFrame(...)
-	local frame = BaseCreateFrame(...)
-	frame.points = frame.points or {}
-	for name, method in pairs(Region) do
-		if frame[name] == nil then frame[name] = method end
-	end
-	return frame
-end
-
-UIParent = CreateFromMixins(Region)
-UIParent.points = {}
 
 -- Texts of the visible font strings (shown, not faded out), top to bottom: the top one is
 -- anchored to its frame, each next one to the one above. Errors if they aren't laid out so.

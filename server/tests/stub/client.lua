@@ -52,17 +52,90 @@ Enum = { UIMapType = { Cosmic = 0, World = 1, Continent = 2, Zone = 3, Dungeon =
 
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, msg) table.insert(client.chat, msg) end }
 GameTooltip = setmetatable({}, { __index = function() return function() end end })
-EventRegistry = { RegisterCallback = function(_, event, fn, owner) client.itemRef = function(link) fn(owner, link) end end }
+-- Chat links (|Haddon:...|h): every owner's SetItemRef callback hears client.itemRef(link).
+local itemRefCallbacks = {}
+EventRegistry = {}
+function EventRegistry:RegisterCallback(event, fn, owner)
+	if event == "SetItemRef" then itemRefCallbacks[owner] = fn end
+end
+function client.itemRef(link)
+	for owner, callback in pairs(itemRefCallbacks) do callback(owner, link) end
+end
 
-function CreateFrame()
-	local frame = { registered = {} }
-	function frame:RegisterEvent(e) self.registered[e] = true end
-	function frame:SetScript(name, fn)
-		if name == "OnEvent" then self.onEvent = fn else self[name] = fn end
-	end
+---------------------------------------------------------------------------
+-- Widgets. Regions (textures, font strings, lines) and frames remember what they were told,
+-- for tests to inspect. client.fontStrings lists every font string created.
+---------------------------------------------------------------------------
+
+local Region = {}
+Region.__index = Region
+function Region:SetPoint(...) table.insert(self.points, { ... }) end
+function Region:GetPoint() return table.unpack(self.points[#self.points] or {}) end
+function Region:ClearAllPoints() self.points = {} end
+function Region:SetSize(w, h) self.width, self.height = w, h end
+function Region:SetWidth(w) self.width = w end
+function Region:SetHeight(h) self.height = h end
+function Region:SetAlpha(a) self.alpha = a end
+function Region:GetAlpha() return self.alpha or 1 end
+function Region:SetScale(scale) self.scale = scale end
+function Region:Show() self.shown = true end
+function Region:Hide() self.shown = false end
+function Region:SetShown(shown) self.shown = not not shown end
+function Region:IsShown() return self.shown ~= false end
+-- Font strings
+function Region:SetText(text) self.text = text end
+function Region:GetText() return self.text end
+function Region:SetTextColor(r, g, b) self.textColor = { r, g, b } end
+function Region:SetJustifyH(justify) self.justify = justify end
+function Region:SetMaxLines(n) self.maxLines = n end
+function Region:SetFontObject(font) self.font = font end
+function Region:SetWordWrap(wrap) self.wordWrap = wrap end
+-- Textures
+function Region:SetTexture(t) self.texture = t end
+function Region:SetAtlas(atlas) self.atlas = atlas end
+function Region:SetColorTexture(r, g, b, a) self.color = { r, g, b, a or 1 } end
+function Region:SetVertexColor(r, g, b, a) self.color = { r, g, b, a or 1 } end
+function Region:SetRotation(radians) self.rotation = radians end
+function Region:SetAllPoints(relativeTo) self.allPoints = relativeTo or true end
+-- Lines
+function Region:SetStartPoint(point, relativeTo, x, y) self.from = { point = point, relativeTo = relativeTo, x = x, y = y } end
+function Region:SetEndPoint(point, relativeTo, x, y) self.to = { point = point, relativeTo = relativeTo, x = x, y = y } end
+function Region:SetThickness(thickness) self.thickness = thickness end
+
+client.fontStrings = {}
+function client.NewRegion(kind, parent, template)
+	local region = setmetatable({ kind = kind, parent = parent, template = template, points = {} }, Region)
+	if kind == "FontString" then table.insert(client.fontStrings, region) end
+	return region
+end
+
+local Frame = setmetatable({}, { __index = Region })
+Frame.__index = Frame
+function Frame:RegisterEvent(e) self.registered[e] = true end
+function Frame:UnregisterEvent(e) self.registered[e] = nil end
+function Frame:IsEventRegistered(e) return self.registered[e] == true end
+function Frame:SetScript(name, fn)
+	if name == "OnEvent" then self.onEvent = fn else self[name] = fn end
+end
+function Frame:CreateTexture(_, _, template) return client.NewRegion("Texture", self, template) end
+function Frame:CreateFontString(_, _, template) return client.NewRegion("FontString", self, template) end
+function Frame:CreateLine() return client.NewRegion("Line", self) end
+function Frame:SetFrameStrata(strata) self.strata = strata end
+function Frame:StartMoving() self.moving = true end
+function Frame:StopMovingOrSizing() self.moving = false end
+for _, name in ipairs({ "SetClampedToScreen", "SetMovable", "SetDontSavePosition", "EnableMouse", "RegisterForDrag",
+                        "SetIgnoreParentScale" }) do
+	Frame[name] = function() end
+end
+
+function CreateFrame(_, name, parent)
+	local frame = setmetatable({ registered = {}, points = {}, parent = parent }, Frame)
 	table.insert(client.frames, frame)
+	if name then _G[name] = frame end
 	return frame
 end
+
+UIParent = CreateFrame("Frame", "UIParent")
 
 function client.Fire(event, ...)
 	for _, frame in ipairs(client.frames) do
@@ -98,7 +171,8 @@ function client.Tick()
 	wipe(client.openedThisFrame)
 	for _, fn in ipairs(client.tickers) do fn() end
 	for _, frame in ipairs(client.frames) do
-		if frame.OnUpdate then frame.OnUpdate(frame, 0.5) end
+		-- Like the client: OnUpdate only runs while the frame is shown.
+		if frame.OnUpdate and frame:IsShown() then frame.OnUpdate(frame, 0.5) end
 	end
 end
 
@@ -113,12 +187,19 @@ end
 
 function debugprofilestop() return os.clock() * 1000 end
 
+-- Unix time follows the virtual clock (client.now); a test can move client.epoch.
+client.epoch = os.time()
+function time() return math.floor(client.epoch + client.now) end
+date = os.date
+function GetRealmName() return "Firemaw" end
+
 function client.Wait(ticks)
 	for _ = 1, ticks or 3 do client.Tick() end
 end
 
 -- Load the addon the way the client does: the TOC's Lua files in order, shared namespace.
 function client.LoadAddon()
+	wipe(itemRefCallbacks) -- a /reload starts with a fresh registry
 	local ns = {}
 	for line in io.lines(ADDONS .. "/WowMCP/WowMCP.toc") do
 		if line:match("%.lua$") then

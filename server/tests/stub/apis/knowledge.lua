@@ -1,8 +1,5 @@
 -- Profession windows (C_TradeSkillUI), vendors (the merchant API) and item names (Knowledge.lua).
 
-if not GetRealmName then function GetRealmName() return "Firemaw" end end
-if not time then time = os.time end
-
 -- Item names the client knows. Like the real one, it has to load an item's data first: the
 -- first lookup of an item it hasn't seen returns nil and loads it.
 client.itemNames = {

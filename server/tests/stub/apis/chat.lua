@@ -1,7 +1,5 @@
 -- Typing in the chat box and the clock (Chat.lua, Stream.lua posts).
 
-time = time or os.time
-
 -- Runs a line typed into the chat box: like the client, finds the slash command by the
 -- SLASH_<key><n> strings of each SlashCmdList entry.
 function client.Type(line)

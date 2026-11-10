@@ -6,9 +6,6 @@ Enum.BagIndex = {
 }
 Enum.BankType = { Character = 0, Guild = 1, Account = 2 }
 
-time = os.time
-function GetRealmName() return "Firemaw" end
-
 -- Item data. An uncached item has no name anywhere until something asks for it; then it
 -- loads a moment later, as on the real client.
 client.items = {

@@ -2,8 +2,6 @@
 -- after map.lua: adds a few zones to its maps, and the C_Map calls the world map uses to
 -- find zones.
 
-if not GetRealmName then function GetRealmName() return "Firemaw" end end
-if not time then time = os.time end
 Enum.FlightPathFaction = { Neutral = 0, Horde = 1, Alliance = 2 }
 Enum.FlightPathState = { Current = 0, Reachable = 1, Unreachable = 2 }
 Enum.UIMapSystem = Enum.UIMapSystem or { World = 0, Taxi = 1, Adventure = 2, Minimap = 3 }
