@@ -3,6 +3,7 @@ here: a Python function, or a small Python script standing in for the agent comm
 
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
@@ -301,3 +302,13 @@ def test_chat_lines():
     assert lines[0] == "- Item 0. - Item 1. - Item 2. - Item 3. - Item 4."
     assert lines[-1].endswith(" …") and "Item 29" not in lines[-1]
     assert chat_lines("  \n") == []
+
+
+def test_only_one_bridge_per_game(tmp_path):
+    from wow_mcp import bridge
+
+    first = bridge.claim(tmp_path)
+    with pytest.raises(SystemExit, match=rf"already answering for this game \(pid {os.getpid()}\)"):
+        bridge.claim(tmp_path)
+    first.close()
+    bridge.claim(tmp_path).close()  # free again once the first one stops

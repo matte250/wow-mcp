@@ -11,6 +11,7 @@ gets the prompt on stdin and prints the answer.
 
 import argparse
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -322,6 +323,24 @@ class Bridge:
             log.exception("couldn't show this in game: %s", text)
 
 
+def claim(addon_dir: Path):
+    """Make this the only bridge answering for this game; two would each answer every question.
+    Returns the lock, which is held as long as the returned file stays open."""
+    lock = open(addon_dir / ".bridge.lock", "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.seek(0)
+        pid = lock.read().strip()
+        lock.close()
+        raise SystemExit(f"Another wow-mcp-bridge is already answering for this game{f' (pid {pid})' if pid else ''}.")
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()))
+    lock.flush()
+    return lock
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Answers the questions asked in World of Warcraft with /ai, using an agent with the wow tools."
@@ -343,6 +362,7 @@ def main() -> None:
     addons_dir = Path(args.addons_dir).expanduser()
     if not (addons_dir / ADDON / "out").is_dir():
         sys.exit(f"{ADDON} isn't installed in {addons_dir}. Run wow-mcp-install first.")
+    lock = claim(addons_dir / ADDON)  # noqa: F841 (held until exit)
     os.environ[ADDONS_DIR_ENV] = str(addons_dir)  # where publish_message sends answers
     command = shlex.split(args.agent) if args.agent else claude_command(args.model)
     if not command or not shutil.which(command[0]):
