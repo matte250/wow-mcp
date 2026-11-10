@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from wow_mcp import app, game
+from wow_mcp import app, battlenet, game, online_auctions
 from wow_mcp.install import install
 
 HERE = Path(__file__).parent
@@ -43,6 +43,21 @@ BUILD_INFO = (
                                  ("5.5.4.70631", "wow_classic"), ("1.60.1.70862", "wowf")]
     )
 )
+
+
+@pytest.fixture(autouse=True)
+def no_online_prices(tmp_path, monkeypatch):
+    """Keep every test away from the player's Blizzard API credentials and online price cache
+    (battlenet.py, online_auctions.py): config and cache folders of its own, with nothing in them."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    for key in battlenet.KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    def offline(config, region):
+        raise AssertionError("a test reached for Blizzard's real API")
+
+    monkeypatch.setattr(online_auctions, "make_client", offline)
 
 
 @pytest.fixture

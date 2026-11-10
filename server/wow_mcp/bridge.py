@@ -12,6 +12,10 @@ follow-up questions work. They're kept in a file (History), so a restart keeps t
 The default agent is headless Claude Code (`claude -p`) with this MCP server and web lookups,
 run apart from the user's own Claude Code settings. Any other command works too (--agent): it
 gets the prompt on stdin and prints the answer.
+
+Being long-lived, it also fetches each new online snapshot of the player's auction house (about
+hourly) when Blizzard API credentials are set up, so price history builds up even when nobody asks
+(online_auctions.py; --no-auction-refresh turns it off).
 """
 
 import argparse
@@ -391,12 +395,14 @@ class Bridge:
     """Receives questions from the game and answers them one at a time."""
 
     def __init__(self, addons_dir: Path, agent: Agent, publish: Callable[..., int] = publish_message,
-                 sender: str = SENDER, history: History | None = None):
+                 sender: str = SENDER, history: History | None = None,
+                 background: Sequence[Callable[[threading.Event], None]] = ()):
         self.out_dir = addons_dir / ADDON / "out"
         self.agent = agent
         self.publish = publish
         self.sender = sender
         self.history = History(addons_dir / ADDON / HISTORY_FILE) if history is None else history
+        self.background = background  # jobs that run until `stop` (the online auction refresh)
         # Resets wait their turn too: a question asked before /ai new belongs to the old conversation.
         self.questions: queue.Queue[Question | Reset] = queue.Queue(MAX_WAITING)
         self.ready = threading.Event()  # watching for questions
@@ -405,6 +411,8 @@ class Bridge:
     def serve(self) -> None:
         """Receive and answer questions until `stop` is set."""
         threading.Thread(target=self._work, name="wow-mcp-bridge-agent", daemon=True).start()
+        for job in self.background:
+            threading.Thread(target=job, args=(self.stop,), name="wow-mcp-bridge-background", daemon=True).start()
         with stream.Receiver(self.out_dir) as receiver:
             self.ready.set()
             while not self.stop.is_set():
@@ -497,6 +505,20 @@ def claim(addon_dir: Path):
     return lock
 
 
+def auction_refresh(addons_dir: Path, off: bool = False) -> list[Callable[[threading.Event], None]]:
+    """The hourly online auction refresh (online_auctions.py) as a background job, when there are credentials."""
+    from wow_mcp import online_auctions
+
+    if off:
+        log.info("Online auction prices: not refreshed in the background (--no-auction-refresh)")
+        return []
+    if not online_auctions.enabled():
+        log.info("Online auction prices: off, no Blizzard API credentials (~/.config/wow-mcp/battlenet.env)")
+        return []
+    log.info("Online auction prices: refreshed about every hour")
+    return [lambda stop: online_auctions.refresh_loop(addons_dir, stop)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Answers the questions asked in World of Warcraft with /ai, using an agent with the wow tools."
@@ -515,6 +537,9 @@ def main() -> None:
                         "work; 0 for none (default: %(default)s)")
     parser.add_argument("--history-minutes", type=float, default=HISTORY_MINUTES, metavar="MINUTES",
                         help="only include exchanges from the last this many minutes (default: %(default)s)")
+    parser.add_argument("--no-auction-refresh", action="store_true",
+                        help="don't fetch online auction prices every hour (on when ~/.config/wow-mcp/battlenet.env "
+                        "has Blizzard API credentials), which builds up their price history")
     args = parser.parse_args()
     if not args.addons_dir:
         parser.error(f"pass --addons-dir or set {ADDONS_DIR_ENV}")
@@ -536,9 +561,11 @@ def main() -> None:
         sys.exit("Can't show answers in game: tools/messages.py has no publish_message.")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.getLogger("httpx2").setLevel(logging.WARNING)  # a line per request otherwise
     agent = CommandAgent(command, addons_dir, args.timeout)
     history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
-    bridge = Bridge(addons_dir, agent, history=history)
+    background = auction_refresh(addons_dir, args.no_auction_refresh)
+    bridge = Bridge(addons_dir, agent, history=history, background=background)
     signal.signal(signal.SIGTERM, lambda *_: bridge.stop.set())
     log.info("Answering /ai questions from %s with %s", addons_dir, command[0])
     try:

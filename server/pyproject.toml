@@ -3,12 +3,13 @@ name = "wow-mcp"
 version = "0.1.0"
 description = "MCP server that lets AI agents show things in World of Warcraft via the WowMCP addon"
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.3,<3"]
+dependencies = ["mcp>=2.3,<3", "httpx2>=2.16"]
 
 [project.scripts]
 wow-mcp = "wow_mcp.server:main"
 wow-mcp-install = "wow_mcp.install:main"
 wow-mcp-bridge = "wow_mcp.bridge:main"
+wow-mcp-auctions = "wow_mcp.online_auctions:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

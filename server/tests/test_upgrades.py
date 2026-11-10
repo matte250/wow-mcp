@@ -14,12 +14,14 @@ or feet. On offer (stats made up, prices per item):
 
 import asyncio
 import json
+import time
 import zlib
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from wow_mcp import kinds
+from wow_mcp import kinds, online_auctions
+from wow_mcp.online_auctions import Listing
 from wow_mcp.tools import items, upgrades
 from wow_mcp.transport import to_lua
 
@@ -651,6 +653,48 @@ def test_queries_and_retries(fake_game, monkeypatch):
     monkeypatch.setattr(items, "request", old)
     with pytest.raises(ToolError, match="doesn't send upgrades yet"):
         find(slots=["back"])
+
+
+def test_online_prices(fake_game, monkeypatch):
+    """With Blizzard's API set up, auction prices newer than the game's come from the online snapshot; never for one
+    random suffix."""
+    by_slot = {s.slot: s for s in find().slots}
+    legs = by_slot["legs"].upgrades[0].item_id
+    now = int(time.time())
+    house = online_auctions.House(110, "Alliance Auction House")
+    asked = []
+
+    def lookup(items, realm=None, faction=None, seen=(), with_history=False, addons_dir=None, now=None):
+        asked.extend(items)
+        return online_auctions.Prices(True, house, "matched", now_ - 600, now_ - 86400, notes=["A note."], items={
+            80015: online_auctions.ItemPrice(80015, now_ - 600, Listing(400000, 2, 2)),
+            4253: online_auctions.ItemPrice(4253, now_ - 5 * 3600, Listing(1, 9, 9)),  # older than the game's
+            legs: online_auctions.ItemPrice(legs, now_ - 600, Listing(1234, 9, 9, suffixes=3)),
+        })
+
+    now_ = now
+    monkeypatch.setattr(online_auctions, "lookup", lookup)
+    result = find()
+    assert {80015, 4253, legs} <= set(asked)
+    by_slot = {s.slot: s for s in result.slots}
+    gauntlets, gloves = by_slot["hands"].upgrades[:2]
+    assert [o.cost for o in gauntlets.get_it] == ["40g 0s 0c on the auction house (2 listed, online 10 minutes ago)"]
+    assert gauntlets.get_it[0].price == 400000 and gauntlets.get_it[0].affordable is False
+    assert gloves.get_it[0].cost == "95s 0c on the auction house (1 listed, full scan 2 hours ago)", "the game's is newer"
+    offer = by_slot["legs"].upgrades[0].get_it[0]
+    assert offer.cost == ("from 12s 34c on the auction house, the cheapest of any random suffix (9 listed, online 10 "
+                          "minutes ago): check the listings for the suffix's stats")
+    assert "online prices of Alliance Auction House 110 (snapshot 10 minutes ago) for what was found" in result.searched
+    assert "A note." in result.note
+
+    # One random suffix's price only comes from the game; a plain item online seen with suffixes is marked random.
+    online = {5000: online_auctions.ItemPrice(5000, now - 600, Listing(100, 5, 5, suffixes=4))}
+    raw = {"id": 5000, "suffix": "-12:345", "name": "Bandit Gloves of the Monkey", "vs": [],
+           "offers": [{"src": "auction", "price": 900, "at": now - 7200, "listed": 1}]}
+    suffix = upgrades._candidate(raw, {"agility": 1.0}, {}, 20, 1000, online)
+    assert [o.price for o in suffix.get_it] == [900] and suffix.random_suffix.startswith("this exact suffix")
+    plain = upgrades._candidate({**raw, "suffix": None}, {"agility": 1.0}, {}, 20, 1000, online)
+    assert [o.price for o in plain.get_it] == [100] and plain.random_suffix.startswith("unknown: random suffix")
 
 
 def test_find_upgrades_live(live_game):

@@ -6,9 +6,12 @@ so the search runs in game. The server first reads the character (class, level, 
 request kind STATE) to pick stat weights, then publishes the query (one live-update slot; none when the same query is
 still answered) and asks until the game's answer is there: per slot, the equipped gear and the best candidates the
 character can use, with their stats and where to get them. Scores and their explanations are worked out here, from
-the game's stats and the same weights the game ranked by.
+the game's stats and the same weights the game ranked by. When Blizzard's API is set up, the auction prices of what
+was found are brought up to date from the online snapshot (online_auctions.py) where it's newer than the game's;
+never for one random suffix, whose own price only the game has.
 """
 
+import asyncio
 import math
 import re
 import time
@@ -18,8 +21,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from wow_mcp import kinds
-from wow_mcp.app import as_list, guidance, request, section, tool, transport
+from wow_mcp import kinds, online_auctions
+from wow_mcp.app import addons_dir, as_list, guidance, request, section, tool, transport
 from wow_mcp.tools import items
 from wow_mcp.tools.auction import _ago
 from wow_mcp.tools.inventory import SLOTS, STAT_NAMES, Quality, Stats, quality, stat_name, stats
@@ -31,10 +34,10 @@ guidance(
     "player's log and the vendors they've visited, keeps what this character can use, and scores it with the game's "
     "own stats; never take item stats from websites for this. Mention free quest rewards first, then what's cheap. "
     "Compare prices with the player's money (in the result; affordable is false when they can't pay), and say how "
-    "old auction prices are. An upgrade the player is a level or two short of can go in a plan or goal ('buy at "
-    "27'). A random-suffix item ('of the Bear') is priced and scored per suffix; one marked as a random suffix with "
-    "unknown stats needs the player to check the listings. If the player says how they play (e.g. caster gear for an "
-    "Elemental Shaman), pass weights.",
+    "old auction prices are (online ones are at most about an hour old). An upgrade the player is a level or two "
+    "short of can go in a plan or goal ('buy at 27'). A random-suffix item ('of the Bear') is priced and scored per "
+    "suffix; one marked as a random suffix with unknown stats needs the player to check the listings. If the player "
+    "says how they play (e.g. caster gear for an Elemental Shaman), pass weights.",
     order=47,
 )
 
@@ -255,6 +258,21 @@ def _why(weights: dict[str, float], terms: dict[str, float], replaced: dict[str,
     return f"{', '.join(parts) or 'the same stats'} vs {what}"
 
 
+def _online_offer(online: online_auctions.ItemPrice, money: int | None, random: bool) -> Offer | None:
+    """The online auction price of an item (never of one suffix: the API numbers suffixes its own way)."""
+    listing = online.listing
+    if not listing or listing.price is None:
+        return None
+    seen = f"{listing.quantity} listed, online {_ago(online.at)}"
+    if random:
+        cost = (f"from {format_money(listing.price)} on the auction house, the cheapest of any random suffix ({seen}): "
+                "check the listings for the suffix's stats")
+    else:
+        cost = f"{format_money(listing.price)} on the auction house ({seen})"
+    return Offer(source="auction house", cost=cost, price=listing.price,
+                 affordable=listing.price <= money if money is not None else None)
+
+
 def _offer(raw: dict, money: int | None, random: bool) -> Offer | None:
     """Where to get an item; random: it has random suffixes and no suffix of it was seen, so an auction price is the
     cheapest of any."""
@@ -297,7 +315,8 @@ def _equipped(raw: dict, weights: dict[str, float]) -> Equipped:
     )
 
 
-def _candidate(raw: dict, weights: dict[str, float], worn: dict[int, dict], level: int, money: int | None) -> Candidate:
+def _candidate(raw: dict, weights: dict[str, float], worn: dict[int, dict], level: int, money: int | None,
+               online: dict[int, online_auctions.ItemPrice] | None = None) -> Candidate:
     terms = _terms(raw, raw.get("loc"))
     replaced: dict[str, float] = {}
     names = []
@@ -308,8 +327,22 @@ def _candidate(raw: dict, weights: dict[str, float], worn: dict[int, dict], leve
             names.append(worn[slot].get("name") or f"item {worn[slot]['id']}")
     what = " and ".join(names) if names else "an empty slot"
     raw_offers = [r for r in as_list(raw.get("offers")) if isinstance(r, dict)]
-    random = not raw.get("suffix") and bool(raw.get("random") or any(r.get("random") for r in raw_offers))
-    offers = [o for o in (_offer(r, money, random) for r in raw_offers) if o]
+    # One suffix's own stats and price come only from the game; online, a whole item's price.
+    price_online = None if raw.get("suffix") else (online or {}).get(raw["id"])
+    listed_online = price_online.listing if price_online else None
+    random = not raw.get("suffix") and bool(raw.get("random") or any(r.get("random") for r in raw_offers)
+                                            or (listed_online and listed_online.suffixes))
+    offers = None
+    if price_online and listed_online and listed_online.price is not None:
+        # Whichever auction price is newer: the online snapshot's or the game's own.
+        game_newer = any(r.get("src") == "auction" and int(r.get("at") or 0) > price_online.at for r in raw_offers)
+        kept = [r for r in raw_offers if r.get("src") != "auction" or game_newer]
+        offers = [o for o in (_offer(r, money, random) for r in kept) if o]
+        if not game_newer and (offer := _online_offer(price_online, money, random)):
+            offers.append(offer)
+        offers.sort(key=lambda o: (o.source != "quest reward", o.price or 0))  # as the game sorts them
+    if offers is None:
+        offers = [o for o in (_offer(r, money, random) for r in raw_offers) if o]
     suffix = None
     if raw.get("suffix"):
         suffix = "this exact suffix: its own stats and price"
@@ -415,6 +448,16 @@ async def find_upgrades(
             "with the same arguments in a few seconds: it picks up the same search."
         )
     worn = {e["slot"]: e for e in as_list(data.get("equipped")) if isinstance(e, dict) and isinstance(e.get("id"), int)}
+    found = [c for raw in as_list(data.get("slots")) if isinstance(raw, dict) for c in as_list(raw.get("items"))
+             if isinstance(c, dict) and isinstance(c.get("id"), int)]
+    online = online_auctions.Prices()
+    if "auction" in query["sources"] or item_ids:
+        try:
+            online = await asyncio.to_thread(online_auctions.lookup, [c["id"] for c in found if not c.get("suffix")],
+                                             addons_dir=addons_dir())
+        except Exception as e:  # noqa: BLE001 (online prices never stop the search)
+            online.notes.append(f"Online prices failed ({type(e).__name__}).")
+    priced = online.items if online.house else {}
     groups = []
     for raw in as_list(data.get("slots")):
         if not isinstance(raw, dict):
@@ -422,7 +465,7 @@ async def find_upgrades(
         slot_numbers = {"finger": (11, 12), "trinket": (13, 14)}.get(raw.get("slot"))
         number = next((n for n, name in SLOTS.items() if name == raw.get("slot")), None)
         equipped = [_equipped(worn[n], chosen) for n in (slot_numbers or (number,)) if n in worn]
-        upgrades = [_candidate(c, chosen, worn, level, money) for c in as_list(raw.get("items"))
+        upgrades = [_candidate(c, chosen, worn, level, money, priced) for c in as_list(raw.get("items"))
                     if isinstance(c, dict) and isinstance(c.get("id"), int)]
         note = None
         if raw.get("twoHand"):
@@ -447,6 +490,10 @@ async def find_upgrades(
         searched.append("vendors the player has visited")
     if item_ids:
         searched.append("the items asked about")
+    if online.house and online.at:
+        searched.append(f"online prices of {online.house.label} (snapshot {_ago(online.at)}) for what was found")
+    if online.enabled:
+        notes += online.notes
     if data.get("questsLoading"):
         notes.append("Some quests' rewards were still loading in game; ask again for them.")
     if data.get("notLoaded"):
