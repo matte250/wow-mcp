@@ -24,6 +24,7 @@ only by the integrator, who merges the workstreams one by one.
 | W16 | Quest rewards (XP, money, items) | `Quests.lua` | `tools/quests.py` | kind `QUESTS` |
 | W17 | Plans: step checklists that track themselves | `Plans.lua` | `tools/plans.py` | payload key `plan`, STATE section `plan` |
 | W18 | Goals: background targets that point out chances | `Goals.lua` | `tools/goals.py` | payload key `goals`, STATE section `goals` |
+| W20 | Mail as last seen, new mail | `Inventory.lua` | `tools/inventory.py` | kind `ITEMS`, section `mail` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -77,6 +78,10 @@ startup, so after the one restart for this restructure, every feature only needs
   conditions anywhere (goals use them for targets; `{goal: id}` is a condition too).
   `ns.Goals.Status` / `Items` / `AuctionPrices` / `Money` and `ns.Auction.Price` / `Cost` / `IsOpen`.
   Guidance orders 12-14 are plans, goals and buy-vs-farm.
+- **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
+  expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
+  fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
+  newMail }`.
 - **Auction data**: `WowMCPDB.auction[realm] = { items, scan = { [id] = "price,listed,auctions,scan#" },
   scans, current, tracked }` (the full-scan table is never pruned); `WowMCPDB.auctionScan.asked` is
   account-wide, the time of the last full scan request. `ns.Auction.Price(id)` returns `src`
