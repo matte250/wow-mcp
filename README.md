@@ -90,6 +90,8 @@ Every tool that reads the game also returns the game version, so agents look thi
 |---|---|
 | Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
 | Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown), `get_plan_progress`, `clear_plan` |
+| Goals | `set_goals` (background goals next to the plan that track themselves and point out chances: zones and areas, a tooltip line on mobs, vendors and the auction house selling the item; a plan step can wait for one), `get_goals`, `clear_goals` |
+| Auction house | `get_auction_prices` (cheapest buyout, how many listed, when; looked up while you're at the auction house), `watch_auction_prices` |
 | Routes | `show_route` (numbered stops, lines, navigator arrow; a plan's current step uses the same navigator), `clear_route` |
 | Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
 | Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
@@ -100,6 +102,10 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
 | Diagnostics | `get_status` (is the addon up to date, live updates, slots left; says when to /reload or reinstall) |
+
+While the auction house shows its Browse view, the addon looks up what your goals and plan need, one
+search at a time and at most 50 a minute, and waits while you look at an item or sell, so it never
+changes what you see.
 
 Zone names are resolved in game against the client's own map list, so the agent doesn't need
 uiMapIDs. Unknown zones are reported in your chat.
@@ -124,6 +130,8 @@ the tools say so instead of failing silently.
 | `/mcp` | List the current markers |
 | `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |
 | `/mcp plan [show, hide, next, prev, <n>, reset, clear]` | The plan window. Click a step to make it current; right-click it or click its box to tick or un-tick it; the wheel scrolls; − collapses |
+| `/mcp goals [show, hide, mute <n>, unmute <n>, clear [<n>, all]]` | The goals list (docks under the plan window): right-click a goal to mute it; − collapses; `clear` removes the done ones |
+| `/mcp prices` | At the auction house: look the prices up again. Elsewhere: list the last ones seen |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
 | `/mcp areas [show, clear]` | The highlighted areas |
 | `/mcp messages` | Repeat the last messages from your AI |
