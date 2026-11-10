@@ -23,7 +23,7 @@ Addons can't use the network or read files while the game runs. Two client behav
 reach the disk on demand (technique from [wow-ai](https://github.com/chelinho139/wow-ai), measured on a live Forever client):
 
 1. `C_AddOns.LoadAddOn()` reads a load-on-demand addon's Lua from disk when it's called.
-   The installer creates 100 slot addons (`WowMCP_S001`-`S100`, grouped under WowMCP in the
+   The installer creates 300 slot addons (`WowMCP_S001`-`S300`, grouped under WowMCP in the
    addon list). On each update the server writes the full current state into every slot.
 2. `PlaySoundFile()` reads a sound file again on every call until it has once been valid.
    The addon plays the next `sig/NNNN.wav` twice a second and checks `C_Sound.IsPlaying()` on
@@ -43,7 +43,7 @@ Nothing is drawn or heard, and the game doesn't have to be on screen. Sending is
 1.5 ms of frame time per frame: each open costs about 0.1 ms, and the client drops sound starts
 beyond about 256 per frame.
 
-Limits: each live update uses one slot, so you get 100 per UI session (`/reload` resets them).
+Limits: each live update uses one slot, so you get 300 per UI session (`/reload` resets them).
 Updates that arrive during combat are applied when combat ends. If the game's sound is fully
 disabled, the doorbell can't work, so live updates turn off and new markers show after `/reload`.
 The addon checks this at login.
@@ -63,35 +63,58 @@ claude mcp add --scope user wow \
 Then **fully quit and restart WoW once**. The game only discovers new addon files at startup.
 Re-run the installer after changing the addon code. That only needs a `/reload`, unless it reports new files.
 
+## Asking from inside the game: `/ai`
+
+Type `/ai <question>` (or `/ask`) in WoW chat. The question goes to `wow-mcp-bridge`, a small
+background service. It runs Claude Code headless with these tools and shows the answer in your
+chat, with map markers when useful. Shift-clicked item links work.
+
+```sh
+cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_forever_/Interface/AddOns"
+```
+
+To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
+two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
+`journalctl --user -u wow-mcp-bridge -f`. `--model`, `--timeout` and `--agent` change how it answers.
+
 ## Tools
 
-| Tool | Does |
-|---|---|
-| `show_on_map(markers, title?, open_map?, set_waypoint?)` | Marks places. Each marker has `zone` (name as shown in game), `x`/`y` (0-100, as on Wowhead), `label`, optional `note` and `map_id`. Replaces earlier markers. |
-| `clear_map()` | Removes the markers and the waypoint they set. |
-| `get_player_location()` | Zone, subzone, continent, coordinates, uiMapID, faction, race, class, level, whether in an instance. |
-| `get_professions()` | Professions and secondary skills with skill level and current cap. |
+Every tool that reads the game also returns the game version, so agents look things up for the right one.
 
-`show_on_map(..., nearest_first=true)` lets the game order the markers by distance from you,
-so the waypoint goes to the closest one.
+| Area | Tools |
+|---|---|
+| Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
+| Routes | `show_route` (numbered stops, lines, navigator arrow), `clear_route` |
+| Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
+| Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
+| Character | `get_character_stats` (money, XP, rested, hearthstone, /played), `get_reputations` |
+| Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession), `get_vendor_items` (vendors you've visited) |
+| Items | `get_inventory` (bags, equipment with durability, `include_bank` for the bank as last seen), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
+| Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress) |
+| Travel | `get_flight_paths` (known flight masters) |
+| Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
+| Diagnostics | `get_status` (is the addon up to date, live updates, slots left; says when to /reload or reinstall) |
 
 Zone names are resolved in game against the client's own map list, so the agent doesn't need
 uiMapIDs. Unknown zones are reported in your chat.
 
 The agent is told which game version you're on, so it looks up the right data. That's e.g.
 "World of Warcraft: Forever 1.60.1 (build 70862, EU region, enUS client)", worked out at startup
-from the install's `.build.info` and the running WoW processes, and also returned by
-`get_player_location`. If you're running a different WoW client than the one the addon is
-installed for (e.g. Anniversary), the tools say so instead of failing silently.
+from the install's `.build.info` and the running WoW processes. It's also told which sites cover
+that version. If you're running a different WoW client than the one the addon is installed for,
+the tools say so instead of failing silently.
 
 ## In game
 
 | Command | Does |
 |---|---|
+| `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running) |
 | `/mcp` | List the current markers |
-| `/mcp show` | Open the map on them |
-| `/mcp <n>` | Navigate to marker n |
-| `/mcp clear` | Hide them |
+| `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |
+| `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
+| `/mcp areas [show, clear]` | The highlighted areas |
+| `/mcp messages` | Repeat the last messages from your AI |
+| `/mcp reminders` | Reminders waiting to fire |
 | `/mcp status` | Live-update status and slots left |
 
 ## Development
