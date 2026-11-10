@@ -38,6 +38,12 @@ function PinFrame:SetSize(w, h) self.width, self.height = w, h end
 function PinFrame:Show() self.shown = true end
 function PinFrame:Hide() self.shown = false end
 function PinFrame:IsShown() return self.shown end
+function PinFrame:CreateLine()
+	local line = client.NewRegion("Line", self)
+	self.lines = self.lines or {}
+	table.insert(self.lines, line)
+	return line
+end
 
 MapCanvasPinMixin.GetMap = function(self) return self.owningMap end
 MapCanvasPinMixin.SetIgnoreGlobalPinScale = function(self, ignore) self.ignoreGlobalPinScale = ignore end

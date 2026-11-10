@@ -69,10 +69,18 @@ def test_areas_on_the_map(run_areas):
         assert(near(bank.x, 0.3) and near(bank.y, 40 / 300) and near(bank.width, 2 * 4 / 200 * 1002))
         assert(bank.Label.text == "" and near(bank.Fill.color[3], 1), "unlabelled, second palette colour")
 
-        -- Zooming in keeps the label's size on screen.
-        assert(boars.Label.scale == 1)
+        -- A light outline: a ring of lines on the circle's edge, in a lighter tint of its colour.
+        local ring, r = boars.Outline, boars.width / 2
+        assert(#ring == 48 and ring[1].from.point == "CENTER" and ring[1].from.relativeTo == boars)
+        assert(near(ring[1].from.x, r) and near(ring[1].from.y, 0))
+        assert(near(ring[13].from.x, 0) and near(ring[13].from.y, r), "a quarter of the way round")
+        assert(near(ring[48].to.x, r) and near(ring[48].to.y, 0), "closed")
+        assert(near(ring[1].color[2], 0x4d / 255 + (1 - 0x4d / 255) * 0.5) and ring[1].color[4] == 0.9)
+
+        -- Zooming in keeps the label's size and the outline's thickness on screen.
+        assert(boars.Label.scale == 1 and ring[1].thickness == 1.5)
         client.SetCanvasScale(2)
-        assert(boars.Label.scale == 0.5)
+        assert(boars.Label.scale == 0.5 and ring[1].thickness == 0.75)
 
         -- Kalimdor: same ground, smaller circles.
         WorldMapFrame:SetMapID(1414)

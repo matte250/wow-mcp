@@ -8,6 +8,8 @@ local Areas = {}
 
 local PIN_TEMPLATE = "WowMCPAreaPinTemplate"
 local FILL_ALPHA = 0.3
+-- The outline: a ring of short lines in a lighter tint of the colour, ~1.5 px on screen at any zoom.
+local OUTLINE_SEGMENTS, OUTLINE_WIDTH, OUTLINE_ALPHA, OUTLINE_LIGHTEN = 48, 1.5, 0.9, 0.5
 local LABEL_MIN_SIZE = 48 -- canvas units; smaller circles (e.g. on a continent map) only label on hover
 local PALETTE = {
 	{ 1, 0.3, 0.3 }, { 0.3, 0.6, 1 }, { 0.3, 0.9, 0.3 }, { 1, 0.8, 0.2 },
@@ -58,6 +60,20 @@ function Pin:OnLoad()
 	self:UseFrameLevelType("PIN_FRAME_LEVEL_MAP_HIGHLIGHT")
 	-- Sized in canvas units, so the circle covers the same ground at any zoom.
 	self:SetIgnoreGlobalPinScale(true)
+	self.Outline = {}
+	for i = 1, OUTLINE_SEGMENTS do self.Outline[i] = self:CreateLine(nil, "ARTWORK") end
+end
+
+-- The ring around a circle of the given size, centred on the pin.
+local function PlaceOutline(pin, size, c)
+	local r, step = size / 2, 2 * math.pi / OUTLINE_SEGMENTS
+	local light = function(v) return v + (1 - v) * OUTLINE_LIGHTEN end
+	for i, line in ipairs(pin.Outline) do
+		local a1, a2 = (i - 1) * step, i * step
+		line:SetStartPoint("CENTER", pin, r * math.cos(a1), r * math.sin(a1))
+		line:SetEndPoint("CENTER", pin, r * math.cos(a2), r * math.sin(a2))
+		line:SetColorTexture(light(c[1]), light(c[2]), light(c[3]), OUTLINE_ALPHA)
+	end
 end
 
 function Pin:OnAcquired(area, x, y, radius, onOwnMap)
@@ -67,14 +83,17 @@ function Pin:OnAcquired(area, x, y, radius, onOwnMap)
 	-- In canvas units; the canvas only changes size with the map, which refreshes the pins.
 	local size = 2 * radius * self:GetMap():GetCanvas():GetWidth()
 	self:SetSize(size, size)
+	PlaceOutline(self, size, c)
 	self.Label:SetText((onOwnMap or size >= LABEL_MIN_SIZE) and ns.Escape(area.label) or "")
 	self:OnCanvasScaleChanged()
 	self:SetPosition(x, y)
 end
 
--- The circle zooms with the map, the label stays the same size on screen.
+-- The circle zooms with the map; the label and the outline's thickness stay the same on screen.
 function Pin:OnCanvasScaleChanged()
-	self.Label:SetScale(1 / self:GetMap():GetCanvasScale())
+	local scale = self:GetMap():GetCanvasScale()
+	self.Label:SetScale(1 / scale)
+	for _, line in ipairs(self.Outline) do line:SetThickness(OUTLINE_WIDTH / scale) end
 end
 
 function Pin:OnMouseEnter()
