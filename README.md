@@ -77,6 +77,11 @@ To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/s
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
 `journalctl --user -u wow-mcp-bridge -f`. `--model`, `--timeout` and `--agent` change how it answers.
 
+It remembers your recent questions (by default the last 8 from the past hour), so follow-ups
+like "and the next one?" work. `/ai new` starts a fresh conversation. `--history` and
+`--history-minutes` change how much it remembers (`--history 0` turns it off). Only one bridge
+can answer for a game at a time; a second one refuses to start.
+
 ## Tools
 
 Every tool that reads the game also returns the game version, so agents look things up for the right one.
@@ -109,6 +114,7 @@ the tools say so instead of failing silently.
 | Command | Does |
 |---|---|
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running) |
+| `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |
 | `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
