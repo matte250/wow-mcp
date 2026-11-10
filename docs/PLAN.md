@@ -20,6 +20,7 @@ only by the integrator, who merges the workstreams one by one.
 | W12 | Item tooltip notes | `Tooltips.lua` | `tools/item_notes.py` | payload key `itemNotes` |
 | W13 | Version source hints | – | `tools/sources.py` | guidance only |
 | W14 | Status / version tool | `Status.lua` | `tools/status.py` | kind `STATUS` |
+| W15 | Item stats from the game | `Inventory.lua` | `tools/items.py`, `tools/inventory.py` | payload key `itemLookup`, kind `ITEM_DETAILS` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
 (W3 already has `test_quests.py` and `stub/apis/quests.lua`; W8 owns `test_stream.py` changes).
@@ -72,7 +73,8 @@ startup, so after the one restart for this restructure, every feature only needs
   The payload is rendered as Lua by `transport.to_lua`: dict keys must be Lua identifiers. For
   maps keyed by numbers (e.g. item IDs), send a list of records (`[{"item": 123, "text": ...}]`).
 - `kinds.py` has the kind numbers (must match `Requests.lua`): STATE 0, QUESTS 1, ITEMS 2,
-  REPUTATION 3, TRAVEL 4, KNOWLEDGE 5, STATUS 6; 7 is free (ask the integrator).
+  REPUTATION 3, TRAVEL 4, KNOWLEDGE 5, STATUS 6, ITEM_DETAILS 7. All eight are taken, so new data
+  goes in as a section of an existing kind (usually `STATE`).
 - `install.addon_build()` is the build ID of the addon source in the repo. The installer writes
   the same ID into the installed `Build.lua`.
 

@@ -94,7 +94,7 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
 | Character | `get_character_stats` (money, XP, rested, hearthstone, /played), `get_reputations` |
 | Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession), `get_vendor_items` (vendors you've visited) |
-| Items | `get_inventory` (bags, equipment with durability, `include_bank` for the bank as last seen), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
+| Items | `get_inventory` (bags, equipment with durability and stats, `include_bank` for the bank as last seen), `get_item_details` (stats and tooltip text of any item, read from the game), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
 | Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress) |
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
