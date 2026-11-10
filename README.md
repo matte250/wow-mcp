@@ -38,7 +38,8 @@ The other direction uses file opens. A request for the player's state rings a se
 doorbells (`req/`, which don't use slots). The addon collects the answer as a Lua table, serializes
 it to JSON and compresses it with zlib (both built into the client). Then it "plays" a sequence of
 empty files `out/000.wav`–`out/fff.wav`, where each file name is 12 bits of the message. The client
-opens each file on disk. The server watches that folder with `inotify` and reads the sequence back.
+opens each file on disk. The server watches that folder (`inotify` on Linux, oplocks on Windows) and reads
+the sequence back.
 Nothing is drawn or heard, and the game doesn't have to be on screen. Sending is paced at about
 1.5 ms of frame time per frame: each open costs about 0.1 ms, and the client drops sound starts
 beyond about 256 per frame.
@@ -63,6 +64,24 @@ claude mcp add --scope user wow \
 Then **fully quit and restart WoW once**. The game only discovers new addon files at startup.
 Re-run the installer after changing the addon code. That only needs a `/reload`, unless it reports new files.
 
+### Windows
+
+The same, in PowerShell (the game on Windows, or on Linux under Wine or Proton: both work):
+
+```powershell
+cd server
+uv run wow-mcp-install "D:\World of Warcraft\_forever_\Interface\AddOns"
+claude mcp add --scope user wow `
+  -e "WOW_MCP_ADDONS_DIR=D:\World of Warcraft\_forever_\Interface\AddOns" `
+  -- uv run --directory "$PWD" wow-mcp
+```
+
+Windows can't report file opens the way Linux's `inotify` does, so the server holds an oplock on each
+`out/` file instead and is told when the game opens one (`server/wow_mcp/opens_windows.py`). One small
+background process per game folder does that for every MCP server and the bridge. It starts on demand,
+needs no administrator rights, and exits after five minutes without use. The game folder must be on an
+NTFS drive.
+
 ## Asking from inside the game: `/ai`
 
 Type `/ai <question>` (or `/ask`) in WoW chat, or just type in the **AI** chat tab. The question goes
@@ -83,6 +102,10 @@ cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_for
 To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
 `journalctl --user -u wow-mcp-bridge -f`. `--model`, `--timeout` and `--agent` change how it answers.
+
+On Windows, run the same command in a terminal you leave open while you play. To start it at logon instead,
+make a Task Scheduler task that runs `uv` with the arguments
+`run --directory <checkout>\server wow-mcp-bridge --addons-dir "<AddOns folder>"`.
 
 It remembers your recent questions (by default the last 8 from the past hour), so follow-ups
 like "and the next one?" work. `/ai new` starts a fresh conversation. `--history` and
@@ -192,7 +215,7 @@ Layout: one file per feature on each side, plugged into small registries.
   can ask for), `Stream.lua` (sending to the server), then one file per feature (`Map.lua`,
   `Player.lua`, `Quests.lua`, ...).
 - `server/wow_mcp/`: `app.py` (shared helpers), `item_text.py` (the item markup, shared by the tools and the bridge), `tools/` (one module per feature, picked up
-  automatically), `transport.py` / `stream.py` (the two directions), `battlenet.py` (Blizzard's API), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
+  automatically), `transport.py` / `stream.py` (the two directions; `opens_windows.py` is how Windows sees file opens, `locking.py` the file locks of both systems), `battlenet.py` (Blizzard's API), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
 - `server/tests/`: `stub/client.lua` runs the addon in Lua, with game APIs in `stub/apis/` (one file
   per area). There's one `test_<feature>.py` per feature, and `conftest.py` has the fixtures
   (`run_client` for scripted sessions, `live_game` for end-to-end runs against the real tools).

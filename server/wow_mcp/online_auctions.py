@@ -18,7 +18,6 @@ Single items and commodities are separate snapshots, as the API has them.
 
 import argparse
 import contextlib
-import fcntl
 import json
 import logging
 import math
@@ -36,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from wow_mcp import battlenet, game
+from wow_mcp import battlenet, game, locking
 from wow_mcp.battlenet import BattleNetError
 from wow_mcp.install import ADDONS_DIR_ENV
 from wow_mcp.transport import ADDON
@@ -721,17 +720,15 @@ class Online:
         with open(self.store.path.with_suffix(".lock"), "a") as lock:
             deadline = time.monotonic() + LOCK_WAIT
             while True:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if locking.acquire(lock, blocking=False):
                     break
-                except BlockingIOError:
-                    if time.monotonic() > deadline:
-                        raise BattleNetError("Another wow-mcp process is still fetching auction data.") from None
-                    time.sleep(0.2)
+                if time.monotonic() > deadline:
+                    raise BattleNetError("Another wow-mcp process is still fetching auction data.")
+                time.sleep(0.2)
             try:
                 yield
             finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+                locking.release(lock)
 
     def due(self, house: int, kind: str) -> bool:
         checked = self.store.checked(self.region, house, kind)

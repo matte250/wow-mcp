@@ -81,7 +81,11 @@ def addons(wow_root, tmp_path, monkeypatch):
     monkeypatch.setenv("WOW_MCP_ADDONS_DIR", str(addons_dir))
     monkeypatch.setenv("WOWMCP_PUBLISH", f"{sys.executable} {script}")
     monkeypatch.setattr(app, "_transport", None)
-    return addons_dir
+    yield addons_dir
+    if sys.platform == "win32":  # the folder's file watcher (opens_windows.py) would keep it from being removed
+        from wow_mcp import opens_windows
+
+        opens_windows.stop(addons_dir / "WowMCP" / "out")
 
 
 @pytest.fixture

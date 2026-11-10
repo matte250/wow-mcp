@@ -20,7 +20,6 @@ hourly) when Blizzard API credentials are set up, so price history builds up eve
 
 import argparse
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -39,7 +38,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from wow_mcp import item_text, stream
+from wow_mcp import item_text, locking, stream
 from wow_mcp.install import ADDONS_DIR_ENV
 from wow_mcp.transport import ADDON, write_atomic
 
@@ -320,6 +319,30 @@ def claude_command(model: str | None = None) -> list[str]:
     return command + ["--model", model] if model else command
 
 
+WINDOWS = sys.platform == "win32"
+# What npm's launcher script for a native program (claude.cmd) runs: "%dp0%\...\claude.exe" %*
+NPM_SHIM = re.compile(r'"%dp0%\\([^"\r\n]+\.exe)"\s+%\*', re.IGNORECASE)
+
+
+def resolve_command(command: list[str]) -> list[str] | None:
+    """The command with its program found on PATH, or None if it isn't there.
+
+    On Windows a program is often installed as a .cmd launcher (npm's claude.cmd), and
+    arguments with line breaks or quotes, like the system prompt, don't survive cmd.exe.
+    So a launcher that only starts a program runs as that program instead.
+    """
+    program = shutil.which(command[0]) if command else None
+    if not program:
+        return None
+    if WINDOWS and program.lower().endswith((".cmd", ".bat")):
+        with contextlib.suppress(OSError):
+            if m := NPM_SHIM.search(Path(program).read_text(encoding="utf-8", errors="replace")):
+                target = Path(program).parent / m.group(1)
+                if target.is_file():
+                    program = str(target)
+    return [program, *command[1:]]
+
+
 def agent_answer(out: str, err: str, returncode: int) -> str:
     """The answer in an agent's output; a Claude Code `--output-format json` result is unwrapped."""
     text = out.strip()
@@ -355,9 +378,10 @@ class CommandAgent:
     def __call__(self, prompt: str) -> str:
         try:
             # Its own process group, so a timeout also stops whatever it started (MCP servers).
+            group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
             process = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=self.env, cwd=self._folder.name, start_new_session=True,
+                text=True, encoding="utf-8", errors="replace", env=self.env, cwd=self._folder.name, **group,
             )
         except OSError as e:
             raise AgentError(f"couldn't start {self.command[0]}: {e.strerror}") from e
@@ -376,12 +400,16 @@ class CommandAgent:
         process = self._process
         if process is None:
             return
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(5)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)  # anything still left in its group
+        if WINDOWS:
+            # The process and everything under it; Windows has no polite way to ask a tree to stop.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False)
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(5)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)  # anything still left in its group
         process.wait()
         for pipe in (process.stdin, process.stdout, process.stderr):
             with contextlib.suppress(OSError):
@@ -491,9 +519,7 @@ def claim(addon_dir: Path):
     """Make this the only bridge answering for this game; two would each answer every question.
     Returns the lock, which is held as long as the returned file stays open."""
     lock = open(addon_dir / ".bridge.lock", "a+")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not locking.acquire(lock, blocking=False):
         lock.seek(0)
         pid = lock.read().strip()
         lock.close()
@@ -552,9 +578,10 @@ def main() -> None:
         sys.exit(f"{ADDON} isn't installed in {addons_dir}. Run wow-mcp-install first.")
     lock = claim(addons_dir / ADDON)  # noqa: F841 (held until exit)
     os.environ[ADDONS_DIR_ENV] = str(addons_dir)  # where publish_message sends answers
-    command = shlex.split(args.agent) if args.agent else claude_command(args.model)
-    if not command or not shutil.which(command[0]):
-        sys.exit(f"Agent command not found: {args.agent or command[0]}")
+    asked = shlex.split(args.agent, posix=not WINDOWS) if args.agent else claude_command(args.model)
+    command = resolve_command(asked)
+    if not command:
+        sys.exit(f"Agent command not found: {args.agent or asked[0]}")
     from wow_mcp.tools import messages
 
     if not hasattr(messages, "publish_message"):

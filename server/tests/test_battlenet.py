@@ -106,6 +106,7 @@ def test_config_file_and_environment(tmp_path, monkeypatch):
 
 def test_missing_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
     monkeypatch.delenv("XDG_CONFIG_HOME")
     config = battlenet.load_config(environ={})
     assert config.path == tmp_path / ".config" / "wow-mcp" / "battlenet.env" and not config.has_credentials
