@@ -127,14 +127,13 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     assert "chat: |cff33ff99WowMCP|r Asking… where am I?" in lines
     assert "chat: |cff33ff99WowMCP|r Asking… what now?" in lines
     received = [line.split(" ", 2)[2] for line in dict.fromkeys(lines) if line.startswith("message ")]
-    assert received == [
-        "Claude: You're in Durotar, at 50, 50.",
-        "Claude: Go and see Gornek.",
-        "Claude: - He's in the den.",
-        "Claude: - Then come back.",
-    ]
+    assert received == ["Claude: You're in Durotar, at 50, 50.", "Claude: Go and see Gornek."]
+    # One message per answer (one live-update slot); the game prints it line by line.
     state = json.loads((addons / "WowMCP" / "server-state.json").read_text())
-    assert [m["style"] for m in state["messages"]] == ["chat"] * 4
+    assert [(m["text"], m["style"]) for m in state["messages"]] == [
+        ("You're in Durotar, at 50, 50.", "chat"),
+        ("Go and see Gornek.\n- He's in the den.\n- Then come back.", "chat"),
+    ]
 
 
 def test_chat_command(run_client):

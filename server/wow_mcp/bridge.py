@@ -40,7 +40,7 @@ TIMEOUT = 180.0  # seconds an agent may take per question
 MAX_WAITING = 5  # questions queued behind the one being answered
 MAX_QUESTION = 500
 LINE_WIDTH = 250  # characters per chat message
-MAX_LINES = 6  # chat messages per answer; the game keeps the newest 10
+MAX_LINES = 6  # chat lines per answer
 
 SYSTEM_PROMPT = """\
 The player typed this question into World of Warcraft's chat with /ai while playing. Your final \
@@ -312,8 +312,8 @@ class Bridge:
         if self.stop.is_set():
             return
         log.info("answer: %s", text)
-        for line in chat_lines(text):
-            self.say(line)
+        # One message (the game prints it one chat line per line), so an answer costs one slot.
+        self.say("\n".join(chat_lines(text)))
 
     def say(self, text: str) -> None:
         try:
