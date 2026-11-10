@@ -89,12 +89,12 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Area | Tools |
 |---|---|
 | Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
-| Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes), `get_plan_progress`, `clear_plan` |
+| Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown), `get_plan_progress`, `clear_plan` |
 | Routes | `show_route` (numbered stops, lines, navigator arrow; a plan's current step uses the same navigator), `clear_route` |
 | Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
 | Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
 | Character | `get_character_stats` (money, XP, rested, hearthstone, /played), `get_reputations` |
-| Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession), `get_vendor_items` (vendors you've visited) |
+| Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession, plus recipes you learn as you learn them; each recipe's `item_id` is what it makes), `get_vendor_items` (vendors you've visited) |
 | Items | `get_inventory` (bags, equipment with durability and stats, `include_bank` for the bank as last seen), `get_item_details` (stats and tooltip text of any item, read from the game), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
 | Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress, and rewards: the XP this character gets, money and items, read from the game) |
 | Travel | `get_flight_paths` (known flight masters) |

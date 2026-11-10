@@ -161,6 +161,12 @@ restricted content. Wrap anything doubtful in `pcall`.
   - `vendors`: per vendor visited, the NPC name, zone, coordinates (player position at
     `MERCHANT_SHOW`) and items with prices. Cached in `WowMCPDB.knowledge`.
 - Tools `get_known_recipes(profession: str | None)` and `get_vendor_items(vendor: str | None)`.
+- Each cached recipe has `item` (what it makes). `recipes` also carries `learned`: per character,
+  `{ id?, name, at, profession?, item?, reagents? }` for recipes learned (event or chat line) since a
+  profession window last listed them. `ns.Knowledge.Learned()` gives plans this session's learns too.
+- (W17) `show_plan` is async: it looks up named `have` items with `items.look_up` (shared with
+  `get_item_details`) and refuses a plan whose IDs are other items. In game, a `have` whose ID is
+  another item counts the named item.
 
 ### W7 Messages
 - Payload key `messages`: a list (newest last, at most 10) of
