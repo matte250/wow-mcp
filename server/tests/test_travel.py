@@ -177,7 +177,29 @@ def test_client_that_never_flags_undiscovered(live_game):
     assert {p.faction for p in fresh.flight_masters} <= {"Alliance", "Neutral"}, "no Horde flight masters"
     assert "talk to any flight master" in fresh.note
 
+    # The flight maps decide: there an unreachable flight master is one not discovered yet.
+    # Zone, coordinates and faction come from the world map's list.
     with live_game("client.taxi.noDiscoveryFlag = true\n" + EARLIER_FLIGHT_MAPS):
         later = asyncio.run(travel.get_flight_paths())
-    assert [p.name for p in later.known] == ["Stormwind, Elwynn", "Ironforge, Dun Morogh", "Ratchet, The Barrens"]
-    assert later.flight_masters and later.note is None
+    assert [p.model_dump() for p in later.known] == [
+        path("Stormwind, Elwynn", "Stormwind City", 66.3, 62.1, "Alliance"),
+        path("Ratchet, The Barrens", "The Barrens", 63.1, 37.1, "Neutral"),
+    ]
+    assert [p.name for p in later.not_yet_discovered] == ["Ironforge, Dun Morogh"]
+    assert later.flight_masters and "seen (Eastern Kingdoms, Kalimdor)" in later.note
+
+
+def test_leftover_flight_points_are_dropped(monkeypatch):
+    async def request(kind):
+        return {"flightPaths": {"flightMasters": [
+            {"name": "zzOLDPowderfuse Port, Riverglades", "zone": "The Barrens", "faction": "Neutral"},
+            {"name": "Ratchet, The Barrens", "zone": "The Barrens", "x": 63.1, "y": 37.1, "faction": "Neutral"},
+        ], "flightMaps": [{"map": "Kalimdor", "at": 1700000000, "nodes": [
+            {"name": "zzOLDPowderfuse Port, Riverglades", "state": "reachable"},
+            {"name": "Ratchet, The Barrens", "state": "current", "zone": "Kalimdor", "x": 1, "y": 2},
+        ]}]}}, "WoW"
+
+    monkeypatch.setattr(travel, "request", request)
+    result = asyncio.run(travel.get_flight_paths())
+    assert [p.model_dump() for p in result.known] == [path("Ratchet, The Barrens", "The Barrens", 63.1, 37.1, "Neutral")]
+    assert [p.name for p in result.flight_masters] == ["Ratchet, The Barrens"]
