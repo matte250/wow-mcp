@@ -1,0 +1,240 @@
+# Feature plan: parallel workstreams
+
+Fourteen features, built in parallel, one workstream each, run as eight agents (see the end). The project is structured so that each
+workstream only touches its **own files**. Everything shared is already in place and is changed
+only by the integrator, who merges the workstreams one by one.
+
+| ID | Feature | Addon file | Server file | Request kind / payload key |
+|---|---|---|---|---|
+| W1 | Money, XP, rested XP, hearthstone, /played | `Stats.lua` | `tools/stats.py` | kind `STATE`, section `stats` |
+| W2 | Bags, equipment (with durability), bank as last seen | `Inventory.lua` | `tools/inventory.py` | kind `ITEMS` |
+| W3 | Quest objectives progress | `Quests.lua` | `tools/quests.py` | kind `QUESTS` |
+| W4 | Reputations | `Reputation.lua` | `tools/reputation.py` | kind `REPUTATION` |
+| W5 | Known flight paths | `Travel.lua` | `tools/travel.py` | kind `TRAVEL` |
+| W6 | Recipes known, vendors seen | `Knowledge.lua` | `tools/knowledge.py` | kind `KNOWLEDGE` |
+| W7 | Show AI text in game | `Messages.lua` | `tools/messages.py` | payload key `messages` |
+| W8 | `/ai <question>` from in game | `Chat.lua`, `Stream.lua` | `bridge.py`, `stream.py` | stream posts (`WM\2`) |
+| W9 | Routes + navigator arrow | `Routes.lua`, `Routes.xml` | `tools/routes.py` | payload key `routes` |
+| W10 | Area highlights | `Areas.lua`, `Areas.xml` | `tools/areas.py` | payload key `areas` |
+| W11 | Reminders (time or place) | `Reminders.lua` | `tools/reminders.py` | payload key `reminders` |
+| W12 | Item tooltip notes | `Tooltips.lua` | `tools/item_notes.py` | payload key `itemNotes` |
+| W13 | Version source hints | – | `tools/sources.py` | guidance only |
+| W14 | Status / version tool | `Status.lua` | `tools/status.py` | kind `STATUS` |
+
+Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
+(W3 already has `test_quests.py` and `stub/apis/quests.lua`; W8 owns `test_stream.py` changes).
+
+The placeholder files already exist and are listed in the TOC. WoW only discovers files at
+startup, so after the one restart for this restructure, every feature only needs `/reload`.
+
+## Shared contracts (already implemented, don't change them in a workstream)
+
+### Addon (`addon/WowMCP/`)
+- **Request sections** (`Requests.lua`): `ns.RegisterSection(ns.Kinds.X, "name", collect)`.
+  When the server asks for kind X, every section registered for X runs and the reply is
+  `{ name = collect(), ... }`. A section that errors shows up as `errors[name]` instead.
+  Values must be JSON-serializable (`C_EncodingUtil.SerializeJSON`): tables, strings,
+  numbers, booleans. Sequences become JSON arrays, but an **empty** table becomes `{}`.
+- **Payload receivers** (`Core.lua`): `ns.RegisterReceiver("key", function(value) end)` runs for
+  every new payload that carries `key`. A receiver decides for itself what's new (e.g. by an `id`).
+- **Slash commands** (`Core.lua`): `ns.RegisterCommand("name", "/mcp name - what it does", run)`.
+  `run(rest)` gets the rest of the line. `/ai` (W8) is its own slash command, not under `/mcp`.
+- **Login hooks**: `ns.OnLogin(fn)` runs at `PLAYER_LOGIN`, before the stored payload is applied.
+- **Saved data**: `WowMCPDB` is the SavedVariables table. Use your own subtable
+  (`WowMCPDB.bank`, `WowMCPDB.knowledge`, ...). It's written to disk on logout and `/reload`.
+- **Output**: `ns.Print(msg)` prints to chat; `ns.Escape(text)` before showing any text from the AI.
+  Once W7 lands, `ns.ShowMessage(text, style, sender)` shows a message the way W7 does. Other
+  features call it when present and fall back to `ns.Print`.
+- **Map helpers** (`Map.lua`, for routes, areas, reminders): `ns.Map.Locate(zone, x, y, mapID)` turns a zone
+  name and 0-100 coordinates into a location, or nil if the zone is unknown. Then:
+  - `ns.Map.Project(loc, mapID)` gives its x, y on another map.
+  - `ns.Map.Distance(loc)` gives yards from the player.
+  - `ns.Map.SetWaypoint(loc)` sets the game's waypoint.
+  - `ns.Map.Resolve(zone, mapID)` returns the map info.
+- **Core state** (read only): `ns.run` (`live`, `liveProblem`, `seq`, `req`), `ns.SlotsLeft()`,
+  `ns.SLOT_COUNT`, and `ns.BUILD` (from `Build.lua`, which the installer generates).
+- **Sending to the server**: `ns.Stream.Send(id, value)` (replies; Requests.lua does this for you).
+- **Cost**: replies are JSON, then zlib, then streamed at about 1.5 ms of frame time per frame. Keep
+  sections reasonably small. A few KB compressed is fine (about a second); avoid tens of KB.
+- Lua 5.1 (WoW): no `goto`, no `//`, no bit operators. `string.format("%d", x)` needs an integer
+  (`math.floor`), because the test stub runs Lua 5.5.
+
+### Server (`server/wow_mcp/`)
+- **Registering tools**: in your `tools/<feature>.py`, decorate with `@tool(annotations=ToolAnnotations(...))`
+  from `wow_mcp.app`. The module is imported automatically. Add advice for agents with
+  `guidance(text, order=N)` (existing: map 10, player 20, quests 30; use 40–90).
+- **Asking the game**: `reply, version = await request(kinds.X)`, then `section(reply, "name")`
+  (raises a clear `ToolError` if it's missing) and `as_list(value)` for Lua arrays. Return pydantic
+  models that include `game: str = version`, so agents know which version the data is for.
+- **Sending to the game**: `transport().publish(lambda state, seq: state.update(<key>=...))`. Only
+  touch your own payload key. `state` is the full persistent state, so you can read your key's
+  previous value to merge. Each publish uses one of 300 slots per UI session.
+  The payload is rendered as Lua by `transport.to_lua`: dict keys must be Lua identifiers. For
+  maps keyed by numbers (e.g. item IDs), send a list of records (`[{"item": 123, "text": ...}]`).
+- `kinds.py` has the kind numbers (must match `Requests.lua`): STATE 0, QUESTS 1, ITEMS 2,
+  REPUTATION 3, TRAVEL 4, KNOWLEDGE 5, STATUS 6; 7 is free (ask the integrator).
+- `install.addon_build()` is the build ID of the addon source in the repo. The installer writes
+  the same ID into the installed `Build.lua`.
+
+### Tests (`server/tests/`)
+- Add the game APIs your feature needs to `stub/apis/<feature>.lua`. All files there are loaded
+  automatically. Mimic the real client's behaviour, including its quirks.
+- Fixtures (`conftest.py`):
+  - `addons`: an installed copy of the addon.
+  - `run_client(lua)`: a scripted stub session; time advances with `client.Tick()` / `client.Wait()`.
+  - `live_game(setup_lua)`: the addon ticking in real time while your test awaits your real tool
+    functions. Use it for an end-to-end test of every tool.
+- Done means `cd server && uv run pytest` passes and every `.lua` file passes `luac -p`.
+
+### Checking the real API
+The Forever client's own UI source and generated API docs:
+`git clone --depth 1 --branch forever --filter=blob:none --sparse https://github.com/Gethe/wow-ui-source.git`
+then look in `Interface/AddOns/Blizzard_APIDocumentationGenerated/`. Older global functions
+(e.g. `GetInventoryItemLink`, `GetMerchantItemInfo`) aren't documented there; search the
+Blizzard UI code for real uses before relying on them. Forever runs the Midnight (12.x) client
+with vanilla content. Midnight's "secret values" can hide some unit and combat data in
+restricted content. Wrap anything doubtful in `pcall`.
+
+## Workstreams
+
+### W1 Stats
+- Section `stats` on kind STATE: money (copper), level, XP, XP to next level, rested XP, hearthstone
+  location (`GetBindLocation`), /played total and this level.
+- /played comes from `RequestTimePlayed()` → `TIME_PLAYED_MSG`, which also prints to chat. Request
+  it once at login and cache it in the session. Add the time elapsed since then when answering,
+  rather than spamming chat on every request.
+- Tool `get_character_stats()`. Guidance: money, leveling and "where's my hearth" questions.
+
+### W2 Inventory
+- Kind ITEMS, sections:
+  - `bags`: per item, itemID, name, count, quality, bag and slot.
+  - `equipment`: per slot, itemID, name, item level if available, durability current/max.
+  - `bank`: the bank as last seen, with a timestamp. Cached on `BANKFRAME_OPENED` and on changes
+    while it's open, kept in `WowMCPDB.bank`.
+- Tool `get_inventory(include_bank: bool = False)`. Guidance: "what can I vendor / do I have X / gear".
+
+### W3 Quest objectives
+- Extend the `quests` section's log entries with `objectives`: text, fulfilled, required,
+  finished. Keep `get_quest_status` working unchanged.
+- New tool `get_quest_log()`: each quest with title, ready-to-turn-in, and objective progress.
+
+### W4 Reputations
+- Section `factions` on kind REPUTATION: name, standing (localized label), progress within the
+  standing (current/max), and header/group structure flattened.
+- Tool `get_reputations()`.
+
+### W5 Flight paths
+- Section `flightPaths` on kind TRAVEL: the flight masters the character knows, with name, zone,
+  coordinates and faction.
+- First find out what's readable without a flight master open. If the data needs the flight map,
+  cache it on `TAXIMAP_OPENED` in `WowMCPDB.travel` and include a timestamp.
+- Tool `get_flight_paths()`. Guidance: route planning, "how do I get to X fastest".
+
+### W6 Recipes and vendors
+- Kind KNOWLEDGE, sections:
+  - `recipes`: per profession, the recipes known (name, and reagents if cheap to read). Cached
+    when the profession window opens.
+  - `vendors`: per vendor visited, the NPC name, zone, coordinates (player position at
+    `MERCHANT_SHOW`) and items with prices. Cached in `WowMCPDB.knowledge`.
+- Tools `get_known_recipes(profession: str | None)` and `get_vendor_items(vendor: str | None)`.
+
+### W7 Messages
+- Payload key `messages`: a list (newest last, at most 10) of
+  `{ id = <int, increasing>, text = <string>, style = "chat" | "center" | "both", from = <string> }`.
+  The addon shows the entries with an `id` it hasn't shown yet (track it in `WowMCPDB.messageId`).
+  A `/reload` must not repeat old messages.
+- Center style: a raid-warning-style message on screen. Chat: printed with the sender's name.
+- Tool `show_message(text, style="chat")`, plus `publish_message(text, style, sender) -> int` in
+  `tools/messages.py`. That helper does the publish; W8's bridge imports it.
+- In the addon, expose `ns.ShowMessage(text, style, sender)` (reminders and others use it).
+
+### W8 /ai chat
+- `Chat.lua`: `/ai <question>` sends `{ question, player = <name> }` as a stream **post**. Post is a new
+  `ns.Stream.Post(value)` in `Stream.lua`: the same framing as `Send`, but with magic `WM\2` and an
+  increasing id that's unique per UI session (include a session token so a `/reload` doesn't
+  clash). Show "Asking…" in chat.
+- `stream.py`: decode posts. `bridge.py`: a long-running service (`wow-mcp-bridge`) that watches
+  `out/`. For each new question it runs an agent with the wow MCP tools available, e.g.
+  `claude -p` with this server in its MCP config, and web search allowed for lookups. It then shows
+  the answer with W7's `publish_message` (sender "Claude"), plus any markers the agent placed
+  itself via `show_on_map`.
+- A systemd user unit (or documented command) to keep the bridge running.
+- Until W7 is merged, test against W7's contract (the `messages` payload shape) rather than its code.
+
+### W9 Routes + navigator arrow
+- Payload key `routes`: `{ id, title, loop, stops = [{ zone, x, y, label, note, mapID }] }`, one active
+  route. Empty `stops` clears it.
+- On the world map, draw numbered stop pins with lines between them. Use your own data
+  provider and templates in `Routes.xml`; don't touch Map.lua's pins.
+- Navigator: a small movable frame with an arrow pointing at the current stop and the distance in
+  yards. It advances when within about 12 yards and wraps on `loop`. It also sets the game's waypoint
+  on the current stop (`ns.Map.SetWaypoint`). Player facing (`GetPlayerFacing`) and position aren't
+  available in instances, so show "no position here" there.
+- `/mcp route` commands: show, next, prev, stop.
+- Tools `show_route(stops, title, loop=False)` and `clear_route()`. Guidance: turn-in routes and
+  farming loops.
+
+### W10 Area highlights
+- Payload key `areas`: `{ id, areas = [{ zone, x, y, radius, label, color }] }`, where `radius` is in
+  map percent. Polygons are optional if you have time.
+- Draw shaded, labelled regions on the world map: your own data provider and templates in
+  `Areas.xml`. Show them projected onto parent maps too (`ns.Map.Project`).
+- Tools `highlight_areas(areas)` and `clear_areas()`. Guidance: "where are mob X / herb Y".
+
+### W11 Reminders
+- Payload key `reminders`: a list of `{ id, text, at, zone, subzone, near }`:
+  - `at` is a unix time; or
+  - `zone` / `subzone` names; or
+  - `near = { zone, x, y, yards }`.
+- Each fires once, through `ns.ShowMessage` (style "both") with a sound. Fired IDs are kept in
+  `WowMCPDB.reminders` so they don't fire again after a `/reload`.
+- Time checks every few seconds. Place checks on zone-change events and a slow timer.
+- Tools `set_reminder(text, in_minutes | at_time | zone | near)`, `list_reminders()` and
+  `cancel_reminder(id)`. The server keeps the list in state; fired ones can be reported via a
+  STATE-kind section if useful.
+
+### W12 Item tooltip notes
+- Payload key `itemNotes`: `{ id, notes = [{ item = <itemID>, text }] }`. Add the note as a coloured
+  line on item tooltips: check the Forever client for `TooltipDataProcessor.AddTooltipPostCall`
+  with `Enum.TooltipDataType.Item`, or tooltip hooks.
+- Tools `set_item_notes(notes, replace=False)` (merges by item) and `clear_item_notes()`.
+
+### W13 Version source hints
+- `tools/sources.py` only. At import, work out the game version (`app.addons_dir()`,
+  `game.situation`), then add `guidance(order=5)`: which sites have data for that version and
+  how to spot information for a different one. For Forever: Forever-specific pages first;
+  classic-era data as an explicit fallback. Research which sources cover Forever.
+
+### W14 Status / version tool
+- Section `status` on kind STATUS: `{ build = ns.BUILD, live, liveProblem, slotsLeft, slotCount,
+  seq, req }`.
+- Tool `get_status()`: the in-game build compared with the installed `Build.lua` and with
+  `install.addon_build()`. The advice is "/reload" (installed is newer than what's loaded),
+  "run wow-mcp-install" (the repo is newer than what's installed) or "restart WoW" (files missing).
+  Also report live updates, slots left, and the game version. If the game doesn't answer, still
+  return what the server knows, with the reason.
+
+## Agents
+Each agent works in its own git worktree and branch, owns the files of its workstreams, and
+commits its work there.
+
+| Agent | Workstreams |
+|---|---|
+| A1 | W1 Stats, W4 Reputations |
+| A2 | W2 Inventory |
+| A3 | W3 Quest objectives |
+| A4 | W5 Flight paths, W6 Recipes and vendors |
+| A5 | W7 Messages, W11 Reminders |
+| A6 | W8 `/ai` chat |
+| A7 | W9 Routes, W10 Area highlights |
+| A8 | W12 Item tooltip notes, W13 Version source hints, W14 Status |
+
+## Integration (integrator only)
+1. Merge workstreams one at a time and run the full test suite after each.
+2. Install with `uv run wow-mcp-install <AddOns>`, `/reload` in game, and verify the feature live
+   with the player, one feature at a time.
+3. Update `README.md` (tools table, in-game commands) for each merged feature.
+4. Shared files: `Core.lua`, `Requests.lua`, `Map.lua`, `Map.xml`, `WowMCP.toc`, `app.py`, `kinds.py`,
+   `transport.py`, `install.py`, `server.py`, `conftest.py`, `stub/client.lua`, the existing
+   `stub/apis/*.lua` files (except `quests.lua`, which W3 owns), `pyproject.toml`, `README.md`. If a workstream needs a change here, it
+   reports it instead of making it.

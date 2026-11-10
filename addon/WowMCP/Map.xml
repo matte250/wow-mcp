@@ -1,0 +1,16 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+	<!-- WowMCPPinMixin is defined in Map.lua. -->
+	<Frame name="WowMCPPinTemplate" mixin="WowMCPPinMixin" enableMouseMotion="true" enableMouseClicks="true" hidden="true" virtual="true">
+		<Size x="22" y="22"/>
+		<Layers>
+			<Layer level="OVERLAY">
+				<Texture parentKey="Icon" setAllPoints="true"/>
+				<FontString parentKey="Label" inherits="GameFontNormalSmall" justifyH="CENTER">
+					<Anchors>
+						<Anchor point="TOP" relativePoint="BOTTOM" y="-1"/>
+					</Anchors>
+				</FontString>
+			</Layer>
+		</Layers>
+	</Frame>
+</Ui>

@@ -1,0 +1,30 @@
+## Interface: 16001
+## Title: WowMCP
+## Notes: Connects the game to your AI agents (via the wow-mcp server): map markers, messages, and reading your character's state. No /reload needed.
+## Author: wow-mcp
+## Version: 0.1.0
+## SavedVariables: WowMCPDB
+
+Core.lua
+Requests.lua
+Stream.lua
+Map.lua
+Map.xml
+Player.lua
+Quests.lua
+Stats.lua
+Inventory.lua
+Reputation.lua
+Travel.lua
+Knowledge.lua
+Messages.lua
+Chat.lua
+Routes.xml
+Routes.lua
+Areas.xml
+Areas.lua
+Reminders.lua
+Tooltips.lua
+Status.lua
+Build.lua
+Inbox.lua

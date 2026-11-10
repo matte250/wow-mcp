@@ -1,0 +1,148 @@
+-- A tiny stand-in for the WoW client, enough to run the WowMCP addon outside the game.
+-- File behaviour follows what the Forever client does with addon files (measured live):
+--   * PlaySoundFile returns a handle for any existing file, empty or not; only a valid
+--     one is still playing a moment later. A valid file stays cached for the rest of the
+--     process, an empty one is read again next time.
+--   * LoadAddOn: reads the addon's Lua from disk when called, once per UI session.
+-- Usage: lua client.lua <AddOns dir> <script.lua>; the script drives the test.
+--
+-- This file is the client's core (frames, events, timers, loading the addon). Game APIs
+-- live in apis/, one file per area; every file there is loaded before the test script.
+
+local ADDONS = assert(arg[1], "AddOns dir")
+local SCRIPT = assert(arg[2], "test script")
+
+local function DiskPath(gamePath)
+	local rel = gamePath:gsub("^Interface\\AddOns\\", ""):gsub("\\", "/")
+	return ADDONS .. "/" .. rel
+end
+
+local function ReadFile(path)
+	local f = io.open(path, "rb")
+	if not f then return nil end
+	local data = f:read("a")
+	f:close()
+	return data
+end
+
+client = {
+	chat = {}, tickers = {}, timers = {}, validSounds = {}, playing = {}, loaded = {}, opened = {},
+	combat = false, sound = true, now = 0, frames = {}, openedThisFrame = {},
+	player = { map = 1411, x = 0.5, y = 0.5 },
+}
+
+function wipe(t) for k in pairs(t) do t[k] = nil end return t end
+function strtrim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+function InCombatLockdown() return client.combat end
+SlashCmdList = {}
+
+function CreateFromMixins(...)
+	local t = {}
+	for i = 1, select("#", ...) do
+		for k, v in pairs((select(i, ...))) do t[k] = v end
+	end
+	return t
+end
+
+function CreateVector2D(x, y)
+	return { x = x, y = y, GetXY = function(self) return self.x, self.y end }
+end
+
+Enum = { UIMapType = { Cosmic = 0, World = 1, Continent = 2, Zone = 3, Dungeon = 4, Micro = 5, Orphan = 6 } }
+
+DEFAULT_CHAT_FRAME = { AddMessage = function(_, msg) table.insert(client.chat, msg) end }
+GameTooltip = setmetatable({}, { __index = function() return function() end end })
+EventRegistry = { RegisterCallback = function(_, event, fn, owner) client.itemRef = function(link) fn(owner, link) end end }
+
+function CreateFrame()
+	local frame = { registered = {} }
+	function frame:RegisterEvent(e) self.registered[e] = true end
+	function frame:SetScript(name, fn)
+		if name == "OnEvent" then self.onEvent = fn else self[name] = fn end
+	end
+	table.insert(client.frames, frame)
+	return frame
+end
+
+function client.Fire(event, ...)
+	for _, frame in ipairs(client.frames) do
+		if frame.registered[event] and frame.onEvent then frame.onEvent(frame, event, ...) end
+	end
+end
+
+local function AddTimer(delay, fn)
+	local timer = { at = client.now + delay, fn = fn }
+	function timer:Cancel() self.cancelled = true end
+	table.insert(client.timers, timer)
+	return timer
+end
+
+C_Timer = {
+	NewTicker = function(_, fn) table.insert(client.tickers, fn) end,
+	After = function(delay, fn) AddTimer(delay, fn) end,
+	NewTimer = AddTimer,
+}
+
+-- One poll interval (0.5 s) passes: due timers fire, then tickers.
+function client.Tick()
+	client.now = client.now + 0.5
+	local pending = {}
+	for _, timer in ipairs(client.timers) do
+		if timer.at <= client.now then
+			if not timer.cancelled then timer.fn() end
+		else
+			table.insert(pending, timer)
+		end
+	end
+	client.timers = pending
+	wipe(client.openedThisFrame)
+	for _, fn in ipairs(client.tickers) do fn() end
+	for _, frame in ipairs(client.frames) do
+		if frame.OnUpdate then frame.OnUpdate(frame, 0.5) end
+	end
+end
+
+-- Keep ticking in real time, so a test can talk to this client from another process.
+function client.RunFor(seconds)
+	local stop = os.time() + seconds
+	while os.time() < stop do
+		client.Tick()
+		os.execute("sleep 0.02")
+	end
+end
+
+function debugprofilestop() return os.clock() * 1000 end
+
+function client.Wait(ticks)
+	for _ = 1, ticks or 3 do client.Tick() end
+end
+
+-- Load the addon the way the client does: the TOC's Lua files in order, shared namespace.
+function client.LoadAddon()
+	local ns = {}
+	for line in io.lines(ADDONS .. "/WowMCP/WowMCP.toc") do
+		if line:match("%.lua$") then
+			assert(loadfile(ADDONS .. "/WowMCP/" .. line))("WowMCP", ns)
+		end
+	end
+	client.Fire("ADDON_LOADED", "WowMCP")
+	client.Fire("PLAYER_LOGIN")
+	return ns
+end
+
+function client.Publish(json)
+	-- Hand control to the test runner, which publishes through the real transport.
+	assert(os.execute(os.getenv("WOWMCP_PUBLISH") .. " '" .. json .. "'"))
+end
+
+client.addonsDir, client.DiskPath, client.ReadFile = ADDONS, DiskPath, ReadFile
+
+local here = arg[0]:match("^(.*)/[^/]*$") or "."
+local apis = io.popen('ls "' .. here .. '/apis"')
+for name in apis:lines() do
+	if name:match("%.lua$") then dofile(here .. "/apis/" .. name) end
+end
+apis:close()
+
+dofile(SCRIPT)
+print("OK")
