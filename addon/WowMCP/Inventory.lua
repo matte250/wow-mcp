@@ -4,7 +4,8 @@
 -- The bank can only be read at the banker, so whenever it's open we save it, with the time,
 -- per character in WowMCPDB.bank (SavedVariables are shared by all characters on the account).
 -- Forever uses the modern bank: the character bank is bag IDs 6+ (one per purchased tab; the
--- first tab is the base bank, the rest are bank bags), read like any other container.
+-- first tab is the base bank, the rest are bank bags), read like any other container. The mailbox is
+-- kept the same way, in WowMCPDB.mail (see Mail below).
 
 local _, ns = ...
 
@@ -212,6 +213,136 @@ events:SetScript("OnEvent", function(_, event)
 end)
 
 ---------------------------------------------------------------------------
+-- Mail
+---------------------------------------------------------------------------
+
+-- Like the bank, the inbox can only be read at a mailbox, so it's saved per character in WowMCPDB.mail
+-- on every MAIL_INBOX_UPDATE while one is open (the inbox arrived, or mail was taken or deleted): after
+-- closing, it's what was left. Not at MAIL_SHOW: until the game has fetched the inbox, it still holds the
+-- last one, or none. GetInboxText is never called: it marks the mail as read.
+
+local ATTACHMENTS = ATTACHMENTS_MAX_RECEIVE or 16
+local MAILBOX = Enum.PlayerInteractionType and Enum.PlayerInteractionType.MailInfo or 17
+local INVOICES = { seller = "sold", seller_temp_invoice = "pending", buyer = "won" }
+local mailbox -- while one is open: { fetched = the inbox arrived this visit }
+
+-- Auction house mail without an invoice, by its subject as the game words it ("Auction expired: %s").
+local AH_SUBJECTS = {}
+for kind, template in pairs({
+	sold = AUCTION_SOLD_MAIL_SUBJECT or "Auction successful: %s",
+	won = AUCTION_WON_MAIL_SUBJECT or "Auction won: %s",
+	expired = AUCTION_EXPIRED_MAIL_SUBJECT or "Auction expired: %s",
+	cancelled = AUCTION_REMOVED_MAIL_SUBJECT or "Auction cancelled: %s",
+	outbid = AUCTION_OUTBID_MAIL_SUBJECT or "Outbid on %s",
+}) do
+	AH_SUBJECTS[kind] = "^" .. (template:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0"):gsub("%%s", ".+")) .. "$"
+end
+
+-- A character of this account the addon has seen at its bank or mailbox. Senders on this realm have no realm.
+local function OurCharacter(sender)
+	local key = sender:find("-", 1, true) and sender or sender .. "-" .. tostring(GetRealmName())
+	return (WowMCPDB.bank and WowMCPDB.bank[key] or WowMCPDB.mail and WowMCPDB.mail[key]) and true or false
+end
+
+-- { { id, name, count, quality } } of what's attached; count is left out when 1. Taken ones leave gaps.
+local function Attachments(index, count)
+	local items = {}
+	for slot = 1, ATTACHMENTS do
+		if #items >= count then break end
+		local name, itemID, _, stack, quality = GetInboxItem(index, slot)
+		local link = GetInboxItemLink and GetInboxItemLink(index, slot)
+		itemID = itemID or (link and tonumber(link:match("item:(%d+)")))
+		if itemID then
+			local item = { id = itemID, name = LinkName(link) or name or Details(itemID), quality = quality }
+			if (stack or 1) > 1 then item.count = stack end
+			items[#items + 1] = item
+		end
+	end
+	return items
+end
+
+-- A mail as { from, subject, money, cod, expires, read, returned, returns, player, alt, gm, ah, sale, items }:
+-- money and cod in copper (left out when 0); expires as a unix time; returns: it goes back to the sender when
+-- it expires (else it's deleted, with what's attached); player: another player sent it (alt: one of ours);
+-- ah: sold, pending (the money comes later), won, expired, cancelled or outbid; sale: the auction house's
+-- invoice { item, count, player, price, deposit, fee, eta } (eta: realm time the pending money comes).
+local function Mail(index, now)
+	local _, _, sender, subject, money, cod, daysLeft, itemCount, wasRead, wasReturned, _, canReply, isGM =
+		GetInboxHeaderInfo(index)
+	local mail = { from = sender, subject = subject ~= "" and subject or nil,
+		expires = math.floor(now + (daysLeft or 0) * 86400) }
+	if (money or 0) > 0 then mail.money = money end
+	if (cod or 0) > 0 then mail.cod = cod end
+	if wasRead then mail.read = true end
+	if wasReturned then mail.returned = true end
+	if not InboxItemCanDelete(index) then mail.returns = true end -- the mail window's Return button
+
+	local ok, kind, item, player, bid, _, deposit, fee, _, etaHour, etaMin, count = pcall(GetInboxInvoiceInfo, index)
+	if ok and INVOICES[kind] then
+		mail.ah = INVOICES[kind]
+		mail.sale = { item = item, player = player, price = bid }
+		if (count or 1) > 1 then mail.sale.count = count end
+		if (deposit or 0) > 0 then mail.sale.deposit = deposit end
+		if (fee or 0) > 0 then mail.sale.fee = fee end
+		if kind == "seller_temp_invoice" and etaHour then mail.sale.eta = string.format("%02d:%02d", etaHour, etaMin or 0) end
+	elseif isGM then
+		mail.gm = true
+	elseif canReply and sender then
+		-- Mail that can be answered is a player's, whatever its subject says.
+		mail.player = true
+		if OurCharacter(sender) then mail.alt = true end
+	elseif subject then
+		for ah, pattern in pairs(AH_SUBJECTS) do
+			if subject:match(pattern) then mail.ah = ah break end
+		end
+	end
+	if (itemCount or 0) > 0 then mail.items = Attachments(index, itemCount) end
+	return mail
+end
+
+-- { time, total, mails }: total counts the mail the inbox doesn't show yet (it shows at most 50 at a time).
+local function ReadInbox()
+	local shown, total = GetInboxNumItems()
+	local now, mails = time(), {}
+	for index = 1, shown do mails[index] = Mail(index, now) end
+	return { time = now, total = math.max(total or 0, shown), mails = mails }
+end
+
+-- Runs from events, so it must never error.
+local function SaveMail()
+	local ok, inbox = pcall(ReadInbox)
+	if ok then
+		WowMCPDB.mail = WowMCPDB.mail or {}
+		WowMCPDB.mail[Character()] = inbox
+	end
+end
+
+-- { inbox = this character's inbox as last seen (absent if never), open = at a mailbox now, newMail = who
+-- the game's new-mail notice names (up to three; can be empty), absent without new mail }.
+local function MailSection()
+	if mailbox and mailbox.fetched then SaveMail() end
+	local section = { inbox = WowMCPDB.mail and WowMCPDB.mail[Character()] or nil, open = mailbox ~= nil }
+	if HasNewMail() then section.newMail = { GetLatestThreeSenders() } end
+	return section
+end
+
+local mailEvents = CreateFrame("Frame")
+for _, event in ipairs({ "MAIL_SHOW", "MAIL_INBOX_UPDATE", "MAIL_CLOSED", "PLAYER_INTERACTION_MANAGER_FRAME_SHOW",
+	"PLAYER_INTERACTION_MANAGER_FRAME_HIDE" }) do
+	pcall(mailEvents.RegisterEvent, mailEvents, event)
+end
+mailEvents:SetScript("OnEvent", function(_, event, kind)
+	if event == "MAIL_SHOW" or (event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" and kind == MAILBOX) then
+		mailbox = mailbox or {} -- both say so
+	elseif event == "MAIL_CLOSED" or (event == "PLAYER_INTERACTION_MANAGER_FRAME_HIDE" and kind == MAILBOX) then
+		mailbox = nil
+	elseif event == "MAIL_INBOX_UPDATE" and mailbox then
+		mailbox.fetched = true
+		SaveMail()
+	end
+end)
+
+---------------------------------------------------------------------------
 -- Any item by ID (get_item_details)
 ---------------------------------------------------------------------------
 
@@ -317,5 +448,6 @@ end)
 ns.RegisterSection(ns.Kinds.ITEMS, "bags", Bags)
 ns.RegisterSection(ns.Kinds.ITEMS, "equipment", Equipment)
 ns.RegisterSection(ns.Kinds.ITEMS, "bank", Bank)
+ns.RegisterSection(ns.Kinds.ITEMS, "mail", MailSection)
 ns.RegisterSection(ns.Kinds.ITEM_DETAILS, "itemDetails", ItemDetails)
 ns.RegisterReceiver("itemLookup", ReceiveLookup)
