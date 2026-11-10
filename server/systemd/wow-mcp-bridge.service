@@ -1,0 +1,21 @@
+# Answers /ai questions asked in World of Warcraft (wow_mcp/bridge.py).
+#
+# Install: copy to ~/.config/systemd/user/, fix the paths marked below, then
+#   systemctl --user daemon-reload && systemctl --user enable --now wow-mcp-bridge
+# Logs: journalctl --user -u wow-mcp-bridge -f
+
+[Unit]
+Description=wow-mcp bridge: answers /ai questions asked in World of Warcraft
+
+[Service]
+# The game's AddOns folder (the one wow-mcp-install was given).
+Environment="WOW_MCP_ADDONS_DIR=%h/Games/World of Warcraft/_forever_/Interface/AddOns"
+# Must include where uv and claude are installed.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+# The server folder of your wow-mcp checkout. Options go after wow-mcp-bridge, e.g. --model sonnet.
+ExecStart=/usr/bin/env uv run --directory %h/Repos/wow-mcp/server wow-mcp-bridge
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
