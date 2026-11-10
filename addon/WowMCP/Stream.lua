@@ -5,10 +5,14 @@
 -- "play" out/000.wav-out/fff.wav in the order that spells the message, 12 bits per file.
 -- The files are empty, so nothing is ever heard.
 --
--- Message: "WM\1", request id (4 bytes), body length (4 bytes), body = zlib(JSON), read as
--- a big-endian bit stream cut into 12-bit symbols. Symbol k is sent as file
--- (symbol + Whitening(k)) % 4096, so runs of equal symbols (e.g. the zero bytes in the
--- header) become different files.
+-- Messages, with body = zlib(JSON):
+--   reply: "WM\1", request id (4 bytes), body length (4 bytes), body
+--   post:  "WM\2", session token (4 bytes), post id (4 bytes), body length (4 bytes), body
+-- A post is sent unasked (e.g. a /ai question). Post ids count up from 1 in each UI session,
+-- and the token tells them apart from the posts before a /reload.
+-- A message is read as a big-endian bit stream cut into 12-bit symbols. Symbol k is sent as
+-- file (symbol + Whitening(k)) % 4096, so runs of equal symbols (e.g. the zero bytes in the
+-- header) become different files. Messages go out one after another, never interleaved.
 --
 -- The client opens a given file at most once per frame (a repeat in the same frame never
 -- reaches the disk), so a file isn't reused in the current or previous frame; when the
@@ -23,7 +27,7 @@ ns.Stream = Stream
 local ROOT = "Interface\\AddOns\\" .. ADDON .. "\\out\\"
 local BUDGET_MS = 1.5
 local MAX_PER_FRAME = 100
-local MAGIC = "WM\1"
+local MAGIC, POST_MAGIC = "WM\1", "WM\2"
 
 local paths = setmetatable({}, {
 	__index = function(t, symbol)
@@ -86,15 +90,36 @@ local function SendSome(self)
 	if not current then self:SetScript("OnUpdate", nil) end
 end
 
--- Send a Lua value (tables, strings, numbers, booleans) to the server as reply `id`.
-function Stream.Send(id, value)
+local function Body(value)
 	local json = C_EncodingUtil.SerializeJSON(value, { ignoreSerializationErrors = true })
-	local body = C_EncodingUtil.CompressString(json, Enum.CompressionMethod.Zlib, Enum.CompressionLevel.OptimizeForSize)
-	local files = Files(MAGIC .. U32(id) .. U32(#body) .. body)
+	return C_EncodingUtil.CompressString(json, Enum.CompressionMethod.Zlib, Enum.CompressionLevel.OptimizeForSize)
+end
+
+local function Enqueue(message)
+	local files = Files(message)
 	if current then
 		table.insert(queue, files)
 	else
 		current = { files = files, position = 1 }
 		sender:SetScript("OnUpdate", SendSome)
 	end
+end
+
+-- Send a Lua value (tables, strings, numbers, booleans) to the server as reply `id`.
+function Stream.Send(id, value)
+	local body = Body(value)
+	Enqueue(MAGIC .. U32(id) .. U32(#body) .. body)
+end
+
+local session, posts -- set by the first post
+
+-- Send a Lua value to the server unasked (keep it small); returns its post id.
+function Stream.Post(value)
+	if not session then
+		session, posts = (math.floor(time()) % 65536) * 65536 + math.random(0, 65535), 0
+	end
+	posts = posts + 1
+	local body = Body(value)
+	Enqueue(POST_MAGIC .. U32(session) .. U32(posts) .. U32(#body) .. body)
+	return posts
 end
