@@ -2,7 +2,8 @@
 
 The addon posts each question the player asks (Chat.lua, through Stream.lua's file opens).
 This watches for them, asks an agent that has the wow tools, and shows the answer in the
-player's chat as a message (tools/messages.py). Questions are answered one at a time.
+player's chat as a message (tools/messages.py), marked as a reply so the game shows it in its AI
+chat tab. Questions are answered one at a time.
 
 Each agent starts from zero, so the player's recent exchanges go into the prompt, which makes
 follow-up questions work. They're kept in a file (History), so a restart keeps the conversation;
@@ -53,8 +54,8 @@ MAX_KEPT_ANSWER = 1000  # characters of an answer kept for later prompts
 HISTORY_FILE = "bridge-history.json"  # in the addon's folder, next to server-state.json
 
 SYSTEM_PROMPT = """\
-The player typed this question into World of Warcraft's chat with /ai while playing. Your final \
-reply is shown to them in the game's chat window, so:
+The player typed this question into World of Warcraft's chat (with /ai, or in its AI chat tab) \
+while playing. Your final reply is shown to them in the game's chat, so:
 - Reply in plain text, in at most three short sentences (about 400 characters) unless they ask \
 for more. No Markdown, tables, headings or web links: the chat window shows them literally.
 - Write each item you name as {item:<id>}, or {item:<id>:<name>}, with its item ID for their game \
@@ -279,12 +280,12 @@ def chat_lines(text: str, width: int = LINE_WIDTH, limit: int = MAX_LINES) -> li
     return _show_items(lines, items)
 
 
-def publish_message(text: str, style: str = "chat", sender: str = SENDER) -> int:
+def publish_message(text: str, style: str = "chat", sender: str = SENDER, reply: bool = False) -> int:
     """Show text in game, through the messages feature (tools/messages.py)."""
     # Imported on first use: importing the tools package loads every feature.
     from wow_mcp.tools.messages import publish_message as publish
 
-    return publish(text, style=style, sender=sender)
+    return publish(text, style=style, sender=sender, reply=reply)
 
 
 # Agents -----------------------------------------------------------------------------------
@@ -472,7 +473,8 @@ class Bridge:
 
     def say(self, text: str) -> None:
         try:
-            self.publish(text, style="chat", sender=self.sender)
+            # A reply: the game shows it in the conversation, in its AI chat tab.
+            self.publish(text, style="chat", sender=self.sender, reply=True)
         except Exception:
             log.exception("couldn't show this in game: %s", text)
 

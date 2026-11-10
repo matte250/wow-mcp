@@ -66,7 +66,7 @@ local CHAT_WAIT = 1 -- seconds a chat line waits for items the client is still l
 local loading = {}  -- item ID -> true: asked the client for it; what shows it redraws when it's there
 local missing = {}  -- item ID -> true: the client says there's no such item
 local itemListeners = {}
-local held = {}     -- chat lines waiting for their items, oldest first: { text, late }
+local held = {}     -- chat lines waiting for their items, oldest first: { text, frame, late }
 local redrawing = false
 
 -- fn runs when items shown without their names have loaded, so their text can be shown again.
@@ -193,15 +193,17 @@ local function FlushChat()
 		if ok and not ready and not line.late then return end
 		table.remove(held, 1)
 		local rendered, text = pcall(Render, line.text, true)
-		DEFAULT_CHAT_FRAME:AddMessage(rendered and text or line.text)
+		local frame = line.frame or DEFAULT_CHAT_FRAME
+		frame:AddMessage(rendered and text or line.text)
 	end
 end
 
--- Adds a line to the chat window as it is, with item tokens as item links (ns.Print adds the WowMCP
--- prefix). A line naming items the client is still loading waits for them, up to CHAT_WAIT, so it
--- shows the game's names and links; the lines after it wait their turn.
-function ns.Chat(text)
-	local line = { text = tostring(text or "") }
+-- Adds a line to a chat window as it is, with item tokens as item links (ns.Print adds the WowMCP
+-- prefix). frame: the chat window (default: the main one). A line naming items the client is still
+-- loading waits for them, up to CHAT_WAIT, so it shows the game's names and links; the lines after it
+-- wait their turn, in every window, so the order stays.
+function ns.Chat(text, frame)
+	local line = { text = tostring(text or ""), frame = frame }
 	table.insert(held, line)
 	FlushChat()
 	if held[#held] == line then

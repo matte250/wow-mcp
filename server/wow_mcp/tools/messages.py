@@ -13,8 +13,8 @@ guidance(
     "To tell the player something inside the game, call show_message: e.g. a short answer when they asked "
     "from in game or asked to be told there, or a heads-up while they play. It shows in their chat within "
     "about a second; style 'center' or 'both' also puts it in big letters in the middle of the screen, for "
-    "short alerts. Keep in-game messages to a few lines. Questions the player typed with /ai in game already "
-    "get your final answer shown there, so don't send it again.",
+    "short alerts. Keep in-game messages to a few lines. Questions the player asked in game (with /ai, or in "
+    "the game's AI chat tab) already get your final answer shown there, so don't send it again.",
     order=65,
 )
 guidance(item_text.GUIDANCE, order=66)  # items in any text sent to the game, this tool's and the others'
@@ -25,11 +25,13 @@ MAX_TEXT = 4000
 MAX_SENDER = 40
 
 
-def publish_message(text: str, style: str = "chat", sender: str = "Claude") -> int:
+def publish_message(text: str, style: str = "chat", sender: str = "Claude", reply: bool = False) -> int:
     """Show text in the player's game and return the message's id (other features use this too).
 
     style: "chat" (printed with the sender's name), "center" (big text in the middle of the
-    screen) or "both". Messages sent while the game is closed show at the next login.
+    screen) or "both". reply: it answers what the player asked in game (/ai, the bridge), so it
+    shows in the game's AI chat tab with their question. Messages sent while the game is closed
+    show at the next login.
     """
     if style not in STYLES:
         raise ValueError(f"style must be one of {', '.join(STYLES)}, not {style!r}")
@@ -41,7 +43,10 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude") -> i
 
     def change(state: dict, seq: int) -> None:
         kept = [m for m in state.get("messages") or [] if isinstance(m, dict)][-(KEEP - 1) :]
-        kept.append({"id": seq, "text": text, "style": style, "from": sender, "at": int(time.time())})
+        message = {"id": seq, "text": text, "style": style, "from": sender, "at": int(time.time())}
+        if reply:
+            message["reply"] = True
+        kept.append(message)
         state["messages"] = kept
 
     return transport().publish(change)

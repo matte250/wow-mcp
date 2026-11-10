@@ -19,11 +19,12 @@ from wow_mcp.bridge import (
 from wow_mcp.tools import messages, player
 
 
-def publish_per_contract(text, style="chat", sender="Claude"):
+def publish_per_contract(text, style="chat", sender="Claude", reply=False):
     """Stands in for tools/messages.py: the `messages` payload as docs/PLAN.md (W7) defines it."""
 
     def change(state, seq):
-        state["messages"] = [*state.get("messages", []), {"id": seq, "text": text, "style": style, "from": sender}][-10:]
+        message = {"id": seq, "text": text, "style": style, "from": sender, **({"reply": True} if reply else {})}
+        state["messages"] = [*state.get("messages", []), message][-10:]
 
     return transport().publish(change)
 
@@ -84,8 +85,10 @@ def running():
 
 
 # Lua for live_game: logs the chat and the messages the game receives, and types the lines the
-# test writes into TYPED.
+# test writes into TYPED. The conversation shows in the main chat window (/mcp aitab off); the AI
+# tab has its own tests (test_ai_tab.py).
 GAME = """
+WowMCPDB = { aiTab = { mode = "off" } }
 local function Log(line)
     local f = assert(io.open("LOG", "a"))
     f:write(line, "\\n")
@@ -153,9 +156,9 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     assert received == ["Claude: You're in Durotar, at 50, 50.", "Claude: Go and see Gornek."]
     # One message per answer (one live-update slot); the game prints it line by line.
     state = json.loads((addons / "WowMCP" / "server-state.json").read_text())
-    assert [(m["text"], m["style"]) for m in state["messages"]] == [
-        ("You're in Durotar, at 50, 50.", "chat"),
-        ("Go and see Gornek.\n- He's in the den.\n- Then come back.", "chat"),
+    assert [(m["text"], m["style"], m["reply"]) for m in state["messages"]] == [
+        ("You're in Durotar, at 50, 50.", "chat", True),
+        ("Go and see Gornek.\n- He's in the den.\n- Then come back.", "chat", True),
     ]
 
 
@@ -203,7 +206,7 @@ def test_follow_ups_see_the_conversation(addons):
         return f"Answer {len(prompts)}:\n\n- **Karolek**   is in The Drag."
 
     history = bridge.History(addons / "WowMCP" / "bridge-history.json", clock=lambda: now[0])
-    b = Bridge(addons, agent, publish=lambda text, style, sender: None, history=history)
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply: None, history=history)
     b.answer(bridge.Question("where can I learn leatherworking?", "Thorgrim"))
     now[0] += 150
     b.answer(bridge.Question("and skinning?", "Thorgrim"))
@@ -271,7 +274,7 @@ def test_failed_answers_are_not_remembered(addons):
             raise outcome
         return outcome
 
-    b = Bridge(addons, agent, publish=lambda text, style, sender: said.append(text))
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append(text))
     for q in ("q1", "q2", "q3", "q4", "where is it?", "and then?"):
         b.answer(bridge.Question(q, "Thorgrim"))
     assert said[3] == "I have no answer to that."
@@ -292,7 +295,7 @@ def test_history_survives_a_restart(addons):
         prompts.append(prompt)
         return "Karolek, in The Drag."
 
-    quiet = lambda text, style, sender: None  # noqa: E731
+    quiet = lambda text, style, sender, reply: None  # noqa: E731
     Bridge(addons, agent, publish=quiet).answer(bridge.Question("where's the leatherworking trainer?", "Thorgrim"))
     Bridge(addons, agent, publish=quiet).answer(bridge.Question("and skinning?", "Thorgrim"))
     assert prompts[1] == (
@@ -317,7 +320,7 @@ def test_new_conversation(addons, running):
         return "An answer."
 
     said = []
-    b = running(Bridge(addons, agent, publish=lambda text, style, sender: said.append(text)))
+    b = running(Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append(text)))
     b.history.add("Grunta", "where am I?", "Durotar.")
     b.accept(question(1, "where am I?"))
     assert started.wait(5)
@@ -344,7 +347,9 @@ def test_new_conversation(addons, running):
 
 
 def test_chat_command(run_client):
+    # In the main chat window (/mcp aitab off), as before the AI tab; test_ai_tab.py has the tab.
     run_client("""
+        WowMCPDB = { aiTab = { mode = "off" } }
         local ns = client.LoadAddon()
         local posted = {}
         ns.Stream.Post = function(value) posted[#posted + 1] = value end
@@ -415,7 +420,7 @@ def test_questions_wait_their_turn(addons, running):
         busy.remove(prompt)
         return "Answer: " + prompt.rsplit(": ", 1)[1]
 
-    b = running(Bridge(addons, agent, publish=lambda text, style, sender: said.append(text)))
+    b = running(Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append(text)))
     b.accept(question(1, "q1"))
     assert started.wait(5)
     for i in range(2, MAX_WAITING + 3):  # one too many
@@ -432,7 +437,7 @@ def test_problems_are_reported_in_game(addons, tmp_path):
     def agent(prompt):
         raise AgentError("the agent exited with status 1: not logged in")
 
-    b = Bridge(addons, agent, publish=lambda text, style, sender: said.append((sender, text)))
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append((sender, text)))
     b.answer(bridge.Question("where am I?"))
     b.accept(stream.Post(1, 1, end=0, error="post 1 arrived damaged"))
     b.accept(stream.Post(1, 2, end=0, value={"not": "a question"}))
