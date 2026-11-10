@@ -10,4 +10,4 @@ REPUTATION = 3  # faction standings (Reputation.lua)
 TRAVEL = 4  # known flight paths (Travel.lua)
 KNOWLEDGE = 5  # recipes and vendors seen (Knowledge.lua)
 STATUS = 6  # addon build, live channel, slots (Status.lua)
-# 7 is free.
+ITEM_DETAILS = 7  # tooltip and stats of the items in the itemLookup payload (Inventory.lua)
