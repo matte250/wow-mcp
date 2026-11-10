@@ -218,10 +218,17 @@ def test_route_commands(run_route):
         assert(nav.Title.text == "Turn-ins  2/3" and client.waypoint.position.y == 0.4)
         mcp("route 3")
         assert(nav.Title.text == "Turn-ins  3/3" and client.waypoint.uiMapID == 1454)
+        -- Past the last stop the route is complete: navigator and waypoint go away.
         mcp("route next")
-        assert(client.chat[#client.chat]:find("Already at the last stop.", 1, true))
+        assert(client.chat[#client.chat]:find("Route complete.", 1, true))
+        assert(not nav:IsShown() and client.waypoint == nil)
+        local chatLines = #client.chat
+        mcp("route next")
+        assert(client.chat[#client.chat]:find("Route complete.", 1, true) and #client.chat == chatLines, "said once")
         mcp("route 9")
         assert(client.chat[#client.chat]:find("No stop 9.", 1, true))
+        mcp("route PREV")
+        assert(nav:IsShown() and nav.Title.text == "Turn-ins  3/3", "back to the last stop")
         mcp("route PREV")
         assert(nav.Title.text == "Turn-ins  2/3")
         mcp("route bogus")

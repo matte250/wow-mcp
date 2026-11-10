@@ -395,6 +395,14 @@ local function Go(index, arm)
 	Refresh()
 end
 
+-- The route is done: hide the navigator and remove its waypoint.
+local function Finish(message)
+	Saved().done = true
+	ClearWaypoint()
+	Refresh()
+	ns.Print(message)
+end
+
 local function Arrive()
 	local saved = Saved()
 	local reached = stops[saved.index]
@@ -409,10 +417,7 @@ local function Arrive()
 		Go(nextIndex, not Loops())
 		return
 	end
-	saved.done = true
-	ClearWaypoint()
-	Refresh()
-	ns.Print(string.format("Route complete: reached %s, the last stop.", ns.Escape(reached.label)))
+	Finish(string.format("Route complete: reached %s, the last stop.", ns.Escape(reached.label)))
 end
 
 function Update()
@@ -518,8 +523,12 @@ function Routes.Step(delta)
 	local index = (saved.done and #stops + 1 or saved.index) + delta
 	if Loops() then
 		index = (index - 1) % #stops + 1
-	elseif index < 1 or index > #stops then
-		ns.Print(index < 1 and "Already at the first stop." or "Already at the last stop.")
+	elseif index > #stops then
+		-- Past the last stop: that's the end of the route.
+		if not saved.done then Finish("Route complete.") end
+		return
+	elseif index < 1 then
+		ns.Print("Already at the first stop.")
 		return
 	end
 	Routes.GoTo(index)
