@@ -144,10 +144,20 @@ class Manual(_Condition):
     manual: Literal[True]
 
 
+GOAL_ID = r"^[a-z0-9][a-z0-9_-]{0,39}$"
+
+
+class GoalDone(_Condition):
+    """Done when a goal set with set_goals is done (and stays done, like a step). For gathering or anything else
+    done alongside other steps: the step links the goal instead of describing it."""
+
+    goal: Annotated[str, Field(pattern=GOAL_ID, description="The goal's id, as given to set_goals.")]
+
+
 CONDITIONS = {
     "have": Have, "at": At, "zone": InZone, "subzone": InSubzone, "quest_accepted": QuestAccepted,
     "quest_complete": QuestComplete, "quest_objective": QuestObjective, "quest_turned_in": QuestTurnedIn,
-    "level": Level, "skill": Skill, "recipe": Recipe, "manual": Manual,
+    "level": Level, "skill": Skill, "recipe": Recipe, "manual": Manual, "goal": GoalDone,
 }
 
 
@@ -166,7 +176,8 @@ Condition = Annotated[
     | Annotated[InSubzone, Tag("subzone")] | Annotated[QuestAccepted, Tag("quest_accepted")]
     | Annotated[QuestComplete, Tag("quest_complete")] | Annotated[QuestObjective, Tag("quest_objective")]
     | Annotated[QuestTurnedIn, Tag("quest_turned_in")] | Annotated[Level, Tag("level")]
-    | Annotated[Skill, Tag("skill")] | Annotated[Recipe, Tag("recipe")] | Annotated[Manual, Tag("manual")],
+    | Annotated[Skill, Tag("skill")] | Annotated[Recipe, Tag("recipe")] | Annotated[Manual, Tag("manual")]
+    | Annotated[GoalDone, Tag("goal")],
     Discriminator(
         _kind,
         custom_error_type="condition_kind",
@@ -249,7 +260,18 @@ def describe(c: _Condition) -> str:
             return f"{c.skill} {c.rank}"
         case Recipe():
             return f"recipe {c.recipe} known"
+        case GoalDone():
+            return f"goal {c.goal!r} done"
     return "ticked by the player"
+
+
+def _check_goals(steps: list["Step"]) -> None:
+    """A step can only wait for a goal the game has, or it never ticks off."""
+    goals = {g.get("id") for g in (transport().load_state().get("goals") or {}).get("goals") or []}
+    for n, s in enumerate(steps, 1):
+        for c in s.conditions:
+            if isinstance(c, GoalDone) and c.goal not in goals:
+                raise ToolError(f"Step {n} waits for goal {c.goal!r}, which isn't set: call set_goals first.")
 
 
 def _same(a: str, b: str) -> bool:
@@ -322,6 +344,7 @@ async def show_plan(
     The item IDs of 'have' conditions with a name are checked in the game first: if one is another item, nothing
     is sent and the error lists them.
     """
+    _check_goals(steps)
     checked = await _check_items(steps)
     plan = {
         "title": title,
