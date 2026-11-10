@@ -3,6 +3,7 @@ Plans.lua). The game reports progress in the "plan" section of request kind STAT
 
 from typing import Annotated, Literal
 
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
@@ -134,10 +135,20 @@ class Manual(_Condition):
     manual: Literal[True]
 
 
+GOAL_ID = r"^[a-z0-9][a-z0-9_-]{0,39}$"
+
+
+class GoalDone(_Condition):
+    """Done when a goal set with set_goals is done (and stays done, like a step). For gathering or anything else
+    done alongside other steps: the step links the goal instead of describing it."""
+
+    goal: Annotated[str, Field(pattern=GOAL_ID, description="The goal's id, as given to set_goals.")]
+
+
 CONDITIONS = {
     "have": Have, "at": At, "zone": InZone, "subzone": InSubzone, "quest_accepted": QuestAccepted,
     "quest_complete": QuestComplete, "quest_objective": QuestObjective, "quest_turned_in": QuestTurnedIn,
-    "level": Level, "skill": Skill, "recipe": Recipe, "manual": Manual,
+    "level": Level, "skill": Skill, "recipe": Recipe, "manual": Manual, "goal": GoalDone,
 }
 
 
@@ -156,7 +167,8 @@ Condition = Annotated[
     | Annotated[InSubzone, Tag("subzone")] | Annotated[QuestAccepted, Tag("quest_accepted")]
     | Annotated[QuestComplete, Tag("quest_complete")] | Annotated[QuestObjective, Tag("quest_objective")]
     | Annotated[QuestTurnedIn, Tag("quest_turned_in")] | Annotated[Level, Tag("level")]
-    | Annotated[Skill, Tag("skill")] | Annotated[Recipe, Tag("recipe")] | Annotated[Manual, Tag("manual")],
+    | Annotated[Skill, Tag("skill")] | Annotated[Recipe, Tag("recipe")] | Annotated[Manual, Tag("manual")]
+    | Annotated[GoalDone, Tag("goal")],
     Discriminator(
         _kind,
         custom_error_type="condition_kind",
@@ -238,7 +250,18 @@ def describe(c: _Condition) -> str:
             return f"{c.skill} {c.rank}"
         case Recipe():
             return f"recipe {c.recipe} known"
+        case GoalDone():
+            return f"goal {c.goal!r} done"
     return "ticked by the player"
+
+
+def _check_goals(steps: list["Step"]) -> None:
+    """A step can only wait for a goal the game has, or it never ticks off."""
+    goals = {g.get("id") for g in (transport().load_state().get("goals") or {}).get("goals") or []}
+    for n, s in enumerate(steps, 1):
+        for c in s.conditions:
+            if isinstance(c, GoalDone) and c.goal not in goals:
+                raise ToolError(f"Step {n} waits for goal {c.goal!r}, which isn't set: call set_goals first.")
 
 
 @tool(
@@ -258,6 +281,7 @@ def show_plan(
     waypoint (a looping route for farming spots) and its areas are shaded on the map. Replaces any plan sent
     earlier and the route from show_route. The player can also tick steps off, go back, or hide the window.
     """
+    _check_goals(steps)
     plan = {
         "title": title,
         "steps": [

@@ -24,6 +24,8 @@ Routes.lua
 Areas.xml
 Areas.lua
 Plans.lua
+Goals.lua
+Auction.lua
 Reminders.lua
 Tooltips.lua
 Status.lua

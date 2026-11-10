@@ -957,3 +957,36 @@ events:SetScript("OnEvent", function(_, event, arg1)
 	end
 	if plan then Soon() end
 end)
+
+---------------------------------------------------------------------------
+-- For Goals.lua and Auction.lua: goals' targets are conditions checked by the code above, a step
+-- can wait for a goal ({ goal = "<id>" }), and the items the plan still needs.
+---------------------------------------------------------------------------
+
+table.insert(KINDS, "goal")
+
+function CHECKS.goal(c)
+	if not ns.Goals then return false, "Goal " .. tostring(c.value) .. " (restart the game to load goals)" end
+	return ns.Goals.Status(c.value)
+end
+
+Plans.ParseCondition = ParseCondition -- raw condition -> parsed, for CheckCondition
+
+-- Whether a parsed condition holds, and its progress line (position conditions count as current).
+function Plans.CheckCondition(c)
+	return CHECKS[c.kind](c, true)
+end
+
+-- The "have" items of the steps not done yet that the player still lacks: { { item, need, name } }.
+function Plans.Items()
+	local list = {}
+	if not Active() then return list end
+	local done = State().done
+	for _, step in ipairs(steps) do
+		for _, c in ipairs(done[step.n] and {} or step.conditions) do
+			local need = c.kind == "have" and c.count - math.floor(ItemCount(c.value, c.bank)) or 0
+			if need > 0 then list[#list + 1] = { item = c.value, need = need, name = c.name } end
+		end
+	end
+	return list
+end
