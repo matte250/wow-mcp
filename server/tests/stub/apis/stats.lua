@@ -24,9 +24,9 @@ function RequestTimePlayed()
 	end)
 end
 
--- The chat frames print /played when they get TIME_PLAYED_MSG (ChatFrameUtil.DisplayTimePlayed).
-local function ChatFrame()
-	local frame = CreateFrame("Frame")
+-- The chat frames (chat.lua) print /played when they get TIME_PLAYED_MSG (ChatFrameUtil.DisplayTimePlayed).
+local function ChatFrame(frame)
+	frame = frame or CreateFrame("Frame")
 	function frame:UnregisterEvent(e) self.registered[e] = nil end
 	function frame:IsEventRegistered(e) return self.registered[e] == true end
 	frame:RegisterEvent("TIME_PLAYED_MSG")
@@ -37,7 +37,7 @@ local function ChatFrame()
 	return frame
 end
 
-ChatFrame1, ChatFrame2 = ChatFrame(), ChatFrame()
+ChatFrame1, ChatFrame2 = ChatFrame(ChatFrame1), ChatFrame(ChatFrame2)
 ChatFrame2:UnregisterEvent("TIME_PLAYED_MSG") -- e.g. a combat log tab
 CHAT_FRAMES = { "ChatFrame1", "ChatFrame2" }
 ChatFrameUtil = ChatFrameUtil or {}

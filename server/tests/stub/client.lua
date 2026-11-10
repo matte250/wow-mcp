@@ -56,15 +56,38 @@ Enum = { UIMapType = { Cosmic = 0, World = 1, Continent = 2, Zone = 3, Dungeon =
 
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, msg) table.insert(client.chat, msg) end }
 GameTooltip = setmetatable({}, { __index = function() return function() end end })
--- Chat links (|Haddon:...|h): every owner's SetItemRef callback hears client.itemRef(link).
-local itemRefCallbacks = {}
+-- EventRegistry: callbacks by event and owner, called as callback(owner, ...) when the UI triggers
+-- the event. Chat links (|Haddon:...|h): every SetItemRef callback hears client.itemRef(link).
+local callbacks = {}
 EventRegistry = {}
 function EventRegistry:RegisterCallback(event, fn, owner)
-	if event == "SetItemRef" then itemRefCallbacks[owner] = fn end
+	owner = owner or {}
+	callbacks[event] = callbacks[event] or {}
+	callbacks[event][owner] = fn
+	return owner
+end
+function EventRegistry:TriggerEvent(event, ...)
+	for owner, callback in pairs(callbacks[event] or {}) do callback(owner, ...) end
 end
 function client.itemRef(link)
-	for owner, callback in pairs(itemRefCallbacks) do callback(owner, link) end
+	EventRegistry:TriggerEvent("SetItemRef", link)
 end
+
+-- A post-hook: the hook runs after the original, with the same arguments; the original's results stand.
+function hooksecurefunc(t, name, hook)
+	if type(t) == "string" then t, name, hook = _G, t, name end
+	local original = assert(t[name], "no function to hook")
+	t[name] = function(...)
+		local results = table.pack(original(...))
+		hook(...)
+		return table.unpack(results, 1, results.n)
+	end
+end
+
+-- Builders for Blizzard's own UI, which a /reload makes anew: they run on every client.LoadAddon,
+-- before the addon loads. What the client keeps across reloads (e.g. chat window settings) they
+-- keep in client.*.
+client.onLoad = {}
 
 ---------------------------------------------------------------------------
 -- Widgets. Regions (textures, font strings, lines) and frames remember what they were told,
@@ -216,7 +239,8 @@ end
 
 -- Load the addon the way the client does: the TOC's Lua files in order, shared namespace.
 function client.LoadAddon()
-	wipe(itemRefCallbacks) -- a /reload starts with a fresh registry
+	wipe(callbacks) -- a /reload starts with a fresh registry
+	for _, build in ipairs(client.onLoad) do build() end
 	local ns = {}
 	for line in io.lines(ADDONS .. "/WowMCP/WowMCP.toc") do
 		if line:match("%.lua$") then

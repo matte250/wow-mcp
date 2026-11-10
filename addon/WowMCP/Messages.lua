@@ -1,5 +1,6 @@
 -- WowMCP messages: text the AI sends (payload key "messages", show_message tool) shown in chat,
 -- in big letters in the middle of the screen, or both. Also ns.ShowMessage for other features.
+-- The bridge's answers to /ai (marked "reply") show in the AI conversation (Chat.lua).
 
 local _, ns = ...
 
@@ -102,15 +103,18 @@ end
 -- show as the items (links in chat).
 -- style: "chat" (default), "center" or "both". sender: shown in chat (default "WowMCP").
 -- sound: a SOUNDKIT ID to play instead of the usual one, or false for none.
-function ns.ShowMessage(text, style, sender, sound)
+-- frames: the chat windows for its chat lines (default: the main one).
+function ns.ShowMessage(text, style, sender, sound, frames)
 	text = tostring(text or "")
 	if style ~= "center" and style ~= "both" then style = "chat" end
 	if style ~= "center" then
-		local prefix = SENDER_COLOR .. "[" .. ns.Escape(sender or "WowMCP") .. "]|r "
-		for line in (text .. "\n"):gmatch("(.-)\r?\n") do
-			if line:find("%S") then
-				ns.Chat(prefix .. line)
-				prefix = "    "
+		for _, frame in ipairs(frames or { DEFAULT_CHAT_FRAME }) do
+			local prefix = SENDER_COLOR .. "[" .. ns.Escape(sender or "WowMCP") .. "]|r "
+			for line in (text .. "\n"):gmatch("(.-)\r?\n") do
+				if line:find("%S") then
+					ns.Chat(prefix .. line, frame)
+					prefix = "    "
+				end
 			end
 		end
 	end
@@ -128,6 +132,16 @@ end
 
 local function Sent(m)
 	return type(m.at) == "number" and date("%H:%M", m.at) or nil
+end
+
+-- m.reply marks the bridge's answers to the player's questions: they belong to the AI conversation,
+-- which has its own chat tab (Chat.lua).
+local function Show(m, text, style)
+	if m.reply == true and ns.AIChat then
+		ns.AIChat.Answer(text, style, m.from)
+	else
+		ns.ShowMessage(text, style, m.from)
+	end
 end
 
 -- The payload lists the newest messages; show the ones with ids we haven't shown.
@@ -150,9 +164,9 @@ function Messages.Receive(list)
 			local text = ns.Escape(m.text)
 			if type(m.at) == "number" and now - m.at > STALE then
 				-- Sent while the game was closed: no flashing it on screen now.
-				ns.ShowMessage(text .. " |cffaaaaaa(" .. Sent(m) .. ")|r", "chat", m.from)
+				Show(m, text .. " |cffaaaaaa(" .. Sent(m) .. ")|r", "chat")
 			else
-				ns.ShowMessage(text, m.style, m.from)
+				Show(m, text, m.style)
 			end
 		end
 	end
