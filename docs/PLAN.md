@@ -24,7 +24,7 @@ only by the integrator, who merges the workstreams one by one.
 | W16 | Quest rewards (XP, money, items) | `Quests.lua` | `tools/quests.py` | kind `QUESTS` |
 | W17 | Plans: step checklists that track themselves | `Plans.lua` | `tools/plans.py` | payload key `plan`, STATE section `plan` |
 | W18 | Goals: background targets that point out chances | `Goals.lua` | `tools/goals.py` | payload key `goals`, STATE section `goals` |
-| W19 | Auction house prices | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch`, KNOWLEDGE section `auction` |
+| W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
 (W3 already has `test_quests.py` and `stub/apis/quests.lua`; W8 owns `test_stream.py` changes).
@@ -71,6 +71,11 @@ startup, so after the one restart for this restructure, every feature only needs
   conditions anywhere (goals use them for targets; `{goal: id}` is a condition too).
   `ns.Goals.Status` / `Items` / `AuctionPrices` / `Money` and `ns.Auction.Price` / `Cost` / `IsOpen`.
   Guidance orders 12-14 are plans, goals and buy-vs-farm.
+- **Auction data**: `WowMCPDB.auction[realm] = { items, scan = { [id] = "price,listed,auctions,scan#" },
+  scans, current, tracked }` (the full-scan table is never pruned); `WowMCPDB.auctionScan.asked` is
+  account-wide, the time of the last full scan request. `ns.Auction.Price(id)` returns `src`
+  ("scan"/"search") and `last` (`{price, listed, at}`) when the item isn't listed now. Container
+  items carry `bound = true` when soulbound.
 - **Core state** (read only): `ns.run` (`live`, `liveProblem`, `seq`, `req`), `ns.SlotsLeft()`,
   `ns.SLOT_COUNT`, and `ns.BUILD` (from `Build.lua`, which the installer generates).
 - **Sending to the server**: `ns.Stream.Send(id, value)` (replies; Requests.lua does this for you).
