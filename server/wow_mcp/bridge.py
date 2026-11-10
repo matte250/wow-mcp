@@ -4,6 +4,10 @@ The addon posts each question the player asks (Chat.lua, through Stream.lua's fi
 This watches for them, asks an agent that has the wow tools, and shows the answer in the
 player's chat as a message (tools/messages.py). Questions are answered one at a time.
 
+Each agent starts from zero, so the player's recent exchanges go into the prompt, which makes
+follow-up questions work. They're kept in a file (History), so a restart keeps the conversation;
+/ai new starts a fresh one.
+
 The default agent is headless Claude Code (`claude -p`) with this MCP server and web lookups,
 run apart from the user's own Claude Code settings. Any other command works too (--agent): it
 gets the prompt on stdin and prints the answer.
@@ -25,13 +29,14 @@ import sys
 import tempfile
 import textwrap
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from wow_mcp import stream
 from wow_mcp.install import ADDONS_DIR_ENV
-from wow_mcp.transport import ADDON
+from wow_mcp.transport import ADDON, write_atomic
 
 log = logging.getLogger("wow_mcp.bridge")
 
@@ -42,6 +47,10 @@ MAX_WAITING = 5  # questions queued behind the one being answered
 MAX_QUESTION = 500
 LINE_WIDTH = 250  # characters per chat message
 MAX_LINES = 6  # chat lines per answer
+HISTORY = 8  # earlier exchanges in each prompt
+HISTORY_MINUTES = 60  # ... from at most this long ago
+MAX_KEPT_ANSWER = 1000  # characters of an answer kept for later prompts
+HISTORY_FILE = "bridge-history.json"  # in the addon's folder, next to server-state.json
 
 SYSTEM_PROMPT = """\
 The player typed this question into World of Warcraft's chat with /ai while playing. Your final \
@@ -55,8 +64,11 @@ questions) and say they're marked on the map. Use the other tools that act in ga
 that's what they ask for.
 - Look things up on the web (e.g. Wowhead) when you're not sure, for their game version.
 - Don't call show_message: your reply is shown in game for you.
-- They can't answer follow-up questions here, so don't ask any: make a sensible assumption \
-and say what you assumed."""
+- Your earlier exchanges with them may come before the question, as context. Use them only when \
+the question follows up on them (e.g. "and the next one?"); otherwise ignore them. The game may \
+have changed since, so look again when that matters.
+- Don't ask them questions back: make a sensible assumption and say what you assumed. They can \
+correct you with another /ai."""
 
 
 class AgentError(Exception):
@@ -70,6 +82,23 @@ class AgentTimeout(AgentError):
 Agent = Callable[[str], str]  # prompt -> answer; raises AgentError
 
 
+def _player(post: dict) -> str | None:
+    player = post.get("player")
+    return player if isinstance(player, str) and player else None
+
+
+@dataclass(frozen=True)
+class Exchange:
+    question: str
+    answer: str
+    at: float  # unix time it was answered
+
+
+def _ago(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes} min ago" if minutes > 0 else "just now"
+
+
 @dataclass(frozen=True)
 class Question:
     text: str
@@ -81,11 +110,93 @@ class Question:
         if not isinstance(value, dict) or not isinstance(value.get("question"), str):
             return None
         text = " ".join(value["question"].split())[:MAX_QUESTION]
-        player = value.get("player")
-        return cls(text, player if isinstance(player, str) and player else None) if text else None
+        return cls(text, _player(value)) if text else None
 
-    def prompt(self) -> str:
-        return f"{self.player or 'The player'} asks, in game: {self.text}"
+    def prompt(self, earlier: Sequence[Exchange] = (), now: float | None = None) -> str:
+        """The agent's prompt: the question, after the player's earlier exchanges (oldest first)."""
+        asks = f"{self.player or 'The player'} asks, in game: {self.text}"
+        if not earlier:
+            return asks
+        now = time.time() if now is None else now
+        lines = [(f"Earlier exchanges with {self.player or 'the player'}, oldest first. Context only: use them if "
+                  "the question below follows up on them, otherwise ignore them.")]
+        for exchange in earlier:
+            lines += [f"Q ({_ago(now - exchange.at)}): {exchange.question}", f"A: {exchange.answer}"]
+        return "\n".join(lines) + "\n\n" + asks
+
+
+@dataclass(frozen=True)
+class Reset:
+    """/ai new: the player starts a fresh conversation."""
+
+    player: str | None = None
+
+    @classmethod
+    def from_post(cls, value: object) -> "Reset | None":
+        """The reset in a post from Chat.lua ({reset = true, player}), if it is one."""
+        if not isinstance(value, dict) or value.get("reset") is not True:
+            return None
+        return cls(_player(value))
+
+
+class History:
+    """Each player's recent exchanges, for their next prompts. Kept in a file (if `path`), so a
+    restart keeps the conversation; only what a prompt can still use is kept."""
+
+    def __init__(self, path: Path | None, size: int = HISTORY, minutes: float = HISTORY_MINUTES,
+                 clock: Callable[[], float] = time.time):
+        self.path = path
+        self.size = size
+        self.window = minutes * 60
+        self.clock = clock
+        self._players: dict[str, list[Exchange]] = {}  # by player name ("" if unknown)
+        self._lock = threading.Lock()
+        if path and path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self._players = {
+                    str(player): [Exchange(str(e["question"]), str(e["answer"]), float(e["at"])) for e in exchanges]
+                    for player, exchanges in saved.items()
+                }
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+                log.warning("starting without earlier exchanges: can't read %s: %s", path, e)
+
+    def recent(self, player: str | None) -> list[Exchange]:
+        """The player's exchanges for their next prompt, oldest first."""
+        with self._lock:
+            return self._recent(player or "")
+
+    def _recent(self, key: str) -> list[Exchange]:
+        if self.size <= 0:
+            return []
+        since = self.clock() - self.window
+        return [e for e in self._players.get(key, []) if e.at >= since][-self.size :]
+
+    def add(self, player: str | None, question: str, answer: str) -> None:
+        if self.size <= 0 or self.window <= 0:
+            return
+        answer = " ".join(answer.split())
+        if len(answer) > MAX_KEPT_ANSWER:
+            answer = answer[: MAX_KEPT_ANSWER - 1].rstrip() + "…"
+        with self._lock:
+            key = player or ""
+            self._players[key] = [*self._recent(key), Exchange(question, answer, self.clock())][-self.size :]
+            self._save()
+
+    def clear(self, player: str | None) -> None:
+        with self._lock:
+            if self._players.pop(player or "", None) is not None:
+                self._save()
+
+    def _save(self) -> None:
+        self._players = {key: recent for key in self._players if (recent := self._recent(key))}
+        if not self.path:
+            return
+        saved = {key: [asdict(e) for e in exchanges] for key, exchanges in self._players.items()}
+        try:
+            write_atomic(self.path, json.dumps(saved, ensure_ascii=False, indent=1).encode("utf-8"))
+        except OSError as e:
+            log.warning("couldn't save the conversation: %s", e)
 
 
 # Answer formatting ------------------------------------------------------------------------
@@ -251,12 +362,14 @@ class Bridge:
     """Receives questions from the game and answers them one at a time."""
 
     def __init__(self, addons_dir: Path, agent: Agent, publish: Callable[..., int] = publish_message,
-                 sender: str = SENDER):
+                 sender: str = SENDER, history: History | None = None):
         self.out_dir = addons_dir / ADDON / "out"
         self.agent = agent
         self.publish = publish
         self.sender = sender
-        self.questions: queue.Queue[Question] = queue.Queue(MAX_WAITING)
+        self.history = History(addons_dir / ADDON / HISTORY_FILE) if history is None else history
+        # Resets wait their turn too: a question asked before /ai new belongs to the old conversation.
+        self.questions: queue.Queue[Question | Reset] = queue.Queue(MAX_WAITING)
         self.ready = threading.Event()  # watching for questions
         self.stop = threading.Event()
 
@@ -280,27 +393,38 @@ class Bridge:
             log.warning("%s", post.error)
             self.say("Your question arrived garbled. Please ask again.")
             return
-        question = Question.from_post(post.value)
-        if not question:
+        item = Question.from_post(post.value) or Reset.from_post(post.value)
+        if isinstance(item, Reset):
+            log.info("%s starts a fresh conversation", item.player or "the player")
+        elif item:
+            log.info("%s asks: %s", item.player or "the player", item.text)
+        else:
             log.warning("ignoring a post that isn't a question: %r", post.value)
             return
-        log.info("%s asks: %s", question.player or "the player", question.text)
         try:
-            self.questions.put_nowait(question)
+            self.questions.put_nowait(item)
         except queue.Full:
-            self.say("I'm still busy with your earlier questions. Please ask again in a minute.")
+            if isinstance(item, Reset):  # the game already said it's done
+                self.history.clear(item.player)
+            else:
+                self.say("I'm still busy with your earlier questions. Please ask again in a minute.")
 
     def _work(self) -> None:
         while not self.stop.is_set():
             try:
-                question = self.questions.get(timeout=0.5)
+                item = self.questions.get(timeout=0.5)
             except queue.Empty:
                 continue
-            self.answer(question)
+            if isinstance(item, Reset):
+                self.history.clear(item.player)
+            else:
+                self.answer(item)
 
     def answer(self, question: Question) -> None:
+        answer = ""  # stays empty if the agent fails: failures don't become part of the conversation
         try:
-            text = self.agent(question.prompt()) or "I have no answer to that."
+            answer = self.agent(question.prompt(self.history.recent(question.player), self.history.clock()))
+            text = answer or "I have no answer to that."
         except AgentTimeout as e:
             log.error("agent timed out: %s", e)
             text = f"Sorry, I gave up: {e}. Try asking something narrower."
@@ -312,6 +436,8 @@ class Bridge:
             text = f"Sorry, I couldn't answer that: {e}"
         if self.stop.is_set():
             return
+        if answer:
+            self.history.add(question.player, question.text, answer)
         log.info("answer: %s", text)
         # One message (the game prints it one chat line per line), so an answer costs one slot.
         self.say("\n".join(chat_lines(text)))
@@ -354,11 +480,18 @@ def main() -> None:
     parser.add_argument("--model", help="model for the Claude Code agent, e.g. sonnet")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help="seconds an answer may take (default: %(default)s)")
+    parser.add_argument("--history", type=int, default=HISTORY, metavar="N",
+                        help="earlier exchanges with the player to include in each prompt, so follow-up questions "
+                        "work; 0 for none (default: %(default)s)")
+    parser.add_argument("--history-minutes", type=float, default=HISTORY_MINUTES, metavar="MINUTES",
+                        help="only include exchanges from the last this many minutes (default: %(default)s)")
     args = parser.parse_args()
     if not args.addons_dir:
         parser.error(f"pass --addons-dir or set {ADDONS_DIR_ENV}")
     if args.agent and args.model:
         parser.error("--model only applies to the default agent")
+    if args.history < 0 or args.history_minutes < 0:
+        parser.error("--history and --history-minutes can't be negative")
     addons_dir = Path(args.addons_dir).expanduser()
     if not (addons_dir / ADDON / "out").is_dir():
         sys.exit(f"{ADDON} isn't installed in {addons_dir}. Run wow-mcp-install first.")
@@ -374,7 +507,8 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     agent = CommandAgent(command, addons_dir, args.timeout)
-    bridge = Bridge(addons_dir, agent)
+    history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
+    bridge = Bridge(addons_dir, agent, history=history)
     signal.signal(signal.SIGTERM, lambda *_: bridge.stop.set())
     log.info("Answering /ai questions from %s with %s", addons_dir, command[0])
     try:

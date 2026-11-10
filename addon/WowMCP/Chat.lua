@@ -1,6 +1,7 @@
 -- WowMCP chat: /ai <question> (or /ask) asks the AI without leaving the game. The question
 -- goes to the wow-mcp-bridge service as a stream post (Stream.lua); the bridge asks an agent
--- that has the wow tools, and the answer comes back as a message (Messages.lua).
+-- that has the wow tools, and the answer comes back as a message (Messages.lua). The bridge
+-- remembers the recent questions and answers, so follow-ups work; /ai new starts afresh.
 
 local _, ns = ...
 
@@ -19,6 +20,13 @@ local function Ask(input)
 	local typed = strtrim(input or "")
 	if typed == "" then
 		ns.Print("/ai <question> - ask the AI, e.g. /ai where can I learn leatherworking?")
+		ns.Print("/ai new - start a fresh conversation (it remembers your recent questions for follow-ups)")
+		return
+	end
+	if typed:lower() == "new" then
+		-- Nothing comes back for this, so it costs no live-update slot.
+		ns.Stream.Post({ reset = true, player = UnitName("player") })
+		ns.Print("Starting a fresh conversation.")
 		return
 	end
 	local question = PlainText(typed)
