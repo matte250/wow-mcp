@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from wow_mcp import bridge, stream
+from wow_mcp import bridge, item_text, stream
 from wow_mcp.app import transport
 from wow_mcp.bridge import (
     MAX_WAITING, SYSTEM_PROMPT, AgentError, AgentTimeout, Bridge, CommandAgent, chat_lines, claude_command,
@@ -525,6 +525,30 @@ def test_chat_lines():
     assert lines[0] == "- Item 0. - Item 1. - Item 2. - Item 3. - Item 4."
     assert lines[-1].endswith(" …") and "Item 29" not in lines[-1]
     assert chat_lines("  \n") == []
+
+
+def test_chat_lines_keep_items_whole():
+    # Items have spaces, full stops and hyphens inside; at the smallest width, some are longer than a line.
+    answer = ("Take out {item:2318:Light Leather} (37) and {item:2319:Medium Leather}. Mr. Pinchy wants "
+              "{item:5:Mr. Pinchy's Wish} back! **Then** sell {item:2934} and {item:4232:Medium Hide - large}.")
+    items = item_text.ITEM.findall(answer)
+    assert len(items) == 5
+    for width in (20, 30, 45, 80, 250):
+        lines = chat_lines(answer, width=width, limit=20)
+        assert item_text.ITEM.findall("\n".join(lines)) == items, (width, lines)
+        # Lines keep to the width, except a word with an item that's longer.
+        assert all(len(line) <= width or (" " not in item_text.ITEM.sub("", line) and len(max(items, key=len)) > width)
+                   for line in lines), (width, lines)
+    assert chat_lines(answer) == [
+        "Take out {item:2318:Light Leather} (37) and {item:2319:Medium Leather}. Mr. Pinchy wants "
+        "{item:5:Mr. Pinchy's Wish} back! Then sell {item:2934} and {item:4232:Medium Hide - large}."
+    ]
+    # Cut short: an item that doesn't fit is left out rather than cut.
+    for width in range(20, 60):
+        for line in chat_lines(answer, width=width, limit=2):
+            assert "{item:" not in item_text.ITEM.sub("", line) and "" not in line, (width, line)
+    # The agent is told to write them.
+    assert "{item:<id>}" in SYSTEM_PROMPT and "{item:<id>:<name>}" in SYSTEM_PROMPT
 
 
 def test_only_one_bridge_per_game(tmp_path):

@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
-from wow_mcp import kinds
+from wow_mcp import item_text, kinds
 from wow_mcp.app import as_list, guidance, request, section, tool, transport
 from wow_mcp.tools.areas import Area
 from wow_mcp.tools.messages import delivery_note
@@ -173,8 +173,9 @@ LUA_KEYS = {
 class Step(BaseModel):
     text: Annotated[
         str,
-        Field(min_length=1, max_length=300, description="The instruction, e.g. 'Buy 2 Coarse Thread and 1 Salt from "
-              "Duokna'. Say what to do and where; the checklist shows it as written."),
+        Field(min_length=1, max_length=300, description="The instruction, e.g. 'Buy 2 {item:2320:Coarse Thread} and "
+              "1 {item:4289:Salt} from Duokna'. Say what to do and where; the checklist shows it as written. "
+              + item_text.HINT),
     ]
     places: Annotated[
         list[Stop],
@@ -247,7 +248,11 @@ def describe(c: _Condition) -> str:
     )
 )
 def show_plan(
-    title: Annotated[str, Field(min_length=1, max_length=80, description="e.g. 'Toughened Leather Gloves'.")],
+    title: Annotated[
+        str,
+        Field(min_length=1, max_length=80, description="e.g. 'Leatherworking 113 to 125' or "
+              "'{item:4253:Toughened Leather Gloves}'. " + item_text.HINT),
+    ],
     steps: Annotated[list[Step], Field(min_length=1, max_length=50, description="In the order to do them.")],
 ) -> str:
     """Show the player a step-by-step plan in World of Warcraft: a checklist window that guides them through

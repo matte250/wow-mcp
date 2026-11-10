@@ -137,15 +137,15 @@ function StopPin:OnAcquired(stop, x, y, onOwnMap)
 	local c = StopColor(stop)
 	self.Fill:SetVertexColor(c[1], c[2], c[3], 1)
 	-- Labels only on the stop's own map, so continent maps stay readable.
-	self.Label:SetText(onOwnMap and ns.Escape(stop.label) or "")
+	self.Label:SetText(onOwnMap and ns.ItemText(stop.label) or "")
 	self:SetPosition(x, y)
 end
 
 function StopPin:OnMouseEnter()
 	local s = self.stop
 	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-	GameTooltip:SetText(string.format("%d. %s", s.n, ns.Escape(s.label)), 1, 0.82, 0)
-	if s.note then GameTooltip:AddLine(ns.Escape(s.note), 1, 1, 1, true) end
+	GameTooltip:SetText(string.format("%d. %s", s.n, ns.ItemText(s.label)), 1, 0.82, 0)
+	if s.note then GameTooltip:AddLine(ns.ItemText(s.note), 1, 1, 1, true) end
 	GameTooltip:AddLine(string.format("%s  %.1f, %.1f", ns.Escape(s.zone), s.x * 100, s.y * 100), 0.7, 0.7, 0.7)
 	local yards = ns.Map.Distance(s)
 	if yards then GameTooltip:AddLine(string.format("%d yards away", math.floor(yards + 0.5)), 0.7, 0.7, 0.7) end
@@ -306,7 +306,7 @@ local function NavigatorTooltip(f)
 end
 
 -- The navigator grows with its text up to NAV_MAX_WIDTH; a longer stop name wraps onto a
--- second line rather than being cut off.
+-- second line rather than being cut off. The measures include item icons, as wide as the line is high.
 local NAV_MIN_WIDTH, NAV_MAX_WIDTH, TEXT_LEFT, TEXT_RIGHT = 180, 360, 58, 10
 
 local function Layout(f)
@@ -470,11 +470,11 @@ function Update()
 	if yards and yards > ARRIVE_YARDS then armed = true end
 
 	if t.guided and #t.stops == 1 then
-		nav.Title:SetText(Title(t))
+		nav.Title:SetText(ns.RenderItems(Title(t)))
 	else
-		nav.Title:SetText(string.format("%s  %d/%d", Title(t), saved.index, #t.stops))
+		nav.Title:SetText(ns.RenderItems(string.format("%s  %d/%d", Title(t), saved.index, #t.stops)))
 	end
-	nav.Stop:SetText(ns.Escape(stop.label))
+	nav.Stop:SetText(ns.ItemText(stop.label))
 	nav.Distance:SetText(yards and string.format("%d yd", math.floor(yards + 0.5)) or problem)
 	nav.Arrow:SetShown(angle ~= nil)
 	if angle then nav.Arrow:SetRotation(angle) end
@@ -704,6 +704,7 @@ ns.RegisterReceiver("routes", function(payload)
 	if type(payload) == "table" then Routes.Receive(payload) end
 end)
 ns.OnLogin(Routes.Init)
+ns.OnItemsLoaded(RefreshPins) -- labels naming items that were still loading; the navigator redraws itself
 ns.RegisterCommand("route", "/mcp route [show, next, prev, <n>, stop] - the route and its navigator", Routes.Command)
 
 local combat = CreateFrame("Frame")

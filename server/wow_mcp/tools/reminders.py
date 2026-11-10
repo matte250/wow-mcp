@@ -14,7 +14,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from wow_mcp import kinds
+from wow_mcp import item_text, kinds
 from wow_mcp.app import as_list, guidance, request, section, tool, transport
 from wow_mcp.tools.messages import delivery_note
 
@@ -91,7 +91,9 @@ async def game_reminders() -> tuple[dict[int, dict] | None, str | None]:
     )
 )
 async def set_reminder(
-    text: Annotated[str, Field(min_length=1, max_length=300, description="What to remind the player of.")],
+    text: Annotated[
+        str, Field(min_length=1, max_length=300, description="What to remind the player of. " + item_text.HINT)
+    ],
     in_minutes: Annotated[
         float | None, Field(gt=0, le=MAX_DAYS * 24 * 60, description="Fire this many minutes from now.")
     ] = None,

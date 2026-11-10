@@ -152,15 +152,15 @@ function Pin:OnAcquired(m, x, y, onOwnMap)
 	self.marker = m
 	self.Icon:SetTexture(ICON_PATH:format(m.icon))
 	-- Labels only on the marker's own map, so continent maps stay readable.
-	self.Label:SetText(onOwnMap and ns.Escape(m.label) or "")
+	self.Label:SetText(onOwnMap and ns.ItemText(m.label) or "")
 	self:SetPosition(x, y)
 end
 
 function Pin:OnMouseEnter()
 	local m = self.marker
 	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-	GameTooltip:SetText(Icon(m) .. " " .. ns.Escape(m.label), 1, 0.82, 0)
-	if m.note then GameTooltip:AddLine(ns.Escape(m.note), 1, 1, 1, true) end
+	GameTooltip:SetText(Icon(m) .. " " .. ns.ItemText(m.label), 1, 0.82, 0)
+	if m.note then GameTooltip:AddLine(ns.ItemText(m.note), 1, 1, 1, true) end
 	GameTooltip:AddLine(string.format("%s  %.1f, %.1f", ns.Escape(m.zone), m.x * 100, m.y * 100), 0.7, 0.7, 0.7)
 	local yards = Distance(m)
 	if yards then GameTooltip:AddLine(string.format("%d yards away", math.floor(yards + 0.5)), 0.7, 0.7, 0.7) end
@@ -417,6 +417,7 @@ ns.RegisterReceiver("map", function(payload)
 	if type(payload) == "table" then Map.Receive(payload) end
 end)
 ns.OnLogin(Map.Init)
+ns.OnItemsLoaded(RefreshPins) -- labels naming items that were still loading
 
 ns.RegisterCommand("", "/mcp - list the current markers", Map.List)
 ns.RegisterCommand("list", nil, Map.List)

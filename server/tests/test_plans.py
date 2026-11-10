@@ -78,8 +78,10 @@ PRELUDE = (
     local function chat() return table.concat(client.chat, "\n") end
     local function last() return client.chat[#client.chat] end
     local function has(text) return chat():find(text, 1, true) ~= nil end
-    -- Text without colour codes.
-    local function plain(text) return (tostring(text or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")) end
+    -- Text without colour codes and item icons.
+    local function plain(text)
+        return (tostring(text or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T%d+:0|t ", ""))
+    end
     local function moveTo(map, x, y)
         client.player.map, client.player.x, client.player.y = map, x, y
         client.Tick()

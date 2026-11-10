@@ -30,7 +30,7 @@ end
 ---------------------------------------------------------------------------
 
 local frame
-local shown, free = {}, {} -- shown: { fs, age, hold }, oldest first
+local shown, free = {}, {} -- shown: { fs, text, age, hold }, oldest first
 
 local function Layout()
 	local above
@@ -85,11 +85,11 @@ local function ShowCenter(text)
 		fs:SetMaxLines(4)
 		fs:SetTextColor(CENTER_COLOR[1], CENTER_COLOR[2], CENTER_COLOR[3])
 	end
-	fs:SetText(text)
+	fs:SetText(ns.RenderItems(text))
 	fs:SetAlpha(1)
 	fs:Show()
 	-- Long enough to read: 10 s, up to 20 s for long texts.
-	table.insert(shown, { fs = fs, age = 0, hold = math.min(20, math.max(10, #text / 15)) })
+	table.insert(shown, { fs = fs, text = text, age = 0, hold = math.min(20, math.max(10, #text / 15)) })
 	Layout()
 	frame:SetScript("OnUpdate", OnUpdate)
 end
@@ -98,7 +98,8 @@ end
 -- Showing a message
 ---------------------------------------------------------------------------
 
--- Shows text as it is, like ns.Print: escape text from the AI with ns.Escape first.
+-- Shows text as it is, like ns.Print: escape text from the AI with ns.Escape first. Its item tokens
+-- show as the items (links in chat).
 -- style: "chat" (default), "center" or "both". sender: shown in chat (default "WowMCP").
 -- sound: a SOUNDKIT ID to play instead of the usual one, or false for none.
 function ns.ShowMessage(text, style, sender, sound)
@@ -108,7 +109,7 @@ function ns.ShowMessage(text, style, sender, sound)
 		local prefix = SENDER_COLOR .. "[" .. ns.Escape(sender or "WowMCP") .. "]|r "
 		for line in (text .. "\n"):gmatch("(.-)\r?\n") do
 			if line:find("%S") then
-				DEFAULT_CHAT_FRAME:AddMessage(prefix .. line)
+				ns.Chat(prefix .. line)
 				prefix = "    "
 			end
 		end
@@ -169,6 +170,11 @@ function Messages.List()
 		ns.ShowMessage(ns.Escape(m.text) .. (sent and " |cffaaaaaa(" .. sent .. ")|r" or ""), "chat", m.from, false)
 	end
 end
+
+-- Items that were still loading: their names in the lines on screen.
+ns.OnItemsLoaded(function()
+	for _, line in ipairs(shown) do line.fs:SetText(ns.RenderItems(line.text)) end
+end)
 
 ns.RegisterReceiver("messages", function(list)
 	if type(list) == "table" then Messages.Receive(list) end

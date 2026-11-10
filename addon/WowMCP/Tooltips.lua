@@ -18,7 +18,7 @@ local function AddNote(tooltip, data)
 	-- pcall: restricted content can hand out secret values that can't be used as keys.
 	local ok, text = pcall(function() return type(data) == "table" and notes[ItemID(data)] end)
 	if ok and text then
-		tooltip:AddLine("|cff33ff99AI:|r " .. ns.Escape(text), 0.4, 0.8, 1, true)
+		tooltip:AddLine("|cff33ff99AI:|r " .. ns.ItemText(text), 0.4, 0.8, 1, true)
 	end
 end
 

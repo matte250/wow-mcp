@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from wow_mcp import game
+from wow_mcp import game, item_text
 from wow_mcp.app import addons_dir, guidance, mismatch_error, tool, transport
 
 guidance(
@@ -17,6 +17,7 @@ guidance(
     "get your final answer shown there, so don't send it again.",
     order=65,
 )
+guidance(item_text.GUIDANCE, order=66)  # items in any text sent to the game, this tool's and the others'
 
 STYLES = ("chat", "center", "both")
 KEEP = 10  # the payload carries only the newest; the addon shows the ids it hasn't shown yet
@@ -35,8 +36,7 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude") -> i
     text = text.strip()
     if not text:
         raise ValueError("the message is empty")
-    if len(text) > MAX_TEXT:
-        text = text[: MAX_TEXT - 1] + "…"
+    text = item_text.shorten(text, MAX_TEXT)
     sender = (sender or "").strip()[:MAX_SENDER] or "Claude"
 
     def change(state: dict, seq: int) -> None:
@@ -68,7 +68,7 @@ def show_message(
         Field(
             min_length=1,
             max_length=2000,
-            description="What to tell the player. Plain text; newlines start new chat lines.",
+            description="What to tell the player. Plain text; newlines start new chat lines. " + item_text.HINT,
         ),
     ],
     style: Annotated[
