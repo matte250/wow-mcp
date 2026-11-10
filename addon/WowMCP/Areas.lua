@@ -1,4 +1,232 @@
--- WowMCP areas: area highlights: shaded regions on the map (payload key "areas").
--- See docs/PLAN.md. Not implemented yet.
+-- WowMCP areas: shaded, labelled circles on the world map for places that are regions rather
+-- than points, e.g. where a mob or herb is found (payload key "areas", sent by highlight_areas).
+-- Each circle also shows on the other maps around it, at the same size on the ground.
 
 local _, ns = ...
+
+local Areas = {}
+
+local PIN_TEMPLATE = "WowMCPAreaPinTemplate"
+local FILL_ALPHA = 0.3
+local LABEL_MIN_SIZE = 48 -- canvas units; smaller circles (e.g. on a continent map) only label on hover
+local PALETTE = {
+	{ 1, 0.3, 0.3 }, { 0.3, 0.6, 1 }, { 0.3, 0.9, 0.3 }, { 1, 0.8, 0.2 },
+	{ 0.8, 0.4, 1 }, { 1, 0.55, 0.15 }, { 0.3, 0.9, 0.9 }, { 1, 1, 1 },
+}
+
+local current     -- the payload being shown
+local areas = {}  -- resolved: an ns.Map.Locate location plus n, label, radius (0-1 of the map's width), yards, color
+local provider
+local mapAfterCombat
+
+local widths = {}
+
+-- A map's width in yards (world units), or nil for maps without one (e.g. the whole world).
+local function Width(mapID)
+	if widths[mapID] == nil then
+		local ok1, c1, left = pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(0, 0.5))
+		local ok2, c2, right = pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(1, 0.5))
+		widths[mapID] = false
+		if ok1 and ok2 and c1 and c1 == c2 and left and right then
+			local x1, y1 = left:GetXY()
+			local x2, y2 = right:GetXY()
+			widths[mapID] = math.sqrt((x2 - x1) ^ 2 + (y2 - y1) ^ 2)
+		end
+	end
+	return widths[mapID] or nil
+end
+
+-- "rrggbb" (as the server sends it) or a palette colour per area.
+local function Color(hex, n)
+	local r, g, b = tostring(hex or ""):match("^#?(%x%x)(%x%x)(%x%x)$")
+	if r then return { tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255 } end
+	return PALETTE[(n - 1) % #PALETTE + 1]
+end
+
+local function ColorCode(c)
+	return string.format("|cff%02x%02x%02x", math.floor(c[1] * 255 + 0.5), math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
+end
+
+---------------------------------------------------------------------------
+-- World map pins
+---------------------------------------------------------------------------
+
+-- Mixed into MapCanvasPinMixin once the world map code is loaded (see AttachToWorldMap).
+local Pin = {}
+
+function Pin:OnLoad()
+	self:UseFrameLevelType("PIN_FRAME_LEVEL_MAP_HIGHLIGHT")
+	-- Sized in canvas units, so the circle covers the same ground at any zoom.
+	self:SetIgnoreGlobalPinScale(true)
+end
+
+function Pin:OnAcquired(area, x, y, radius, onOwnMap)
+	self.area = area
+	local c = area.color
+	self.Fill:SetVertexColor(c[1], c[2], c[3], FILL_ALPHA)
+	-- In canvas units; the canvas only changes size with the map, which refreshes the pins.
+	local size = 2 * radius * self:GetMap():GetCanvas():GetWidth()
+	self:SetSize(size, size)
+	self.Label:SetText((onOwnMap or size >= LABEL_MIN_SIZE) and ns.Escape(area.label) or "")
+	self:OnCanvasScaleChanged()
+	self:SetPosition(x, y)
+end
+
+-- The circle zooms with the map, the label stays the same size on screen.
+function Pin:OnCanvasScaleChanged()
+	self.Label:SetScale(1 / self:GetMap():GetCanvasScale())
+end
+
+function Pin:OnMouseEnter()
+	local a = self.area
+	GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+	GameTooltip:SetText(ColorCode(a.color) .. ns.Escape(a.label) .. "|r")
+	GameTooltip:AddLine(string.format("%s  %.1f, %.1f", ns.Escape(a.zone), a.x * 100, a.y * 100), 0.7, 0.7, 0.7)
+	if a.yards then
+		GameTooltip:AddLine(string.format("About %d yards across", math.floor(2 * a.yards + 0.5)), 0.7, 0.7, 0.7)
+	end
+	GameTooltip:Show()
+end
+
+function Pin:OnMouseLeave()
+	GameTooltip:Hide()
+end
+
+local function CreateProvider()
+	local p = CreateFromMixins(MapCanvasDataProviderMixin)
+
+	function p:RemoveAllData()
+		self:GetMap():RemoveAllPinsByTemplate(PIN_TEMPLATE)
+	end
+
+	function p:RefreshAllData()
+		self:RemoveAllData()
+		local map = self:GetMap()
+		local mapID = map:GetMapID()
+		if not mapID then return end
+		local width = Width(mapID)
+		for _, a in ipairs(areas) do
+			local x, y = ns.Map.Project(a, mapID)
+			local own = a.mapID == mapID
+			local radius = own and a.radius or (a.yards and width and a.yards / width)
+			if x and radius then map:AcquirePin(PIN_TEMPLATE, a, x, y, radius, own) end
+		end
+	end
+
+	return p
+end
+
+local function RefreshPins()
+	if provider and provider:GetMap() then provider:RefreshAllData() end
+end
+
+local function AttachToWorldMap()
+	if provider or not WorldMapFrame then return end
+	WowMCPAreaPinMixin = CreateFromMixins(MapCanvasPinMixin, Pin) -- referenced by Areas.xml
+	provider = CreateProvider()
+	WorldMapFrame:AddDataProvider(provider)
+end
+
+---------------------------------------------------------------------------
+-- Payload, map, chat
+---------------------------------------------------------------------------
+
+local function OpenOn(mapID)
+	if InCombatLockdown() then
+		mapAfterCombat = mapID
+		return
+	end
+	if WorldMapFrame and WorldMapFrame:IsShown() then
+		WorldMapFrame:SetMapID(mapID)
+	elseif OpenWorldMap then
+		OpenWorldMap(mapID)
+	end
+end
+
+local function AreaLine(a)
+	return string.format("%s%s|r %s %.1f, %.1f", ColorCode(a.color), ns.Escape(a.label), ns.Escape(a.zone), a.x * 100, a.y * 100)
+end
+
+-- Areas we've already announced (e.g. restored by a /reload) are shown quietly.
+function Areas.Receive(payload)
+	local isNew = payload.id ~= WowMCPDB.areasId
+	current = payload
+	WowMCPDB.areasId = payload.id
+	wipe(areas)
+
+	local raw = type(payload.areas) == "table" and payload.areas or {}
+	local missing = {}
+	for i, r in ipairs(raw) do
+		local a = type(r) == "table" and type(r.x) == "number" and type(r.y) == "number"
+			and ns.Map.Locate(r.zone, r.x, r.y, r.mapID)
+		if a then
+			a.label = tostring(r.label or ("Area " .. i))
+			a.radius = math.min(math.max(tonumber(r.radius) or 3, 0.1), 50) / 100
+			local width = Width(a.mapID)
+			a.yards = width and a.radius * width
+			table.insert(areas, a)
+			a.n = #areas
+			a.color = Color(r.color, a.n)
+		else
+			table.insert(missing, ns.Escape(type(r) == "table" and r.zone or "?"))
+		end
+	end
+	if WowMCPDB.hiddenAreasId == payload.id then wipe(areas) end
+	RefreshPins()
+
+	if not isNew then return end
+	if #raw == 0 then
+		ns.Print("Area highlights cleared.")
+		return
+	end
+	if areas[1] then
+		ns.Print(payload.title and ("|cffffffff" .. ns.Escape(payload.title) .. "|r") or "Highlighted on your map:")
+		for _, a in ipairs(areas) do ns.Print(AreaLine(a)) end
+	end
+	if #missing > 0 then
+		ns.Print("|cffff6060Couldn't find these zones on the map:|r " .. table.concat(missing, ", "))
+	end
+	if areas[1] and payload.openMap ~= false then OpenOn(areas[1].mapID) end
+end
+
+function Areas.Command(rest)
+	rest = strtrim(tostring(rest or "")):lower()
+	if rest == "clear" or rest == "hide" then
+		if current then WowMCPDB.hiddenAreasId = current.id end
+		wipe(areas)
+		RefreshPins()
+		ns.Print("Area highlights hidden until your AI sends new ones.")
+	elseif #areas == 0 then
+		ns.Print("No highlighted areas.")
+	else
+		if current and current.title then ns.Print("|cffffffff" .. ns.Escape(current.title) .. "|r") end
+		for _, a in ipairs(areas) do ns.Print(AreaLine(a)) end
+		if rest == "show" then OpenOn(areas[1].mapID) end
+	end
+end
+
+function Areas.OnCombatEnded()
+	if mapAfterCombat then
+		local mapID = mapAfterCombat
+		mapAfterCombat = nil
+		OpenOn(mapID)
+	end
+end
+
+function Areas.Init()
+	if WorldMapFrame then
+		AttachToWorldMap()
+	elseif EventUtil and EventUtil.ContinueOnAddOnLoaded then
+		EventUtil.ContinueOnAddOnLoaded("Blizzard_WorldMap", AttachToWorldMap)
+	end
+end
+
+ns.RegisterReceiver("areas", function(payload)
+	if type(payload) == "table" then Areas.Receive(payload) end
+end)
+ns.OnLogin(Areas.Init)
+ns.RegisterCommand("areas", "/mcp areas [show, clear] - list the highlighted areas, open the map on them, hide them", Areas.Command)
+
+local combat = CreateFrame("Frame")
+combat:RegisterEvent("PLAYER_REGEN_ENABLED")
+combat:SetScript("OnEvent", Areas.OnCombatEnded)

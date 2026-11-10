@@ -1,3 +1,63 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
-	<!-- Templates for route pins and lines. See docs/PLAN.md. -->
+	<!-- Route stops and the lines between them on the world map. The mixins are defined in
+	     Routes.lua once the world map is loaded. -->
+
+	<!-- A numbered disc: a dark rim and a coloured fill, both cut round by the portrait mask. -->
+	<Frame name="WowMCPRouteStopPinTemplate" mixin="WowMCPRouteStopPinMixin" enableMouseMotion="true" enableMouseClicks="true" hidden="true" virtual="true">
+		<Size x="20" y="20"/>
+		<Layers>
+			<Layer level="BORDER">
+				<Texture parentKey="Rim" setAllPoints="true">
+					<Color r="0" g="0" b="0" a="0.9"/>
+				</Texture>
+				<MaskTexture parentKey="RimMask" file="Interface\CharacterFrame\TempPortraitAlphaMask" hWrapMode="CLAMPTOBLACKADDITIVE" vWrapMode="CLAMPTOBLACKADDITIVE" setAllPoints="true">
+					<MaskedTextures>
+						<MaskedTexture childKey="Rim"/>
+					</MaskedTextures>
+				</MaskTexture>
+			</Layer>
+			<Layer level="ARTWORK">
+				<Texture parentKey="Fill">
+					<Anchors>
+						<Anchor point="TOPLEFT" x="2" y="-2"/>
+						<Anchor point="BOTTOMRIGHT" x="-2" y="2"/>
+					</Anchors>
+					<Color r="1" g="1" b="1" a="1"/>
+				</Texture>
+				<MaskTexture parentKey="FillMask" file="Interface\CharacterFrame\TempPortraitAlphaMask" hWrapMode="CLAMPTOBLACKADDITIVE" vWrapMode="CLAMPTOBLACKADDITIVE">
+					<Anchors>
+						<Anchor point="TOPLEFT" relativeKey="$parent.Fill"/>
+						<Anchor point="BOTTOMRIGHT" relativeKey="$parent.Fill"/>
+					</Anchors>
+					<MaskedTextures>
+						<MaskedTexture childKey="Fill"/>
+					</MaskedTextures>
+				</MaskTexture>
+			</Layer>
+			<Layer level="OVERLAY">
+				<FontString parentKey="Number" inherits="GameFontHighlightSmall">
+					<Anchors>
+						<Anchor point="CENTER" x="0" y="0"/>
+					</Anchors>
+				</FontString>
+				<FontString parentKey="Label" inherits="GameFontNormalSmallOutline" justifyH="CENTER">
+					<Anchors>
+						<Anchor point="TOP" relativePoint="BOTTOM" y="-1"/>
+					</Anchors>
+				</FontString>
+			</Layer>
+		</Layers>
+	</Frame>
+
+	<!-- One leg of the route. The line is anchored to the map canvas, so the frame itself has no size
+	     (like the flight map's route lines). -->
+	<Frame name="WowMCPRouteLinePinTemplate" mixin="WowMCPRouteLinePinMixin" hidden="true" virtual="true">
+		<Layers>
+			<Layer level="ARTWORK">
+				<Line parentKey="Fill" thickness="3">
+					<Color r="1" g="1" b="1" a="1"/>
+				</Line>
+			</Layer>
+		</Layers>
+	</Frame>
 </Ui>
