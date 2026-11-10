@@ -9,6 +9,7 @@ ask again a moment later: the IDs are already in the game, so that costs no slot
 
 import asyncio
 import re
+from collections.abc import Callable
 from typing import Annotated, Any, Literal, get_args
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -146,36 +147,59 @@ def _published(ids: list[int]) -> int | None:
     return current.get("id") if current.get("items") == ids else None
 
 
-async def look_up(item_ids: list[int]) -> ItemDetailsList:
-    """The game's details of up to MAX_ITEMS items, without repeats; a ToolError if the game can't answer."""
-    ids = list(dict.fromkeys(item_ids))
-    lookup, sent = _published(ids), False
+async def ask(
+    name: str,
+    lookup: int | None,
+    publish: Callable[[], int],
+    answered: Callable[[dict], Any] = lambda data: data.get("lookup"),
+    busy: Callable[[dict], bool] = lambda data: False,
+    retries: int | None = None,
+    wait: float | None = None,
+    what: str = "the list of items",
+) -> tuple[dict, str]:
+    """Section `name` of request kind ITEM_DETAILS once it answers our lookup (`answered` reads which one it does):
+    `lookup` is the one the game already has, or None to publish it first. If the game answers another, the lookup is
+    published again when it never got ours or another session's replaced it. While `busy` (e.g. items loading), ask
+    again up to `retries` times (default LOAD_RETRIES, `wait` seconds apart). A ToolError if the lookup (`what`)
+    never arrives."""
+    sent = lookup is None
     if lookup is None:
-        lookup, sent = _publish(ids), True
-    list_waits = load_waits = 0
+        lookup = publish()
+    list_waits = busy_waits = 0
     while True:
         reply, version = await request(kinds.ITEM_DETAILS)
-        details = section(reply, "itemDetails")
-        details = details if isinstance(details, dict) else {}
-        answered = details.get("lookup")
-        if answered != lookup:
+        data = section(reply, name)
+        data = data if isinstance(data, dict) else {}
+        got = answered(data)
+        if got != lookup:
             if list_waits >= LIST_RETRIES:
                 raise ToolError(
-                    "The game hasn't received the list of items yet. Updates wait while the player is in combat, "
+                    f"The game hasn't received {what} yet. Updates wait while the player is in combat, "
                     "so try again after the fight; if it keeps happening, call get_status."
                 )
             list_waits += 1
-            if not sent or (isinstance(answered, int) and answered > lookup):
-                # The game never got this list, or another session's lookup replaced it.
-                lookup, sent = _publish(ids), True
+            if not sent or (isinstance(got, int) and got > lookup):
+                # The game never got this lookup, or another session's replaced it.
+                lookup, sent = publish(), True
             await asyncio.sleep(LIST_WAIT)
             continue
-        found = {i.get("id"): i for i in as_list(details.get("items")) if isinstance(i, dict)}
-        if load_waits < LOAD_RETRIES and any(i.get("status") == "loading" for i in found.values()):
-            load_waits += 1
-            await asyncio.sleep(LOAD_WAIT)
+        if busy_waits < (LOAD_RETRIES if retries is None else retries) and busy(data):
+            busy_waits += 1
+            await asyncio.sleep(LOAD_WAIT if wait is None else wait)
             continue
-        return ItemDetailsList(game=version, items=[_details(i, found.get(i)) for i in ids])
+        return data, version
+
+
+async def look_up(item_ids: list[int]) -> ItemDetailsList:
+    """The game's details of up to MAX_ITEMS items, without repeats; a ToolError if the game can't answer."""
+    ids = list(dict.fromkeys(item_ids))
+
+    def loading(details: dict) -> bool:
+        return any(isinstance(i, dict) and i.get("status") == "loading" for i in as_list(details.get("items")))
+
+    details, version = await ask("itemDetails", _published(ids), lambda: _publish(ids), busy=loading)
+    found = {i.get("id"): i for i in as_list(details.get("items")) if isinstance(i, dict)}
+    return ItemDetailsList(game=version, items=[_details(i, found.get(i)) for i in ids])
 
 
 @tool(annotations=ToolAnnotations(title="Item details from the game", read_only_hint=True, open_world_hint=False))

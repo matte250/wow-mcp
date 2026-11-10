@@ -445,6 +445,9 @@ loads:SetScript("OnEvent", function(_, _, itemID, success)
 	if type(itemID) == "number" then unknown[itemID] = not success or nil end
 end)
 
+-- For the upgrade finder (Auction.lua).
+ns.Inventory = { Equipment = Equipment, GearStats = GearStats, Lines = Lines }
+
 ns.RegisterSection(ns.Kinds.ITEMS, "bags", Bags)
 ns.RegisterSection(ns.Kinds.ITEMS, "equipment", Equipment)
 ns.RegisterSection(ns.Kinds.ITEMS, "bank", Bank)

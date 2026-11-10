@@ -12,6 +12,11 @@
 -- watch_auction_prices and items it asked prices for (payload key "auctionWatch"). Adding one again
 -- refreshes it; the oldest go first. Room left is filled with what the player could sell from their bags
 -- and bank (as last seen): not soulbound, not quest items, and worth something to a vendor.
+-- Weapons and armor can have random suffixes ("of the Bear"), each with its own stats but the same item ID, so
+-- the full scan also keeps their cheapest price per suffix, from each auction's link.
+--
+-- The upgrade finder (find_upgrades, at the end) searches all of it, plus quest rewards and vendors, for gear
+-- that beats what the player wears.
 --
 -- The lookups must not disturb the player's own browsing. Searches are item searches, and in Blizzard's
 -- auction house window (Blizzard_AuctionHouseUI, Shared and Mainline code on Forever) the Browse view only
@@ -42,7 +47,8 @@ local SCAN_INTERVAL = 15 * 60 -- how often the game allows a full scan
 local SCAN_WAIT = 10      -- seconds without the full scan's results: the game didn't allow it, so search
 local BUDGET_MS = 1       -- frame time per frame for reading a full scan (Stream.lua sends with 1.5)
 local RANK = { goal = 1, plan = 2, watch = 3, asked = 4 } -- why the AI tracks an item, for ties
-local QUEST_CLASS = 12    -- Enum.ItemClass.Questitem
+local MAX_VARIANTS = 12   -- random suffixes kept per item from a full scan, the cheapest
+local WEAPON, ARMOR, QUEST_CLASS = 2, 4, 12 -- Enum.ItemClass
 local BOUND = { [1] = true, [4] = true, [7] = true, [8] = true, [9] = true } -- Enum.ItemBind: picked up, quest, account
 local SORT = Enum.AuctionHouseSortOrder or { Bid = 3, Buyout = 4 }
 local ITEM_SORTS = { -- the window's defaults for item searches
@@ -55,6 +61,7 @@ local current -- our search in flight: { item, at }
 local sent = {}     -- GetTime() of our messages in the last minute
 local messages = {} -- GetTime() of every auction house message in the last minute, the player's too
 local reader  -- a full scan being read (see StartRead)
+local scanAdded = 0 -- items new to the scan table, for the upgrade finder walking it
 local lookup  -- what get_auction_prices asks for: { id, items }
 local problem
 
@@ -65,7 +72,10 @@ local problem
 --   scan = { [item ID] = "price,listed,auctions,scan" }: every item a full scan has seen, as the last scan that saw
 --     it did (scan: its number in scans; no price if there were only bids). Kept compact: that's thousands;
 --   scans = { { at, items, listings, zone, subzone, faction } }, current = the number of the newest complete one;
---   tracked = { [item ID] = { at, why, n } }: what the AI tracks (why: goal, plan, watch, asked).
+--   tracked = { [item ID] = { at, why, n } }: what the AI tracks (why: goal, plan, watch, asked);
+--   variants = { [item ID] = "scan;suffix,price,listed;..." }: gear with random suffixes as the last scan that saw
+--     it did, the cheapest buyout per suffix (suffix as in the item link; empty price: only bids), ";?" if some
+--     auctions' links weren't there yet. Gear seen without suffixes has none.
 -- }
 local function Realm()
 	WowMCPDB.auction = WowMCPDB.auction or {}
@@ -82,6 +92,7 @@ local function Realm()
 		realm.items = items
 	end
 	realm.scan, realm.scans, realm.tracked = realm.scan or {}, realm.scans or {}, realm.tracked or {}
+	realm.variants = realm.variants or {}
 	return realm
 end
 
@@ -370,6 +381,41 @@ local function StopReading(state)
 	if visit and visit.scan then visit.scan.state = state end
 end
 
+-- Whether an item is a weapon or armor, from the client's static data; asked once per item per read.
+local function Gear(r, itemID)
+	local gear = r.gear[itemID]
+	if gear == nil then
+		local ok, _, _, _, _, _, class = pcall(C_Item.GetItemInfoInstant, itemID)
+		gear = ok and (class == WEAPON or class == ARMOR) or false
+		r.gear[itemID] = gear
+	end
+	return gear
+end
+
+-- An auction of gear: the random suffix in its link, if any, with the cheapest buyout per item and how many are
+-- listed per suffix. The link only comes once the item's data has loaded, like the name.
+local function Variant(r, index, itemID, count, each)
+	local ok, link = pcall(C_AuctionHouse.GetReplicateItemLink, index)
+	local suffix, unique
+	if ok and type(link) == "string" then
+		suffix, unique = link:match("item:%d+:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:(%-?%d*):?(%-?%d*)")
+	end
+	if not suffix then
+		r.nolink[itemID] = true
+		return
+	end
+	local id = tonumber(suffix)
+	if not id or id == 0 then return end
+	-- A negative suffix scales with the item, which the link's unique ID carries.
+	local key = id > 0 and tostring(id) or (id .. ":" .. unique)
+	local variants = r.variants[itemID] or {}
+	r.variants[itemID] = variants
+	local v = variants[key] or { listed = 0 }
+	variants[key] = v
+	v.listed = v.listed + count
+	if each and (not v.price or each < v.price) then v.price = each end
+end
+
 -- One auction (the index counts from 0). Its item ID, count, buyout and owner are there before the item's
 -- own data has loaded (hasAllInfo), which only the name, texture and link need.
 local function ReadOne(r)
@@ -386,21 +432,43 @@ local function ReadOne(r)
 	end
 	r.listed[itemID], r.n[itemID] = r.listed[itemID] + count, r.n[itemID] + 1
 	local points = r.points[itemID]
-	if type(buyout) == "number" and buyout > 0 then
-		local each = buyout / count
+	local each = type(buyout) == "number" and buyout > 0 and buyout / count or nil
+	if each then
 		if not r.price[itemID] or each < r.price[itemID] then r.price[itemID] = each end
 		if points then points[#points + 1] = { price = math.floor(each + 0.5), count = count } end
 	elseif points then
 		r.bids[itemID] = (r.bids[itemID] or 0) + count
 	end
+	if Gear(r, itemID) then Variant(r, i, itemID, count, each) end
+end
+
+-- A gear item's suffixes for realm.variants, cheapest first; nil if its auctions had none.
+local function EncodeVariants(r, itemID)
+	local list = {}
+	for key, v in pairs(r.variants[itemID] or {}) do list[#list + 1] = { key = key, price = v.price, listed = v.listed } end
+	if #list == 0 and not r.nolink[itemID] then return nil end
+	table.sort(list, function(a, b)
+		local pa, pb = a.price or math.huge, b.price or math.huge
+		if pa ~= pb then return pa < pb end
+		return a.key < b.key
+	end)
+	local parts = { tostring(r.k) }
+	for i = 1, math.min(#list, MAX_VARIANTS) do
+		local v = list[i]
+		parts[#parts + 1] = string.format("%s,%s,%d", v.key, v.price and tostring(math.floor(v.price + 0.5)) or "", v.listed)
+	end
+	if r.nolink[itemID] then parts[#parts + 1] = "?" end
+	return table.concat(parts, ";")
 end
 
 local function StoreOne(r)
 	local itemID = r.ids[r.index]
 	r.index = r.index + 1
 	local price = r.price[itemID]
+	if not r.realm.scan[itemID] then scanAdded = scanAdded + 1 end
 	r.realm.scan[itemID] = string.format("%s,%d,%d,%d", price and tostring(math.floor(price + 0.5)) or "",
 		r.listed[itemID], r.n[itemID], r.k)
+	if r.gear[itemID] then r.realm.variants[itemID] = EncodeVariants(r, itemID) end
 end
 
 -- A priority item seen in the scan gets its price points too, as a search would.
@@ -469,6 +537,7 @@ function StartRead()
 	reader = {
 		realm = realm, k = k, at = at, where = Here(), total = total, index = 0, me = UnitName("player"),
 		phase = "read", ids = {}, price = {}, listed = {}, n = {}, bids = {}, points = points,
+		gear = {}, variants = {}, nolink = {},
 	}
 	if visit then
 		visit.scan = visit.scan or {}
@@ -850,4 +919,626 @@ events:SetScript("OnEvent", function(_, event, arg1)
 		visit.notBefore = GetTime() + TIMEOUT
 		current = nil
 	end
+end)
+
+---------------------------------------------------------------------------
+-- Gear upgrades (find_upgrades)
+---------------------------------------------------------------------------
+
+-- What could beat the player's gear: auction house items (the full scans, and searches), rewards of the quests in
+-- their log and what the vendors they've seen sell (Knowledge.lua), kept to what this character can use and ranked
+-- with the stat weights the server picked for them. Requests carry no parameters, so the server publishes the query
+-- (payload key "upgradeQuery"), then asks (section "upgrades" of request kind ITEM_DETAILS) until the answer is
+-- there. Only the client has the items' data, and the full scan has thousands of item IDs, so the search runs here,
+-- a little per frame, in stages (a coroutine, so they read in order):
+--   1. every candidate's equip slot, class and subclass from the client's static data (GetItemInfoInstant, nothing
+--      to load): only gear for the slots asked for, of armor and weapon types the character has the skill for;
+--   2. those loaded, at most LOAD_BATCH at a time; then the required level, stats, armor and a score, against
+--      what they'd replace;
+--   3. per slot, best first, whether the character can use it: no red tooltip line but the level (they may be a
+--      level or two short), and the game's own check where it agrees with the gear they wear.
+-- Each random suffix the latest full scan saw is a candidate of its own, with that suffix's stats and price. An
+-- item whose suffixes weren't seen goes as it is, marked random, so its price is never shown with a suffix's stats.
+
+local FIND_BUDGET_MS = 1.5 -- frame time per frame for the search, as much as Stream.lua sends with
+local LOAD_BATCH = 50      -- items loading at once
+local LOAD_TIMEOUT = 10    -- seconds an item may take to load; then it's left out
+local KEEP = 120           -- seconds an answer is there for the server; then it's gone
+local MAX_PER_SLOT = 5
+local MAX_ASKED = 10
+local MAX_OFFERS = 2       -- where to get each item: free first, then the cheapest
+local MIN_GAIN = 0.05      -- a score this much better counts as an upgrade
+local DPS = "ITEM_MOD_DAMAGE_PER_SECOND_SHORT"
+local TWO_HAND = "INVTYPE_2HWEAPON"
+local SOURCES = { "auction", "quests", "vendors" }
+
+-- Slot groups, in the order they're answered, and the inventory slots each compares with.
+local GROUPS = { "head", "neck", "shoulder", "back", "chest", "wrist", "hands", "waist", "legs", "feet", "finger",
+	"trinket", "main hand", "off hand", "ranged" }
+local GROUP_SLOTS = {
+	head = { 1 }, neck = { 2 }, shoulder = { 3 }, chest = { 5 }, waist = { 6 }, legs = { 7 }, feet = { 8 }, wrist = { 9 },
+	hands = { 10 }, finger = { 11, 12 }, trinket = { 13, 14 }, back = { 15 }, ["main hand"] = { 16 }, ["off hand"] = { 17 },
+	ranged = { 18 },
+}
+local LOCS = { -- equip location -> slot group
+	INVTYPE_HEAD = "head", INVTYPE_NECK = "neck", INVTYPE_SHOULDER = "shoulder", INVTYPE_CLOAK = "back",
+	INVTYPE_CHEST = "chest", INVTYPE_ROBE = "chest", INVTYPE_WRIST = "wrist", INVTYPE_HAND = "hands",
+	INVTYPE_WAIST = "waist", INVTYPE_LEGS = "legs", INVTYPE_FEET = "feet", INVTYPE_FINGER = "finger",
+	INVTYPE_TRINKET = "trinket", INVTYPE_WEAPON = "main hand", INVTYPE_2HWEAPON = "main hand",
+	INVTYPE_WEAPONMAINHAND = "main hand", INVTYPE_WEAPONOFFHAND = "off hand", INVTYPE_SHIELD = "off hand",
+	INVTYPE_HOLDABLE = "off hand", INVTYPE_RANGED = "ranged", INVTYPE_RANGEDRIGHT = "ranged", INVTYPE_THROWN = "ranged",
+	INVTYPE_RELIC = "ranged",
+}
+local RANGED = { INVTYPE_RANGED = true, INVTYPE_RANGEDRIGHT = true, INVTYPE_THROWN = true }
+-- The skill line each armor and weapon type needs (Enum.ItemArmorSubclass, Enum.ItemWeaponSubclass). Forever keeps
+-- vanilla's weapon skills (Camelot/SkillsFrame.lua lists them, fist weapons as 162); armor proficiencies are
+-- vanilla's skill lines too. Types not listed (misc, cosmetic, relics) need none.
+local SKILLS = {
+	[ARMOR] = { [1] = { 415 }, [2] = { 414 }, [3] = { 413 }, [4] = { 293 }, [6] = { 433 } },
+	[WEAPON] = { [0] = { 44 }, [1] = { 172 }, [2] = { 45 }, [3] = { 46 }, [4] = { 54 }, [5] = { 160 }, [6] = { 229 },
+		[7] = { 43 }, [8] = { 55 }, [10] = { 136 }, [13] = { 162, 473 }, [15] = { 173 }, [16] = { 176 }, [18] = { 226 },
+		[19] = { 228 } },
+}
+local FISHING_POLE = 20
+
+-- A tooltip line printed from a format string, e.g. "Requires Level %d", as a pattern.
+local function LinePattern(format)
+	return "^" .. format:gsub("%%d", "\1"):gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"):gsub("\1", "%%d+") .. "$"
+end
+local LEVEL_LINE = LinePattern(ITEM_MIN_LEVEL or "Requires Level %d")
+
+local finder -- the search for the latest query (see Search)
+local finderFrame = CreateFrame("Frame")
+local loggingIn -- the stored payload (Inbox.lua) is being applied: its query is an old one
+
+-- Hands the frame back once this one's time is used up; true if it did.
+local function Pause(f)
+	if debugprofilestop() - f.started < FIND_BUDGET_MS then return false end
+	coroutine.yield()
+	return true
+end
+
+-- A gear item's suffixes as the full scan that last saw it: the scan's number, { { suffix, price, listed } }
+-- cheapest first, and whether some of its auctions' suffixes weren't known.
+local function Variants(realm, itemID)
+	local k, rest = tostring(realm.variants[itemID] or ""):match("^(%d+)(.*)$")
+	if not k then return nil end
+	local list, unknown = {}, false
+	for part in rest:gmatch(";([^;]+)") do
+		local suffix, price, listed = part:match("^([^,]+),(%d*),(%d+)$")
+		if suffix then
+			list[#list + 1] = { suffix = suffix, price = tonumber(price), listed = tonumber(listed) }
+		elseif part == "?" then
+			unknown = true
+		end
+	end
+	return tonumber(k), list, unknown
+end
+
+local function Cached(itemID)
+	local ok, cached = pcall(C_Item.IsItemDataCachedByID, itemID)
+	return ok and cached
+end
+
+-- The weights the server sent: { stats = { [GetItemStats key] = weight }, armor, melee, ranged } (weapon DPS).
+local function Weights(w)
+	w = type(w) == "table" and w or {}
+	local stats = {}
+	for key, value in pairs(type(w.stats) == "table" and w.stats or {}) do
+		if type(key) == "string" and tonumber(value) then stats[key] = tonumber(value) end
+	end
+	return { stats = stats, armor = tonumber(w.armor) or 0, melee = tonumber(w.melee) or 0, ranged = tonumber(w.ranged) or 0 }
+end
+
+-- The server scores the same way (tools/upgrades.py), to explain it.
+local function Score(w, stats, armor, loc)
+	local score = (armor or 0) * w.armor
+	for key, value in pairs(stats or {}) do
+		local weight
+		if key == DPS then weight = RANGED[loc] and w.ranged or w.melee else weight = w.stats[key] end
+		score = score + value * (weight or 0)
+	end
+	return score
+end
+
+-- The armor and weapon skills the character has, by skill line ID, and for which item classes the client
+-- listed any (where it listed none, that class isn't checked this way; the tooltip still is). Lines under a
+-- collapsed header in the Skills window only answer by ID.
+local function Skills()
+	local known, listed = {}, {}
+	for class, types in pairs(SKILLS) do
+		for _, ids in pairs(types) do
+			for _, id in ipairs(ids) do
+				local ok, info = pcall(C_SkillInfo.GetSkillLineInfoByID, id)
+				if ok and type(info) == "table" and not info.isHeader and (info.maxRank or 0) > 0 then
+					known[id], listed[class] = true, true
+				end
+			end
+		end
+	end
+	return known, listed
+end
+
+local function Proficient(f, class, subclass)
+	if class == WEAPON and subclass == FISHING_POLE then return false end
+	local ids = SKILLS[class] and SKILLS[class][subclass]
+	-- What they wear they can use, whatever the skill lines say.
+	if not ids or not f.listed[class] or f.wearing[class .. ":" .. subclass] then return true end
+	for _, id in ipairs(ids) do
+		if f.skills[id] then return true end
+	end
+	return false
+end
+
+-- The equipped gear with its stats (Inventory.lua) and score, by inventory slot.
+local function Equipped(f)
+	f.eq, f.wearing = {}, {}
+	for _, item in ipairs(ns.Inventory.Equipment()) do
+		local ok, _, _, _, loc, _, class, subclass = pcall(C_Item.GetItemInfoInstant, item.id)
+		if ok then
+			item.loc = loc
+			if class == WEAPON or class == ARMOR then
+				item.gear = true
+				f.wearing[class .. ":" .. subclass] = true
+			end
+		end
+		item.score = Score(f.weights, item.stats, item.armor, item.loc)
+		f.eq[item.slot] = item
+	end
+	f.twoHand = f.eq[16] ~= nil and f.eq[16].loc == TWO_HAND
+end
+
+-- C_PlayerInfo.CanUseItem doesn't say what it checks (the level too?), so it's only asked about items the
+-- character has the level for, and only if it says yes to all the gear they wear.
+local function Trusted(f)
+	local yes = false
+	for _, item in pairs(f.eq) do
+		if item.gear then
+			local ok, usable = pcall(C_PlayerInfo.CanUseItem, item.id)
+			if not (ok and usable == true) then return false end
+			yes = true
+		end
+	end
+	return yes
+end
+
+local function Worth(f, slot)
+	return f.eq[slot] and f.eq[slot].score or 0
+end
+
+-- What a candidate in a slot group would replace: its score and inventory slots. A two-hander replaces the off
+-- hand too; a ring or trinket the weaker of the two. nil for an off hand while a two-hander is equipped.
+local function Baseline(f, group, loc)
+	if group == "main hand" and loc == TWO_HAND and f.eq[17] then return Worth(f, 16) + Worth(f, 17), { 16, 17 } end
+	if group == "off hand" and f.twoHand then return nil end
+	local slots = GROUP_SLOTS[group]
+	local slot = slots[1]
+	if slots[2] and Worth(f, slots[2]) < Worth(f, slot) then slot = slots[2] end
+	return Worth(f, slot), { slot }
+end
+
+local function GroupsFor(f, loc)
+	local groups = {}
+	if LOCS[loc] and f.groups[LOCS[loc]] then groups[1] = LOCS[loc] end
+	if loc == "INVTYPE_WEAPON" and f.dualWield and f.groups["off hand"] then groups[#groups + 1] = "off hand" end
+	return groups
+end
+
+-- Stage 1: whether an item could go in a slot group asked for: { groups, loc, class, subclass, subtype }, or nil.
+-- Only what fits is kept: a table of every item ID would grow in steps too big for a frame.
+local function Fits(f, itemID)
+	local fit = f.fits[itemID]
+	if fit then return fit end
+	f.checked = f.checked + 1
+	local ok, _, _, subtype, loc, _, class, subclass = pcall(C_Item.GetItemInfoInstant, itemID)
+	if ok and (class == WEAPON or class == ARMOR) and (loc ~= "INVTYPE_WEAPONOFFHAND" or f.dualWield) then
+		local groups = GroupsFor(f, loc)
+		if groups[1] and Proficient(f, class, subclass) then
+			fit = { groups = groups, loc = loc, class = class, subclass = subclass, subtype = subtype }
+			f.fits[itemID] = fit
+		end
+	end
+	return fit
+end
+
+-- An item, or one random suffix of it, and where to get it (offers).
+local function Candidate(f, itemID, fit, suffix)
+	local key = suffix and (itemID .. ":" .. suffix) or itemID
+	local c = f.cands[key]
+	if not c then
+		c = { id = itemID, suffix = suffix, link = "item:" .. itemID .. (suffix and ("::::::" .. suffix) or ""), fit = fit,
+			offers = {} }
+		f.cands[key] = c
+		f.queue[#f.queue + 1] = c
+	end
+	return c
+end
+
+local function Offer(f, itemID, offer, suffix)
+	local c = f.cands[suffix and (itemID .. ":" .. suffix) or itemID]
+	if not (c and c.asked) then
+		if offer.price and f.maxPrice and offer.price > f.maxPrice then return end
+		local fit = Fits(f, itemID)
+		if not fit then return end
+		c = Candidate(f, itemID, fit, suffix)
+	end
+	c.offers[#c.offers + 1] = offer
+	return c
+end
+
+-- An item the server asked about ("is X an upgrade?"): compared in its own slot whatever the query's slots,
+-- prices and levels, and answered with why the character can't use it if they can't.
+local function AskedItem(f, itemID)
+	local ok, _, _, subtype, loc, _, class, subclass = pcall(C_Item.GetItemInfoInstant, itemID)
+	if not (ok and LOCS[loc] and (class == WEAPON or class == ARMOR)) then
+		f.notGear[#f.notGear + 1] = itemID
+		return
+	end
+	local fit = { groups = { LOCS[loc] }, loc = loc, class = class, subclass = subclass, subtype = subtype }
+	if loc == "INVTYPE_WEAPON" and f.dualWield then fit.groups[2] = "off hand" end
+	local c = Candidate(f, itemID, fit)
+	c.asked = true
+	if not Proficient(f, class, subclass) then c.usable, c.cant = false, subtype end
+end
+
+-- Rewards of the quests in the log, given or to choose from. The quest log's own reward functions, by questID,
+-- so its selection stays as it is (as in Quests.lua). Runs in one go: a quest log is short.
+local function QuestRewards(f)
+	for i = 1, C_QuestLog.GetNumQuestLogEntries() do
+		local info = C_QuestLog.GetInfo(i)
+		local questID = info and not info.isHeader and info.questID or 0
+		local ok, shown = pcall(C_QuestLog.ShouldShowQuestRewards, questID)
+		if questID > 0 and not (ok and shown == false) then
+			local items, choices = GetNumQuestLogRewards(questID), GetNumQuestLogChoices(questID)
+			local got, loaded = pcall(HaveQuestRewardData, questID)
+			if items + choices == 0 and not (got and loaded) then
+				pcall(C_QuestLog.RequestLoadQuestByID, questID)
+				f.questsLoading = true
+			end
+			local quest = { src = "quest", quest = info.title, questID = questID,
+				ready = C_QuestLog.IsComplete(questID) and true or nil }
+			for k = 1, items do
+				local itemID = select(6, GetQuestLogRewardInfo(k, questID))
+				if itemID then Offer(f, itemID, quest) end
+			end
+			local choice = { src = "quest", quest = quest.quest, questID = questID, ready = quest.ready,
+				choice = choices > 1 and choices or nil }
+			for k = 1, choices do
+				local itemID = select(6, GetQuestLogChoiceInfo(k, questID))
+				if itemID then Offer(f, itemID, choice) end
+			end
+		end
+	end
+end
+
+-- What the vendors the player has seen sell (Knowledge.lua's cache, for all characters), but what they wouldn't
+-- sell them then or had sold out.
+local function VendorItems(f)
+	local knowledge = WowMCPDB.knowledge
+	for _, vendor in ipairs(knowledge and knowledge.vendors or {}) do
+		for _, item in ipairs(vendor.items or {}) do
+			if type(item.id) == "number" and not item.locked and item.stock ~= 0 then
+				Offer(f, item.id, { src = "vendor", vendor = vendor.name, zone = vendor.zone, subzone = vendor.subzone,
+					x = vendor.x, y = vendor.y, at = vendor.at, price = math.floor((item.price or 0) / (item.stack or 1) + 0.5),
+					cost = item.cost })
+			end
+			Pause(f)
+		end
+	end
+end
+
+local function AuctionItem(f, realm, itemID)
+	if f.auctioned[itemID] or not Fits(f, itemID) then return end
+	f.auctioned[itemID] = true
+	local known = Known(realm, itemID)
+	if not (known and (known.listed or 0) > 0 and known.price) then return end
+	local k, variants, unknown = Variants(realm, itemID)
+	if variants and variants[1] and k == realm.current and known.src == "scan" then
+		for _, v in ipairs(variants) do
+			if v.price then Offer(f, itemID, { src = "auction", price = v.price, listed = v.listed, at = known.at }, v.suffix) end
+		end
+	else
+		-- Suffixes not seen: the cheapest of any, which the server shows as such.
+		Offer(f, itemID, { src = "auction", price = known.price, listed = known.listed, at = known.at,
+			search = known.src == "search" or nil, random = (variants or unknown) and true or nil })
+	end
+end
+
+-- Searched items first (a few hundred at most), then the full scan's thousands. Items new to the scan may be
+-- stored in between (a scan being read): then the walk starts over once that's done (what fits isn't offered
+-- twice).
+local function AuctionItems(f)
+	local realm = Realm()
+	local latest = CurrentScan(realm)
+	f.scan = latest and { at = latest.at, items = latest.items }
+	local searched = {}
+	for itemID in pairs(realm.items) do searched[#searched + 1] = itemID end
+	for _, itemID in ipairs(searched) do
+		AuctionItem(f, realm, itemID)
+		Pause(f)
+	end
+	local again
+	repeat
+		while reader and reader.phase == "store" do coroutine.yield() end
+		local added = scanAdded
+		again = false
+		for itemID in pairs(realm.scan) do
+			AuctionItem(f, realm, itemID)
+			if Pause(f) and scanAdded ~= added then
+				again = true
+				break
+			end
+		end
+	until not again
+end
+
+-- Stage 2 for one candidate whose data is there: the level, stats and score, and the slot groups where it beats
+-- what it would replace.
+local function Evaluate(f, c)
+	local _, link, quality, ilvl, minLevel = C_Item.GetItemInfo(c.id)
+	if not quality then
+		f.notLoaded = f.notLoaded + 1
+		return
+	end
+	minLevel = minLevel or 0
+	if minLevel > f.level + f.levelAhead and not c.asked then return end
+	c.quality, c.ilvl, c.minLevel = quality, ilvl, minLevel
+	-- A suffix's link is made from its ID (see Candidate); the plain item has its own.
+	if not c.suffix and type(link) == "string" then c.link = link end
+	c.stats, c.armor = ns.Inventory.GearStats(c.link, c.fit.class, c.fit.subclass)
+	c.score = Score(f.weights, c.stats, c.armor, c.fit.loc)
+	local price -- the cheapest way to get it, for ties
+	for _, offer in ipairs(c.offers) do price = math.min(price or math.huge, offer.price or 0) end
+	for _, group in ipairs(c.fit.groups) do
+		local base, vs = Baseline(f, group, c.fit.loc)
+		if not base and c.asked then base, vs = Worth(f, 17), { 17 } end
+		if base and (c.asked or c.score > base + MIN_GAIN) then
+			f.ranked[group] = f.ranked[group] or {}
+			table.insert(f.ranked[group], { c = c, delta = c.score - base, vs = vs, price = price or math.huge })
+		end
+	end
+end
+
+local function TryEvaluate(f, c)
+	local ok, err = pcall(Evaluate, f, c)
+	if not ok then f.problem = tostring(err) end
+end
+
+-- Stage 2: the candidates loaded, at most LOAD_BATCH waiting at a time; an item that doesn't come is left out.
+local function Load(f)
+	local queue, loading, i = f.queue, {}, 1
+	while i <= #queue or loading[1] do
+		while i <= #queue and #loading < LOAD_BATCH do
+			local c = queue[i]
+			i = i + 1
+			if Cached(c.id) then
+				TryEvaluate(f, c)
+				Pause(f)
+			else
+				pcall(C_Item.RequestLoadItemDataByID, c.id)
+				loading[#loading + 1] = { c = c, at = GetTime() }
+			end
+		end
+		if loading[1] then
+			coroutine.yield()
+			local still = {}
+			for _, l in ipairs(loading) do
+				if Cached(l.c.id) then
+					TryEvaluate(f, l.c)
+					Pause(f)
+				elseif GetTime() - l.at > LOAD_TIMEOUT then
+					f.notLoaded = f.notLoaded + 1
+				else
+					still[#still + 1] = l
+				end
+			end
+			loading = still
+		end
+	end
+end
+
+-- Stage 3 for one candidate: whether the character can use it (c.cant says why not). Its tooltip has no red
+-- line but the level, and the game agrees, where it's asked (see Trusted). The name with a suffix is read there.
+local function Usable(f, c)
+	if c.usable ~= nil then return c.usable end
+	local data = c.suffix and C_TooltipInfo.GetHyperlink(c.link) or C_TooltipInfo.GetItemByID(c.id)
+	local lines = ns.Inventory.Lines(data)
+	if not lines[1] or lines[1].left == RETRIEVING_ITEM_INFO then
+		c.usable, c.cant = false, "not loaded"
+		return false
+	end
+	c.name = lines[1].left
+	c.usable = true
+	for _, line in ipairs(lines) do
+		if ITEM_RANDOM_ENCHANT and line.left == ITEM_RANDOM_ENCHANT then c.random = true end
+		if line.red and c.usable and not line.left:match(LEVEL_LINE) then
+			c.usable, c.cant = false, line.right or line.left
+		end
+	end
+	if c.usable and f.canUse and c.minLevel <= f.level then
+		local ok, yes = pcall(C_PlayerInfo.CanUseItem, c.id)
+		if ok and yes == false then c.usable, c.cant = false, "the game says this character can't use it" end
+	end
+	if not c.usable then f.unusable = f.unusable + 1 end
+	return c.usable
+end
+
+-- Best first: the bigger gain, then the cheaper, then by ID.
+local function Before(a, b)
+	if a.delta ~= b.delta then return a.delta > b.delta end
+	if a.price ~= b.price then return a.price < b.price end
+	if a.c.id ~= b.c.id then return a.c.id < b.c.id end
+	return (a.c.suffix or "") < (b.c.suffix or "")
+end
+
+-- Takes the best entry out of a list. A slot can have hundreds, and only the first few are needed, so they're
+-- picked one at a time (a frame can end between picks) rather than all sorted at once.
+local function TakeBest(list)
+	local best
+	for i = 1, #list do
+		if not best or Before(list[i], list[best]) then best = i end
+	end
+	if not best then return nil end
+	local e = list[best]
+	list[best] = list[#list]
+	list[#list] = nil
+	return e
+end
+
+-- Stage 3: per slot group, the best that the character can use, up to perSlot; asked items always.
+local function Choose(f)
+	for _, group in ipairs(GROUPS) do
+		local list, kept, n = f.ranked[group] or {}, {}, 0
+		for i = #list, 1, -1 do
+			local e = list[i]
+			if e.c.asked then
+				kept[#kept + 1] = e
+				list[i] = list[#list]
+				list[#list] = nil
+			end
+		end
+		while n < f.perSlot do
+			local e = TakeBest(list)
+			if not e then break end
+			local ok, usable = pcall(Usable, f, e.c)
+			if ok and usable then
+				kept[#kept + 1] = e
+				n = n + 1
+			end
+			Pause(f)
+		end
+		for _, e in ipairs(kept) do
+			if e.c.asked then pcall(Usable, f, e.c) end
+		end
+		table.sort(kept, Before)
+		if kept[1] then f.kept[group] = kept end
+	end
+end
+
+local function Item(e)
+	local c = e.c
+	table.sort(c.offers, function(a, b) return (a.price or 0) < (b.price or 0) end)
+	local offers = {}
+	for i = 1, math.min(#c.offers, MAX_OFFERS) do offers[i] = c.offers[i] end
+	return {
+		id = c.id, name = c.name, q = c.quality, ilvl = c.ilvl, req = c.minLevel, loc = c.fit.loc, sub = c.fit.subtype,
+		suffix = c.suffix, random = c.random, stats = c.stats, armor = c.armor, vs = e.vs, offers = offers,
+		asked = c.asked, cant = c.cant,
+	}
+end
+
+-- The reply: the equipped gear, and per slot group the candidates kept, best first.
+local function Answer(f)
+	local equipped, slots, candidates = {}, {}, 0
+	for _, group in ipairs(GROUPS) do
+		for _, slot in ipairs(GROUP_SLOTS[group]) do
+			local e = f.eq[slot]
+			if e then
+				equipped[#equipped + 1] = { slot = slot, id = e.id, name = e.name, q = e.quality, ilvl = e.ilvl, loc = e.loc,
+					stats = e.stats, armor = e.armor, broken = e.durability == 0 or nil }
+			end
+		end
+		if f.groups[group] or f.kept[group] then
+			local items = {}
+			for _, e in ipairs(f.kept[group] or {}) do items[#items + 1] = Item(e) end
+			slots[#slots + 1] = { slot = group, items = items, twoHand = group == "off hand" and f.twoHand or nil }
+		end
+	end
+	for _ in pairs(f.cands) do candidates = candidates + 1 end
+	return {
+		query = f.id, status = "done", level = f.level, dualWield = f.dualWield, equipped = equipped, slots = slots,
+		scan = f.scan, checked = f.checked, candidates = candidates, notLoaded = f.notLoaded, unusable = f.unusable,
+		questsLoading = f.questsLoading, notGear = f.notGear[1] and f.notGear or nil, problem = f.problem,
+	}
+end
+
+local function Prepare(f, q)
+	f.level = UnitLevel("player")
+	f.levelAhead = math.max(0, math.floor(tonumber(q.levelAhead) or 2))
+	f.maxPrice = tonumber(q.maxPrice)
+	f.perSlot = math.max(1, math.min(MAX_PER_SLOT, math.floor(tonumber(q.perSlot) or 3)))
+	f.groups, f.sources, f.asked, f.notGear = {}, {}, {}, {}
+	for _, group in ipairs(type(q.slots) == "table" and q.slots or GROUPS) do
+		if GROUP_SLOTS[group] then f.groups[group] = true end
+	end
+	for _, source in ipairs(type(q.sources) == "table" and q.sources or SOURCES) do f.sources[source] = true end
+	for _, itemID in ipairs(type(q.items) == "table" and q.items or {}) do
+		if type(itemID) == "number" and #f.asked < MAX_ASKED then f.asked[#f.asked + 1] = itemID end
+	end
+	f.weights = Weights(q.weights)
+	local ok, dual = pcall(CanDualWield)
+	f.dualWield = ok and dual == true
+	f.skills, f.listed = Skills()
+	f.fits, f.auctioned, f.cands, f.queue, f.ranked, f.kept = {}, {}, {}, {}, {}, {}
+	f.checked, f.notLoaded, f.unusable = 0, 0, 0
+	Equipped(f)
+	f.canUse = Trusted(f)
+end
+
+-- The whole search, run as a coroutine a little per frame; f.answer is the reply.
+local function Search(f, q)
+	Prepare(f, q)
+	f.stage = "gear"
+	for _, itemID in ipairs(f.asked) do AskedItem(f, itemID) end
+	if f.sources.quests then
+		local ok, err = pcall(QuestRewards, f)
+		if not ok then f.problem = tostring(err) end
+	end
+	if f.sources.vendors then VendorItems(f) end
+	if f.sources.auction then AuctionItems(f) end
+	f.stage = "stats"
+	Load(f)
+	f.stage = "usable"
+	Choose(f)
+	f.answer = Answer(f)
+end
+
+local function Resume()
+	local f = finder
+	if f and f.co then
+		f.started = debugprofilestop()
+		local ok, err = coroutine.resume(f.co)
+		if not ok then
+			f.status, f.problem, f.co = "error", tostring(err), nil
+		elseif coroutine.status(f.co) == "dead" then
+			-- Only the answer is kept.
+			f.status, f.doneAt, f.co = "done", GetTime(), nil
+			f.fits, f.auctioned, f.cands, f.queue, f.ranked, f.kept, f.eq = nil, nil, nil, nil, nil, nil, nil
+		end
+	end
+	if not (f and f.co) then finderFrame:SetScript("OnUpdate", nil) end
+end
+
+local function Upgrades()
+	local f = finder
+	if not f then return {} end
+	if f.status == "done" and (f.stale or GetTime() - f.doneAt > KEEP) then
+		f.answer = nil
+		return { query = f.id, expired = true }
+	end
+	if f.status == "done" then return f.answer end
+	return { query = f.id, status = f.status, stage = f.stage, checked = f.checked, error = f.problem }
+end
+
+-- { id, at, slots, sources, maxPrice, levelAhead, perSlot, items (asked about), weights }: a new id starts a new
+-- search. Every later payload carries it too, which changes nothing. The one stored for login is from before the
+-- /reload: the server sends it again if it still wants it.
+ns.RegisterReceiver("upgradeQuery", function(q)
+	if type(q) ~= "table" or type(q.id) ~= "number" or (finder and finder.id == q.id) or loggingIn then return end
+	local f = { id = q.id, status = "working", stage = "start", checked = 0 }
+	f.co = coroutine.create(function() Search(f, q) end)
+	finder = f
+	finderFrame:SetScript("OnUpdate", Resume)
+end)
+ns.RegisterSection(ns.Kinds.ITEM_DETAILS, "upgrades", Upgrades)
+-- Login hooks run just before the stored payload is applied, in the same event.
+ns.OnLogin(function()
+	loggingIn = true
+	C_Timer.After(0, function() loggingIn = nil end)
+end)
+
+-- New gear on: an answer from before is out of date.
+finderFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+finderFrame:SetScript("OnEvent", function()
+	if finder and finder.status == "done" then finder.stale = true end
 end)

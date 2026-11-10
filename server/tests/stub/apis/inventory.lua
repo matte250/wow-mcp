@@ -16,7 +16,8 @@ SELL_PRICE = "Sell Price"
 -- straight away (icon: a texture file ID; default the question mark, 134400). Gear has a class,
 -- subclass and equip slot, and may have armor, stats (keyed as GetItemStats keys them),
 -- weapon damage { low, high, speed }, a required level and effects (green tooltip lines). bind is the
--- tooltip's binding line; GetItemInfo gives it as a bind type.
+-- tooltip's binding line; GetItemInfo gives it as a bind type. random: it comes with random suffixes (see
+-- client.suffixes); classes: the only classes that can use it.
 client.items = {
 	[6948] = { name = "Hearthstone", quality = 1, level = 1, class = 15 },
 	[2589] = { name = "Linen Cloth", quality = 1, level = 5, class = 7, sell = 13 },
@@ -71,7 +72,7 @@ client.bags = {
 	[7] = { size = 6, slots = { [2] = { id = 4865, count = 3 } } },
 }
 
--- Equipped by inventory slot (0 is ammo, which counts what's in the bags).
+-- Equipped by inventory slot (0 is ammo, which counts what's in the bags; suffix: a random suffix, as in bags).
 client.equipment = {
 	[0] = { id = 2512 },
 	[4] = { id = 45 },
@@ -93,8 +94,12 @@ for quality, hex in pairs(COLORS) do
 end
 local CLASSES = { [0] = "Consumable", [2] = "Weapon", [4] = "Armor", [6] = "Projectile", [7] = "Trade Goods",
 	[12] = "Quest", [13] = "Key", [15] = "Miscellaneous" }
-local SUBCLASSES = { [2] = { [1] = "Two-Handed Axes", [2] = "Bows" }, [4] = { [0] = "Miscellaneous", [2] = "Leather" },
-	[6] = { [2] = "Arrow" } }
+local SUBCLASSES = {
+	[2] = { [0] = "One-Handed Axes", [1] = "Two-Handed Axes", [2] = "Bows", [4] = "One-Handed Maces", [5] = "Two-Handed Maces",
+		[7] = "One-Handed Swords", [10] = "Staves", [15] = "Daggers" },
+	[4] = { [0] = "Miscellaneous", [1] = "Cloth", [2] = "Leather", [3] = "Mail", [4] = "Plate", [6] = "Shields" },
+	[6] = { [2] = "Arrow" },
+}
 
 local function Cached(itemID)
 	local item = client.items[itemID]
@@ -226,7 +231,10 @@ local WHITE, RED, GREEN = { r = 1, g = 1, b = 1 }, { r = 1, g = 0.125, b = 0.125
 local QUALITY_COLORS = { [0] = { r = 0.62, g = 0.62, b = 0.62 }, WHITE, { r = 0.118, g = 1, b = 0 },
 	{ r = 0, g = 0.439, b = 0.867 }, { r = 0.639, g = 0.208, b = 0.933 } }
 local SLOT_NAMES = { INVTYPE_CHEST = "Chest", INVTYPE_LEGS = "Legs", INVTYPE_HAND = "Hands", INVTYPE_BODY = "Shirt",
-	INVTYPE_2HWEAPON = "Two-Hand", INVTYPE_RANGED = "Ranged", INVTYPE_AMMO = "Projectile" }
+	INVTYPE_2HWEAPON = "Two-Hand", INVTYPE_RANGED = "Ranged", INVTYPE_AMMO = "Projectile", INVTYPE_HEAD = "Head",
+	INVTYPE_ROBE = "Chest", INVTYPE_FEET = "Feet", INVTYPE_WAIST = "Waist", INVTYPE_WRIST = "Wrist", INVTYPE_NECK = "Neck",
+	INVTYPE_SHOULDER = "Shoulder", INVTYPE_CLOAK = "Back", INVTYPE_FINGER = "Finger", INVTYPE_TRINKET = "Trinket",
+	INVTYPE_WEAPON = "One-Hand", INVTYPE_SHIELD = "Off Hand", INVTYPE_HOLDABLE = "Held In Off-hand" }
 local STAT_LINES = { { "ITEM_MOD_STRENGTH_SHORT", "Strength" }, { "ITEM_MOD_AGILITY_SHORT", "Agility" },
 	{ "ITEM_MOD_STAMINA_SHORT", "Stamina" }, { "ITEM_MOD_INTELLECT_SHORT", "Intellect" }, { "ITEM_MOD_SPIRIT_SHORT", "Spirit" } }
 
@@ -248,7 +256,9 @@ local function TooltipData(itemID, suffix)
 	if info.bind then Add(info.bind, WHITE, { type = T.ItemBinding }) end
 	if SLOT_NAMES[info.slot] then
 		local _, subtypeName = TypeNames(info)
-		Add(SLOT_NAMES[info.slot], WHITE, { type = T.EquipSlot, rightText = subtypeName, rightColor = WHITE })
+		-- The armor or weapon type is red when the character lacks its skill (upgrades.lua).
+		local wear = not client.Proficient or client.Proficient(info)
+		Add(SLOT_NAMES[info.slot], WHITE, { type = T.EquipSlot, rightText = subtypeName, rightColor = wear and WHITE or RED })
 	end
 	if info.damage then
 		local low, high, speed = info.damage[1], info.damage[2], info.damage[3]
@@ -259,6 +269,11 @@ local function TooltipData(itemID, suffix)
 	local stats = C_Item.GetItemStats(Link(itemID, suffix))
 	for _, stat in ipairs(STAT_LINES) do
 		if stats[stat[1]] then Add(string.format("+%d %s", stats[stat[1]], stat[2])) end
+	end
+	-- A random-suffix item without its suffix (classes: a class-only item, red for other classes).
+	if info.random and not suffix then Add(ITEM_RANDOM_ENCHANT, GREEN) end
+	if info.classes then
+		Add("Classes: " .. table.concat(info.classes, ", "), client.ClassAllowed(info) and WHITE or RED)
 	end
 	if info.required then Add("Requires Level " .. info.required, UnitLevel("player") < info.required and RED or WHITE) end
 	for _, effect in ipairs(info.effects or {}) do Add(effect, GREEN) end
@@ -274,7 +289,10 @@ C_TooltipInfo = {
 local function Equipped(unit, slot) return unit == "player" and client.equipment[slot] end
 
 function GetInventoryItemID(unit, slot) return Equipped(unit, slot) and Equipped(unit, slot).id end
-function GetInventoryItemLink(unit, slot) return Equipped(unit, slot) and Link(Equipped(unit, slot).id) end
+function GetInventoryItemLink(unit, slot)
+	local e = Equipped(unit, slot)
+	return e and Link(e.id, e.suffix)
+end
 function GetInventoryItemQuality(unit, slot)
 	return Equipped(unit, slot) and client.items[Equipped(unit, slot).id].quality
 end

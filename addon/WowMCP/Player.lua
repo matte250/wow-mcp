@@ -36,14 +36,28 @@ local function Location()
 	}
 end
 
+-- The talent specialization the character frame names (its "primary talent tree" in Forever's Camelot code), and
+-- its role ("DAMAGER", "TANK", "HEALER"); nothing before the character has one.
+local function Spec()
+	local index = C_SpecializationInfo.GetSpecialization()
+	if not index or index == 0 then return nil end
+	local _, name, _, _, role = C_SpecializationInfo.GetSpecializationInfo(index)
+	if name and name ~= "" then return name, role end
+end
+
 local function Character()
-	return {
+	local class, classFile = UnitClass("player")
+	local character = {
 		name = UnitName("player"),
 		faction = UnitFactionGroup("player"),
 		race = UnitRace("player"),
-		class = UnitClass("player"),
+		class = class,
+		classFile = classFile,
 		level = UnitLevel("player"),
 	}
+	local ok, spec, role = pcall(Spec)
+	if ok then character.spec, character.role = spec, role end
+	return character
 end
 
 local function Professions()

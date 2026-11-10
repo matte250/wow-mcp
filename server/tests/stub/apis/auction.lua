@@ -11,8 +11,8 @@
 -- The full scan (ReplicateItems, AuctionHouseDocumentation.lua): one per SCAN_INTERVAL for the account;
 -- asked for sooner, the server doesn't answer at all (assumed: nothing in the API says how it refuses).
 -- Otherwise REPLICATE_ITEM_LIST_UPDATE comes a moment later, and every auction, the player's too, can be
--- read by index from 0 (GetReplicateItemInfo, its returns as documented). An item the client hasn't
--- loaded has no name or texture yet (hasAllInfo false), but its ID, count, prices and owner. Whether the
+-- read by index from 0 (GetReplicateItemInfo, its returns as documented; GetReplicateItemLink). An item the
+-- client hasn't loaded has no name, texture or link yet (hasAllInfo false), but its ID, count, prices and owner. Whether the
 -- event comes again once those load isn't documented; here it does, to check the addon copes. Closing
 -- the auction house empties the list, and a scan that arrives after that stays empty (assumed). It goes
 -- through the throttled channel like a search (assumed).
@@ -30,7 +30,8 @@ local SELLER, PLAYER = "Grimbolt", "Thorgrim"
 
 client.ah = {
 	-- item ID -> { commodity, results = { { price, quantity, own } } } (commodities) or
-	-- { results = { { buyout, bid, quantity, own } } } (single auctions). Unlisted items have no results.
+	-- { results = { { buyout, bid, quantity, own, suffix } } } (single auctions; suffix: a random suffix, see
+	-- client.suffixes in inventory.lua). Unlisted items have no results.
 	listings = {
 		[4232] = { commodity = true, results = {
 			{ price = 45, quantity = 30 }, { price = 52, quantity = 12, own = 2 }, { price = 60, quantity = 40 } } },
@@ -179,7 +180,7 @@ local function Auctions()
 				if own > 0 then table.insert(list, { item = itemID, count = own, buyout = r.price * own, owner = PLAYER }) end
 			else
 				table.insert(list, { item = itemID, count = r.quantity, buyout = r.buyout or 0, bid = r.bid or 0,
-					owner = r.own and PLAYER or SELLER })
+					owner = r.own and PLAYER or SELLER, suffix = r.suffix })
 			end
 		end
 	end
@@ -226,6 +227,16 @@ local function ReplicateItemInfo(index)
 	local name = not missing and (client.itemNames[a.item] or ("Item " .. a.item)) or nil
 	return name, not missing and 134400 or nil, a.count, 1, true, 1, "", a.bid or 0, 0, a.buyout, 0, nil, nil, a.owner,
 		a.owner .. "-Firemaw", 0, a.item, not missing
+end
+
+-- The auction's item link, with its random suffix; like the name, nil until the item's data has loaded.
+local function ReplicateItemLink(index)
+	local a = client.ah.replicate.list[index + 1]
+	if not a or client.ah.missingInfo[a.item] ~= nil then return nil end
+	local item = client.items[a.item]
+	local name = (item and item.name or client.itemNames[a.item] or ("Item " .. a.item))
+		.. (a.suffix and client.suffixes[a.suffix].name or "")
+	return string.format("|cff1eff00|Hitem:%d::::::%s::12:::::::::|h[%s]|h|r", a.item, a.suffix or "", name)
 end
 
 -- A big auction house for tests: items item IDs from first, each with perItem auctions of up to 20, about a
@@ -315,6 +326,7 @@ C_AuctionHouse = {
 	ReplicateItems = Replicate,
 	GetNumReplicateItems = function() return #client.ah.replicate.list end,
 	GetReplicateItemInfo = ReplicateItemInfo,
+	GetReplicateItemLink = ReplicateItemLink,
 }
 
 ---------------------------------------------------------------------------
