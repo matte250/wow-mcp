@@ -5,6 +5,8 @@
 client.itemNames = {
 	[159] = "Refreshing Spring Water", [2320] = "Coarse Thread", [2318] = "Light Leather", [783] = "Light Hide",
 	[4289] = "Salt", [2678] = "Mild Spices", [5976] = "Guild Tabard", [2512] = "Rough Arrow", [4470] = "Simple Wood",
+	[4232] = "Medium Hide", [2319] = "Medium Leather", [2321] = "Fine Thread", [4231] = "Cured Light Hide",
+	[4233] = "Cured Medium Hide", [4237] = "Handstitched Leather Belt", [4249] = "Dark Leather Belt",
 }
 client.itemsLoaded = { [159] = true, [2320] = true, [2318] = true, [783] = true, [2678] = true, [2512] = true }
 C_Item = C_Item or {}
@@ -15,23 +17,27 @@ end
 
 ---------------------------------------------------------------------------
 -- Professions: the recipe list is only there while the window is open, and only after the
--- first TRADE_SKILL_LIST_UPDATE (it's empty at TRADE_SKILL_SHOW).
+-- first TRADE_SKILL_LIST_UPDATE (it's empty at TRADE_SKILL_SHOW). What a recipe makes and needs,
+-- and its profession, are the client's static data: there with no window open.
 ---------------------------------------------------------------------------
 
 client.professions = {
 	Leatherworking = {
 		info = { professionID = 165, professionName = "Leatherworking", skillLevel = 60, maxSkillLevel = 75 },
 		recipes = {
-			{ id = 2149, name = "Handstitched Leather Boots", learned = true, difficulty = 1, reagents = { { 2318, 2 }, { 2320, 1 } } },
-			{ id = 2881, name = "Light Leather", learned = true, difficulty = 3, reagents = { { 783, 3 } } },
-			{ id = 3753, name = "Handstitched Leather Belt", learned = false, difficulty = 0, reagents = { { 2318, 6 }, { 2320, 1 } } },
-			{ id = 2152, name = "Light Armor Kit", learned = true, difficulty = 0, reagents = { { 2318, 1 } } },
+			{ id = 2149, name = "Handstitched Leather Boots", item = 2300, learned = true, difficulty = 1, reagents = { { 2318, 2 }, { 2320, 1 } } },
+			{ id = 2881, name = "Light Leather", item = 2318, learned = true, difficulty = 3, reagents = { { 783, 3 } } },
+			{ id = 3753, name = "Handstitched Leather Belt", item = 4237, learned = false, difficulty = 0, reagents = { { 2318, 6 }, { 2320, 1 } } },
+			{ id = 2152, name = "Light Armor Kit", item = 2304, learned = true, difficulty = 0, reagents = { { 2318, 1 } } },
+			{ id = 3816, name = "Cured Light Hide", item = 4231, learned = false, difficulty = 0, reagents = { { 783, 1 }, { 4289, 1 } } },
+			{ id = 3817, name = "Cured Medium Hide", item = 4233, learned = false, difficulty = 0, reagents = { { 4232, 1 }, { 4289, 1 } } },
+			{ id = 3766, name = "Dark Leather Belt", item = 4249, learned = false, difficulty = 0, reagents = { { 2319, 5 }, { 2321, 2 } } },
 		},
 	},
 	Cooking = {
 		info = { professionID = 185, professionName = "Cooking", skillLevel = 40, maxSkillLevel = 75 },
 		recipes = {
-			{ id = 2538, name = "Charred Wolf Meat", learned = true, difficulty = 2, reagents = { { 2672, 1 } } },
+			{ id = 2538, name = "Charred Wolf Meat", item = 2679, learned = true, difficulty = 2, reagents = { { 2672, 1 } } },
 		},
 	},
 }
@@ -42,6 +48,15 @@ local function Recipe(id)
 	local skill = client.tradeSkill
 	for _, recipe in ipairs(skill and skill.profession.recipes or {}) do
 		if recipe.id == id then return recipe end
+	end
+end
+
+-- Any profession's recipe, and the profession.
+local function AnyRecipe(id)
+	for _, profession in pairs(client.professions) do
+		for _, recipe in ipairs(profession.recipes) do
+			if recipe.id == id then return recipe, profession end
+		end
 	end
 end
 
@@ -76,12 +91,19 @@ C_TradeSkillUI = {
 		}
 	end,
 	GetRecipeSchematic = function(id)
-		local recipe = Recipe(id)
+		local recipe = AnyRecipe(id)
 		local slots = {}
 		for i, reagent in ipairs(recipe and recipe.reagents or {}) do
 			slots[i] = { reagents = { { itemID = reagent[1] } }, quantityRequired = reagent[2], reagentType = 1, required = true, slotIndex = i }
 		end
-		return { recipeID = id, name = recipe and recipe.name or "", reagentSlotSchematics = slots, isRecraft = false }
+		return { recipeID = id, name = recipe and recipe.name or "", outputItemID = recipe and recipe.item,
+			reagentSlotSchematics = slots, isRecraft = false }
+	end,
+	GetProfessionInfoByRecipeID = function(id)
+		local _, profession = AnyRecipe(id)
+		local info = { professionID = 0, professionName = "", skillLevel = 0, maxSkillLevel = 0 }
+		for k, v in pairs(profession and profession.info or {}) do info[k] = v end
+		return info
 	end,
 	IsTradeSkillLinked = function()
 		local skill = client.tradeSkill

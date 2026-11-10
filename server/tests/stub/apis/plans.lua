@@ -4,13 +4,24 @@
 
 client.level = nil       -- set by client.LevelUp; until then player.lua's level
 client.knownSpells = {}  -- spell IDs C_SpellBook.IsSpellKnown knows
-client.spellNames = { [2881] = "Light Leather", [3816] = "Cured Light Hide", [3770] = "Toughened Leather Gloves" }
+client.spellNames = {
+	[2881] = "Light Leather", [3816] = "Cured Light Hide", [3770] = "Toughened Leather Gloves", [3817] = "Cured Medium Hide",
+	[3766] = "Dark Leather Belt", [3753] = "Handstitched Leather Belt", [2152] = "Light Armor Kit", [1978] = "Serpent Sting",
+}
 client.questLog = {}     -- quests accepted with client.AcceptQuest: questID -> { title, objectives }
 client.turnedIn = {}     -- quests turned in with client.TurnInQuest
 client.zoneText, client.subzoneText = nil, nil -- override player.lua's zone texts when set
 
 client.items[3182] = { name = "Spider's Silk", quality = 1, level = 15, class = 7, sell = 150 }
 client.itemNames[3182] = "Spider's Silk" -- not loaded until something asks for it once
+client.items[4237] = { name = "Handstitched Leather Belt", quality = 1, level = 10, class = 4, subclass = 2,
+	slot = "INVTYPE_WAIST", sell = 18, armor = 16, required = 5 }
+client.items[4249] = { name = "Dark Leather Belt", quality = 2, level = 25, class = 4, subclass = 2,
+	slot = "INVTYPE_WAIST", sell = 247, armor = 40, required = 20 }
+
+-- The chat lines the client prints when the player learns something (GlobalStrings.lua).
+ERR_LEARN_RECIPE_S = "You have learned how to create a new item: %s."
+ERR_LEARN_SPELL_S = "You have learned a new spell: %s."
 
 ---------------------------------------------------------------------------
 -- Widgets: what the plan window uses beyond client.lua's frames and regions.
@@ -25,7 +36,8 @@ function Frame:GetParent() return self.parent end
 function Region:SetJustifyV(justify) self.justifyV = justify end
 
 ---------------------------------------------------------------------------
--- Items. The client counts the bank also away from the banker (once it knows its contents).
+-- Items. The client counts the bank also away from the banker (once it knows its contents), and
+-- counts by an item ID, a link, or the name of an item the player has.
 ---------------------------------------------------------------------------
 
 local CARRIED = { [0] = true, [1] = true, [2] = true, [3] = true, [4] = true, [5] = true }
@@ -36,7 +48,8 @@ function C_Item.GetItemCount(item, includeBank)
 	for bag, b in pairs(client.bags) do
 		if CARRIED[bag] or (includeBank and bag >= 6) then
 			for _, s in pairs(b.slots) do
-				if s.id == itemID then total = total + (s.count or 1) end
+				local named = not itemID and client.items[s.id] and client.items[s.id].name == item
+				if s.id == itemID or named then total = total + (s.count or 1) end
 			end
 		end
 	end
@@ -197,10 +210,43 @@ function client.SetSkill(name, rank)
 	client.Fire("SKILL_LINES_CHANGED")
 end
 
--- Learning a recipe from a trainer or a recipe item.
-function client.LearnRecipe(spellID)
+-- The signals of a learn, in order: "event" (NEW_RECIPE_LEARNED), "skillLine"
+-- (LEARNED_SPELL_IN_SKILL_LINE), "chat" (the chat line naming it), "link" (the chat line with a
+-- spell link, as newer clients write it).
+local function Signal(spellID, line, signals)
+	local name = client.spellNames[spellID]
+	for _, signal in ipairs(signals) do
+		if signal == "event" then
+			client.Fire("NEW_RECIPE_LEARNED", spellID)
+		elseif signal == "skillLine" then
+			client.Fire("LEARNED_SPELL_IN_SKILL_LINE", spellID, 3, false)
+		elseif signal == "chat" or signal == "link" then
+			local what = signal == "link" and string.format("|cff71d5ff|Hspell:%d:0|h[%s]|h|r", spellID, name) or name
+			client.Fire("CHAT_MSG_SYSTEM", line:format(what), "", "", "", "", "", 0, 0, "", 0, 0, nil, 0)
+		else
+			error("no such signal: " .. tostring(signal))
+		end
+	end
+end
+
+-- Learning a recipe from a trainer or a recipe item. Which signals Forever gives isn't known, so a
+-- test can pick them (see Signal); all of them by default. The profession window lists it after.
+function client.LearnRecipe(spellID, ...)
 	client.knownSpells[spellID] = true
-	client.Fire("NEW_RECIPE_LEARNED", spellID)
+	for _, profession in pairs(client.professions) do
+		for _, recipe in ipairs(profession.recipes) do
+			if recipe.id == spellID then recipe.learned = true end
+		end
+	end
+	Signal(spellID, ERR_LEARN_RECIPE_S or "You have learned how to create a new item: %s.",
+		select("#", ...) > 0 and { ... } or { "event", "skillLine", "link" })
+end
+
+-- Learning a class spell: the same signals as a recipe, but no NEW_RECIPE_LEARNED and another chat line.
+function client.LearnSpell(spellID, ...)
+	client.knownSpells[spellID] = true
+	Signal(spellID, ERR_LEARN_SPELL_S or "You have learned a new spell: %s.",
+		select("#", ...) > 0 and { ... } or { "skillLine", "link" })
 end
 
 function client.Enter(map, x, y, zone, subzone)

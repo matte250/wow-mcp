@@ -11,11 +11,14 @@ from wow_mcp.app import as_list, guidance, request, section, tool
 
 guidance(
     "For crafting questions (what the player can make, what a recipe needs, which recipes still give skill-ups), "
-    "call get_known_recipes. To find where the player can buy something, or what a vendor they've visited sells "
-    "and for how much, call get_vendor_items. Both are what the game showed when the player last opened that "
-    "window, so say when that was if it matters.",
+    "call get_known_recipes; recipes in its learned_since are known too. Its item_id is the item a recipe makes in "
+    "this game: use it for show_plan's 'have' conditions on crafted items. To find where the player can buy "
+    "something, or what a vendor they've visited sells and for how much, call get_vendor_items. Both are what the "
+    "game showed when the player last opened that window, so say when that was if it matters.",
     order=60,
 )
+
+ITEM_ID = "The item it makes in this game; use it for show_plan's 'have' conditions. Null if it makes none."
 
 
 class Reagent(BaseModel):
@@ -27,6 +30,7 @@ class Reagent(BaseModel):
 class Recipe(BaseModel):
     name: str
     recipe_id: int = Field(description="The recipe's spell ID.")
+    item_id: int | None = Field(description=ITEM_ID)
     color: Literal["orange", "yellow", "green", "gray"] | None = Field(
         description="Skill-up chance when last seen: orange always, yellow usually, green rarely, gray never."
     )
@@ -38,14 +42,28 @@ class ProfessionRecipes(BaseModel):
     rank: int | None = Field(description="Skill level when last seen.")
     max_rank: int | None
     seen_at: datetime = Field(
-        description="When the player last had this profession's window open; recipes learned since are missing."
+        description="When the player last had this profession's window open; recipes learned since are in "
+        "learned_since."
     )
     recipes: list[Recipe]
+
+
+class LearnedRecipe(BaseModel):
+    name: str | None
+    recipe_id: int | None = Field(description="The recipe's spell ID, if the game said.")
+    profession: str | None = Field(description="Null if the game didn't say.")
+    item_id: int | None = Field(description=ITEM_ID + " Also null if the game didn't say.")
+    reagents: list[Reagent] | None = Field(description="Null if the game didn't say.")
+    learned_at: datetime
 
 
 class KnownRecipes(BaseModel):
     game: str = Field(description="The WoW version being played; look things up for this version.")
     professions: list[ProfessionRecipes]
+    learned_since: list[LearnedRecipe] = Field(
+        description="Recipes the player learned since they last opened that profession's window: known, like the "
+        "ones in professions, which list them once the window has been opened again."
+    )
     note: str | None = None
 
 
@@ -85,6 +103,11 @@ def _matches(text: str | None, query: str) -> bool:
     return query.casefold() in (text or "").casefold()
 
 
+def _reagents(raw: dict) -> list[Reagent]:
+    return [Reagent(name=g.get("name"), item_id=g["item"], count=g.get("count") or 1)
+            for g in as_list(raw.get("reagents"))]
+
+
 def _profession(raw: dict) -> ProfessionRecipes:
     return ProfessionRecipes(
         profession=raw.get("name") or "unknown",
@@ -92,15 +115,22 @@ def _profession(raw: dict) -> ProfessionRecipes:
         max_rank=raw.get("maxRank"),
         seen_at=_seen_at(raw),
         recipes=[
-            Recipe(
-                name=r.get("name") or "unknown",
-                recipe_id=r["id"],
-                color=r.get("color"),
-                reagents=[Reagent(name=g.get("name"), item_id=g["item"], count=g.get("count") or 1)
-                          for g in as_list(r.get("reagents"))],
-            )
+            Recipe(name=r.get("name") or "unknown", recipe_id=r["id"], item_id=r.get("item"), color=r.get("color"),
+                   reagents=_reagents(r))
             for r in as_list(raw.get("recipes"))
         ],
+    )
+
+
+def _learned(raw: dict) -> LearnedRecipe:
+    return LearnedRecipe(
+        name=raw.get("name"),
+        recipe_id=raw.get("id"),
+        profession=raw.get("profession"),
+        item_id=raw.get("item"),
+        # Lua sends an empty list as {}; a missing one wasn't read.
+        reagents=_reagents(raw) if "reagents" in raw else None,
+        learned_at=_seen_at(raw),
     )
 
 
@@ -128,12 +158,17 @@ async def get_known_recipes(
         str | None, Field(description="A profession, e.g. 'Leatherworking'. Leave out for all of them.")
     ] = None,
 ) -> KnownRecipes:
-    """Get the recipes the player's character knows, per profession, with reagents and skill-up colour, as the
-    game listed them when the player last opened that profession's window."""
+    """Get the recipes the player's character knows, per profession, with reagents, skill-up colour and the item
+    each one makes, as the game listed them when the player last opened that profession's window. Recipes learned
+    since then are in learned_since: they're known too, so don't tell the player to learn them. Use a recipe's
+    item_id for show_plan's 'have' conditions on what it makes."""
     reply, version = await request(kinds.KNOWLEDGE)
     data = section(reply, "recipes")
     cached = [_profession(p) for p in as_list(data.get("professions"))]
     chosen = [p for p in cached if not profession or _matches(p.profession, profession)]
+    learned = [_learned(r) for r in as_list(data.get("learned")) if isinstance(r, dict)]
+    # One whose profession the game didn't say may be the one asked for.
+    learned = [r for r in learned if not profession or not r.profession or _matches(r.profession, profession)]
     notes = []
     if not chosen:
         have = ", ".join(p.profession for p in cached) or "none"
@@ -144,7 +179,7 @@ async def get_known_recipes(
         )
     if problem := data.get("problem"):
         notes.append(f"Reading the last profession window failed: {problem}")
-    return KnownRecipes(game=version, professions=chosen, note=" ".join(notes) or None)
+    return KnownRecipes(game=version, professions=chosen, learned_since=learned, note=" ".join(notes) or None)
 
 
 @tool(annotations=ToolAnnotations(title="Vendors seen", read_only_hint=True, open_world_hint=False))

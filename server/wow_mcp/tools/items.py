@@ -146,19 +146,8 @@ def _published(ids: list[int]) -> int | None:
     return current.get("id") if current.get("items") == ids else None
 
 
-@tool(annotations=ToolAnnotations(title="Item details from the game", read_only_hint=True, open_world_hint=False))
-async def get_item_details(
-    item_ids: Annotated[
-        list[Annotated[int, Field(gt=0)]],
-        Field(min_length=1, max_length=MAX_ITEMS,
-              description="Item IDs for this game version, e.g. 4253 (from wowhead.com/forever/item=4253)."),
-    ],
-) -> ItemDetailsList:
-    """Get items' details from the game itself, for any item ID, also ones the player doesn't have: the tooltip
-    lines as the game shows them, stats, armor, item level, quality, slot, required level, and which lines the
-    game shows in red (requirements the player doesn't meet). Use it for gear comparisons and "what does this
-    item do" instead of website data, which can be wrong for this game version. An ID gives the plain item: for
-    a random-suffix item ("of the Bear") the player has, use the stats from get_inventory."""
+async def look_up(item_ids: list[int]) -> ItemDetailsList:
+    """The game's details of up to MAX_ITEMS items, without repeats; a ToolError if the game can't answer."""
     ids = list(dict.fromkeys(item_ids))
     lookup, sent = _published(ids), False
     if lookup is None:
@@ -187,3 +176,19 @@ async def get_item_details(
             await asyncio.sleep(LOAD_WAIT)
             continue
         return ItemDetailsList(game=version, items=[_details(i, found.get(i)) for i in ids])
+
+
+@tool(annotations=ToolAnnotations(title="Item details from the game", read_only_hint=True, open_world_hint=False))
+async def get_item_details(
+    item_ids: Annotated[
+        list[Annotated[int, Field(gt=0)]],
+        Field(min_length=1, max_length=MAX_ITEMS,
+              description="Item IDs for this game version, e.g. 4253 (from wowhead.com/forever/item=4253)."),
+    ],
+) -> ItemDetailsList:
+    """Get items' details from the game itself, for any item ID, also ones the player doesn't have: the tooltip
+    lines as the game shows them, stats, armor, item level, quality, slot, required level, and which lines the
+    game shows in red (requirements the player doesn't meet). Use it for gear comparisons and "what does this
+    item do" instead of website data, which can be wrong for this game version. An ID gives the plain item: for
+    a random-suffix item ("of the Bear") the player has, use the stats from get_inventory."""
+    return await look_up(item_ids)
