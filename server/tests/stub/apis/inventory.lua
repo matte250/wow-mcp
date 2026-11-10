@@ -15,7 +15,8 @@ SELL_PRICE = "Sell Price"
 -- loadTime seconds later (default: the next frame), as on the real client. Its icon is known
 -- straight away (icon: a texture file ID; default the question mark, 134400). Gear has a class,
 -- subclass and equip slot, and may have armor, stats (keyed as GetItemStats keys them),
--- weapon damage { low, high, speed }, a required level and effects (green tooltip lines).
+-- weapon damage { low, high, speed }, a required level and effects (green tooltip lines). bind is the
+-- tooltip's binding line; GetItemInfo gives it as a bind type.
 client.items = {
 	[6948] = { name = "Hearthstone", quality = 1, level = 1, class = 15 },
 	[2589] = { name = "Linen Cloth", quality = 1, level = 5, class = 7, sell = 13 },
@@ -55,7 +56,8 @@ client.suffixes = {
 	[1102] = { name = " of the Bear", stats = { ITEM_MOD_STRENGTH_SHORT = 3, ITEM_MOD_STAMINA_SHORT = 3 } },
 }
 
--- Containers by bag ID: { size, name, family, slots = { [slot] = { id, count, suffix } } }.
+-- Containers by bag ID: { size, name, family, slots = { [slot] = { id, count, suffix, bound } } }; bound: an item
+-- that binds when equipped and was (items that bind when picked up, and quest items, always are).
 -- -1 is the keyring; 6 and up are bank tabs, only readable at the banker.
 client.bags = {
 	[-1] = { size = 4, slots = { [1] = { id = 5396 } } },
@@ -124,6 +126,9 @@ local function ParseItem(item)
 	return tonumber(itemID), tonumber(rest and rest:match("^:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:(%d+)"))
 end
 
+local BIND_TYPES = { ["Binds when picked up"] = 1, ["Binds when equipped"] = 2, ["Quest Item"] = 4 } -- Enum.ItemBind
+local function BindType(item) return BIND_TYPES[item.bind] or 0 end
+
 local function Bag(bag)
 	if bag >= Enum.BagIndex.CharacterBankTab_1 and not client.atBank then return nil end
 	return client.bags[bag]
@@ -143,7 +148,8 @@ C_Container = {
 		return {
 			iconFileID = 134400, stackCount = s.count or 1, isLocked = false, quality = item.quality,
 			isReadable = false, hasLoot = false, hyperlink = Link(s.id, s.suffix), isFiltered = false,
-			hasNoValue = (item.sell or 0) == 0, itemID = s.id, isBound = false,
+			hasNoValue = (item.sell or 0) == 0, itemID = s.id,
+			isBound = s.bound == true or BindType(item) == 1 or BindType(item) == 4,
 			itemName = Cached(s.id) and item.name or "",
 		}
 	end,
@@ -172,7 +178,8 @@ C_Item = {
 		if not info or not Cached(itemID) then return nil end
 		local typeName, subtypeName = TypeNames(info)
 		return info.name, Link(itemID), info.quality, info.level, info.required or 0, typeName, subtypeName, 1,
-			info.slot or "", info.icon or 134400, info.sell or 0, info.class, info.subclass or 0
+			info.slot or "", info.icon or 134400, info.sell or 0, info.class, info.subclass or 0, BindType(info), 0, nil,
+			false, ""
 	end,
 	GetItemInfoInstant = function(item)
 		local itemID = ParseItem(item)
