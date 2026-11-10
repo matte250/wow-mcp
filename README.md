@@ -98,6 +98,7 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
 | Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown), `get_plan_progress`, `clear_plan` |
 | Goals | `set_goals` (background goals next to the plan that track themselves and point out chances: zones and areas, a tooltip line on mobs, vendors and the auction house selling the item; a plan step can wait for one), `get_goals`, `clear_goals` |
+| Gear | `find_upgrades` (the best upgrades per slot this character can use, from the auction house's last full scan, quest rewards in the log and vendors seen: stats, required level, where to get it and what it costs, and the score change; random-suffix items priced per suffix; `item_ids` for "is X an upgrade") |
 | Auction house | `get_auction_prices` (cheapest buyout, how many listed in how many auctions, from the game's full scan or a search, with its age; an item that's gone says when it was last listed and at what), `watch_auction_prices` (puts items on the priority list checked at every visit) |
 | Routes | `show_route` (numbered stops, lines, navigator arrow; a plan's current step uses the same navigator), `clear_route` |
 | Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
@@ -116,6 +117,12 @@ A priority list of up to 100 items (what your goals, plan and AI track, then wha
 your bags and bank) also gets the cheapest price points. When the last full scan is over 10 minutes
 old, those items are searched one at a time, at most 80 auction house messages a minute counting
 yours, and only on the Browse view, so it never changes what you see.
+
+The full scan also keeps, for gear with random suffixes ("of the Bear"), the cheapest price of each
+suffix. Upgrades are searched in game, a little per frame: the slot and armor or weapon type of every
+item from the scans, quest rewards and vendors seen, then level, stats and price, then the tooltip for
+what this character can use. Stat weights are leveling defaults for the class and talent
+specialization unless the agent passes its own.
 
 The mailbox can only be read at a mailbox, so the addon saves it per character whenever one is open,
 like the bank. Agents count mail items as yours (to collect), point out mail that's about to expire,

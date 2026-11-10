@@ -25,6 +25,7 @@ only by the integrator, who merges the workstreams one by one.
 | W17 | Plans: step checklists that track themselves | `Plans.lua` | `tools/plans.py` | payload key `plan`, STATE section `plan` |
 | W18 | Goals: background targets that point out chances | `Goals.lua` | `tools/goals.py` | payload key `goals`, STATE section `goals` |
 | W20 | Mail as last seen, new mail | `Inventory.lua` | `tools/inventory.py` | kind `ITEMS`, section `mail` |
+| W21 | Gear upgrades | `Auction.lua` (finder, per-suffix scan prices), `Player.lua` (spec), `Inventory.lua` (exports) | `tools/upgrades.py`, `tools/items.py` (`ask`) | payload key `upgradeQuery`, ITEM_DETAILS section `upgrades` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -78,6 +79,10 @@ startup, so after the one restart for this restructure, every feature only needs
   conditions anywhere (goals use them for targets; `{goal: id}` is a condition too).
   `ns.Goals.Status` / `Items` / `AuctionPrices` / `Money` and `ns.Auction.Price` / `Cost` / `IsOpen`.
   Guidance orders 12-14 are plans, goals and buy-vs-farm.
+- **Upgrades**: auction data also has `variants = { [id] = "scan;suffix,price,listed;..." }` for gear with
+  random suffixes; `ns.Inventory = { Equipment, GearStats, Lines }`; STATE `character` also has
+  `classFile`, `spec`, `role`. Server: `items.ask(...)` is the publish-then-ask loop for ITEM_DETAILS
+  sections. Guidance order 47 is upgrades.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
