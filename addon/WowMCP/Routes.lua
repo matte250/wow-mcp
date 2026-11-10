@@ -426,7 +426,9 @@ function Update()
 	if not (nav and stop and Shown() and not saved.done) then return end
 	local ok, yards, angle, problem = pcall(Bearing, stop) -- position data may be secret here
 	if not ok then yards, angle, problem = nil, nil, NO_POSITION end
-	if yards and yards <= ARRIVE_YARDS and armed then return Arrive() end
+	-- The last stop of a route counts even if just chosen: there's nothing to skip ahead to.
+	local last = not Loops() and saved.index == #stops
+	if yards and yards <= ARRIVE_YARDS and (armed or last) then return Arrive() end
 	if yards and yards > ARRIVE_YARDS then armed = true end
 
 	local title = route.title and ns.Escape(route.title) or "Route"

@@ -362,3 +362,24 @@ def test_navigator_fits_long_stop_names(run_route):
         assert(nav.width == 360 and nav.Stop.width == 360 - 58 - 10)
         assert(nav.Stop:GetStringHeight() == 24 and nav.height > shortHeight, "wrapped onto two lines")
     """)
+
+
+def test_choosing_the_last_stop_while_standing_there_finishes(run_route):
+    run_route(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish(TURN_INS)
+        client.Wait()
+        local nav = WowMCPRouteNavigator
+        -- Standing at the last stop (Thrall, Orgrimmar 50, 50) and choosing it by hand.
+        moveTo(1454, 0.5, 0.5)
+        SlashCmdList.WOWMCP("route 3")
+        client.Tick()
+        assert(not nav:IsShown() and chat():find("Route complete: reached Thrall", 1, true))
+
+        -- Any other stop chosen while standing at it still waits until you've left it.
+        moveTo(1411, 0.6, 0.5)  -- at Gornek
+        SlashCmdList.WOWMCP("route 1")
+        client.Tick()
+        assert(nav:IsShown() and nav.Title.text == "Turn-ins  1/3")
+    """)
