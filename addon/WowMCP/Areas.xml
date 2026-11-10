@@ -1,3 +1,26 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
-	<!-- Templates for area highlights. See docs/PLAN.md. -->
+	<!-- A shaded, labelled circle on the world map. WowMCPAreaPinMixin is defined in Areas.lua once
+	     the world map is loaded. Mouse motion only, so clicks still reach the map. -->
+	<Frame name="WowMCPAreaPinTemplate" mixin="WowMCPAreaPinMixin" enableMouseMotion="true" hidden="true" virtual="true">
+		<Size x="64" y="64"/>
+		<Layers>
+			<Layer level="BORDER">
+				<Texture parentKey="Fill" setAllPoints="true">
+					<Color r="1" g="1" b="1" a="1"/>
+				</Texture>
+				<MaskTexture parentKey="Mask" file="Interface\CharacterFrame\TempPortraitAlphaMask" hWrapMode="CLAMPTOBLACKADDITIVE" vWrapMode="CLAMPTOBLACKADDITIVE" setAllPoints="true">
+					<MaskedTextures>
+						<MaskedTexture childKey="Fill"/>
+					</MaskedTextures>
+				</MaskTexture>
+			</Layer>
+			<Layer level="OVERLAY">
+				<FontString parentKey="Label" inherits="GameFontHighlightSmallOutline" justifyH="CENTER">
+					<Anchors>
+						<Anchor point="CENTER"/>
+					</Anchors>
+				</FontString>
+			</Layer>
+		</Layers>
+	</Frame>
 </Ui>
