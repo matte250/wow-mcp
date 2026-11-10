@@ -329,3 +329,29 @@ def test_templates_are_valid_xml():
     root = ET.parse(ADDON / "Routes.xml").getroot()
     names = {frame.get("name") for frame in root}
     assert names == {"WowMCPRouteStopPinTemplate", "WowMCPRouteLinePinTemplate"}
+
+
+def test_navigator_fits_long_stop_names(run_route):
+    run_route(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish(TURN_INS)
+        client.Wait()
+        local nav = WowMCPRouteNavigator
+        local shortWidth, shortHeight = nav.width, nav.height
+        assert(shortWidth == 180 and shortHeight >= 58, shortWidth .. "x" .. shortHeight)
+
+        -- A longer name widens it; one too long for the widest navigator wraps onto two lines.
+        client.Publish('{"title":"Errands","stops":[{"zone":"Durotar","x":60,"y":50,"label":"Finespindles Leather Goods"},'
+            .. '{"zone":"Durotar","x":60,"y":40,"label":"Kaltunk"}]}')
+        client.Wait()
+        assert(nav.Stop.text == "Finespindles Leather Goods" and nav.width > shortWidth and nav.width < 360)
+        assert(nav.Stop:GetStringHeight() == 12, "fits on one line")
+
+        client.Publish('{"title":"Errands","stops":[{"zone":"Durotar","x":60,"y":50,'
+            .. '"label":"Finespindles Leather Goods and Skinning, Great Forge"},'
+            .. '{"zone":"Durotar","x":60,"y":40,"label":"Kaltunk"}]}')
+        client.Wait()
+        assert(nav.width == 360 and nav.Stop.width == 360 - 58 - 10)
+        assert(nav.Stop:GetStringHeight() == 24 and nav.height > shortHeight, "wrapped onto two lines")
+    """)

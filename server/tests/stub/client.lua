@@ -90,6 +90,13 @@ function Region:SetJustifyH(justify) self.justify = justify end
 function Region:SetMaxLines(n) self.maxLines = n end
 function Region:SetFontObject(font) self.font = font end
 function Region:SetWordWrap(wrap) self.wordWrap = wrap end
+-- Text measures: 7 px per character, 12 px per line; wraps to the width set (if word wrap is on).
+function Region:GetUnboundedStringWidth() return #(self.text or "") * 7 end
+function Region:GetStringHeight()
+	local width, lines = self:GetUnboundedStringWidth(), 1
+	if self.wordWrap and (self.width or 0) > 0 then lines = math.max(1, math.ceil(width / self.width)) end
+	return 12 * math.min(lines, self.maxLines or lines)
+end
 -- Textures
 function Region:SetTexture(t) self.texture = t end
 function Region:SetAtlas(atlas) self.atlas = atlas end

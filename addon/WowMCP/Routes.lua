@@ -287,9 +287,26 @@ local function NavigatorTooltip(f)
 	GameTooltip:Show()
 end
 
+-- The navigator grows with its text up to NAV_MAX_WIDTH; a longer stop name wraps onto a
+-- second line rather than being cut off.
+local NAV_MIN_WIDTH, NAV_MAX_WIDTH, TEXT_LEFT, TEXT_RIGHT = 180, 360, 58, 10
+
+local function Layout(f)
+	local texts = { f.Title, f.Stop, f.Distance }
+	local widest = 0
+	for _, text in ipairs(texts) do widest = math.max(widest, text:GetUnboundedStringWidth()) end
+	local width = math.min(NAV_MAX_WIDTH, math.max(NAV_MIN_WIDTH, TEXT_LEFT + widest + TEXT_RIGHT))
+	local height = 14
+	for _, text in ipairs(texts) do
+		text:SetWidth(width - TEXT_LEFT - TEXT_RIGHT)
+		height = height + text:GetStringHeight() + 3
+	end
+	f:SetSize(width, math.max(58, height))
+end
+
 local function CreateNavigator()
 	local f = CreateFrame("Frame", "WowMCPRouteNavigator", UIParent)
-	f:SetSize(220, 58)
+	f:SetSize(NAV_MIN_WIDTH, 58)
 	f:SetFrameStrata("MEDIUM")
 	f:SetClampedToScreen(true)
 	f:SetMovable(true)
@@ -315,17 +332,23 @@ local function CreateNavigator()
 	f.Arrow:SetSize(scale and info.width * scale or ARROW_SIZE, scale and info.height * scale or ARROW_SIZE)
 	f.Arrow:SetPoint("CENTER", f, "LEFT", 29, 0)
 
-	local function Text(font, anchorY)
+	-- Stacked below each other, so a two-line stop name pushes the distance down.
+	local function Text(font, above)
 		local text = f:CreateFontString(nil, "ARTWORK", font)
-		text:SetPoint("TOPLEFT", f, "TOPLEFT", 58, anchorY)
-		text:SetPoint("RIGHT", f, "RIGHT", -8, 0)
+		if above then
+			text:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -3)
+		else
+			text:SetPoint("TOPLEFT", f, "TOPLEFT", TEXT_LEFT, -7)
+		end
 		text:SetJustifyH("LEFT")
 		text:SetWordWrap(false)
 		return text
 	end
-	f.Title = Text("GameFontNormalSmall", -7)
-	f.Stop = Text("GameFontHighlight", -22)
-	f.Distance = Text("GameFontHighlightSmall", -40)
+	f.Title = Text("GameFontNormalSmall")
+	f.Stop = Text("GameFontHighlight", f.Title)
+	f.Stop:SetWordWrap(true)
+	f.Stop:SetMaxLines(2)
+	f.Distance = Text("GameFontHighlightSmall", f.Stop)
 
 	f:SetScript("OnDragStart", f.StartMoving)
 	f:SetScript("OnDragStop", function(self)
@@ -407,6 +430,7 @@ function Update()
 	nav.Distance:SetText(yards and string.format("%d yd", math.floor(yards + 0.5)) or problem)
 	nav.Arrow:SetShown(angle ~= nil)
 	if angle then nav.Arrow:SetRotation(angle) end
+	Layout(nav)
 end
 
 ---------------------------------------------------------------------------
