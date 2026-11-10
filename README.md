@@ -65,9 +65,16 @@ Re-run the installer after changing the addon code. That only needs a `/reload`,
 
 ## Asking from inside the game: `/ai`
 
-Type `/ai <question>` (or `/ask`) in WoW chat. The question goes to `wow-mcp-bridge`, a small
-background service. It runs Claude Code headless with these tools and shows the answer in your
-chat, with map markers when useful. Shift-clicked item links work.
+Type `/ai <question>` (or `/ask`) in WoW chat, or just type in the **AI** chat tab. The question goes
+to `wow-mcp-bridge`, a small background service. It runs Claude Code headless with these tools and
+shows the answer in the AI tab, with map markers when useful. Shift-clicked item links work.
+
+The conversation has its own chat tab, so answers don't drown in a city's chat: your question,
+"Thinking…", then the answer. The tab is made the first time you ask and flashes when a new answer
+arrives while you're in another one. In the AI tab, plain lines go to the AI; lines starting with `/`,
+and replies with R, work as usual. `/mcp aitab both` also shows the conversation in your main chat
+window, `/mcp aitab off` only there. If you close or rename the tab, the AI talks in the main window,
+and `/mcp aitab` brings the tab back.
 
 ```sh
 cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_forever_/Interface/AddOns"
@@ -128,7 +135,8 @@ the tools say so instead of failing silently.
 
 | Command | Does |
 |---|---|
-| `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running) |
+| `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
+| `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |
 | `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |

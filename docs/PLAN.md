@@ -50,6 +50,12 @@ startup, so after the one restart for this restructure, every feature only needs
 - **Output**: `ns.Print(msg)` prints to chat; `ns.Escape(text)` before showing any text from the AI.
   Once W7 lands, `ns.ShowMessage(text, style, sender)` shows a message the way W7 does. Other
   features call it when present and fall back to `ns.Print`.
+- **AI conversation**: `ns.Chat(line, frame)` and `ns.ShowMessage(text, style, sender, sound, frames)`
+  take target chat windows (default: the main one); `ns.AIChat.Answer(text, style, sender)` shows an
+  answer in the conversation. Messages with `reply = true` (`publish_message(..., reply=True)`, set by
+  the bridge) go to the AI tab, made with `FCF_OpenNewWindow(name, true)` and found by name;
+  `WowMCPDB.aiTab = { mode, made = { ["Name-Realm"] = true } }`. Typing in the tab goes through
+  EventRegistry's chat box events plus `hooksecurefunc` only: no writes to Blizzard's chat box fields.
 - **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
   `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
   for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and
