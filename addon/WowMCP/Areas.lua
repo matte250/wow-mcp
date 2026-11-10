@@ -5,6 +5,7 @@
 local _, ns = ...
 
 local Areas = {}
+ns.Areas = Areas
 
 local PIN_TEMPLATE = "WowMCPAreaPinTemplate"
 local FILL_ALPHA = 0.3
@@ -18,6 +19,7 @@ local PALETTE = {
 
 local current     -- the payload being shown
 local areas = {}  -- resolved: an ns.Map.Locate location plus n, label, radius (0-1 of the map's width), yards, color
+local guided = {} -- set by another feature with Areas.Guide (Plans.lua: the current step's), shown with them
 local provider
 local mapAfterCombat
 
@@ -124,11 +126,13 @@ local function CreateProvider()
 		local mapID = map:GetMapID()
 		if not mapID then return end
 		local width = Width(mapID)
-		for _, a in ipairs(areas) do
-			local x, y = ns.Map.Project(a, mapID)
-			local own = a.mapID == mapID
-			local radius = own and a.radius or (a.yards and width and a.yards / width)
-			if x and radius then map:AcquirePin(PIN_TEMPLATE, a, x, y, radius, own) end
+		for _, list in ipairs({ areas, guided }) do
+			for _, a in ipairs(list) do
+				local x, y = ns.Map.Project(a, mapID)
+				local own = a.mapID == mapID
+				local radius = own and a.radius or (a.yards and width and a.yards / width)
+				if x and radius then map:AcquirePin(PIN_TEMPLATE, a, x, y, radius, own) end
+			end
 		end
 	end
 
@@ -166,14 +170,10 @@ local function AreaLine(a)
 	return string.format("%s%s|r %s %.1f, %.1f", ColorCode(a.color), ns.Escape(a.label), ns.Escape(a.zone), a.x * 100, a.y * 100)
 end
 
--- Areas we've already announced (e.g. restored by a /reload) are shown quietly.
-function Areas.Receive(payload)
-	local isNew = payload.id ~= WowMCPDB.areasId
-	current = payload
-	WowMCPDB.areasId = payload.id
-	wipe(areas)
-
-	local raw = type(payload.areas) == "table" and payload.areas or {}
+-- Resolves area records ({ zone, x, y, radius (0-100), label, color, mapID }) into list and
+-- returns the zones that couldn't be found.
+local function Load(list, raw)
+	wipe(list)
 	local missing = {}
 	for i, r in ipairs(raw) do
 		local a = type(r) == "table" and type(r.x) == "number" and type(r.y) == "number"
@@ -183,13 +183,24 @@ function Areas.Receive(payload)
 			a.radius = math.min(math.max(tonumber(r.radius) or 3, 0.1), 50) / 100
 			local width = Width(a.mapID)
 			a.yards = width and a.radius * width
-			table.insert(areas, a)
-			a.n = #areas
+			table.insert(list, a)
+			a.n = #list
 			a.color = Color(r.color, a.n)
 		else
 			table.insert(missing, ns.Escape(type(r) == "table" and r.zone or "?"))
 		end
 	end
+	return missing
+end
+
+-- Areas we've already announced (e.g. restored by a /reload) are shown quietly.
+function Areas.Receive(payload)
+	local isNew = payload.id ~= WowMCPDB.areasId
+	current = payload
+	WowMCPDB.areasId = payload.id
+
+	local raw = type(payload.areas) == "table" and payload.areas or {}
+	local missing = Load(areas, raw)
 	if WowMCPDB.hiddenAreasId == payload.id then wipe(areas) end
 	RefreshPins()
 
@@ -208,19 +219,40 @@ function Areas.Receive(payload)
 	if areas[1] and payload.openMap ~= false then OpenOn(areas[1].mapID) end
 end
 
+-- For other features (Plans.lua): areas shown along with the AI's highlights until changed, e.g.
+-- while a plan step is current. Records like the payload's; key names the set, so one the player
+-- hid with /mcp areas clear stays hidden. Returns the zones not found.
+function Areas.Guide(list, key, title)
+	local missing = Load(guided, type(list) == "table" and list or {})
+	if key ~= nil and key == WowMCPDB.hiddenGuidedAreas then wipe(guided) end
+	guided.key, guided.title = key, title
+	RefreshPins()
+	return missing
+end
+
+function Areas.Unguide()
+	if #guided == 0 then return end
+	wipe(guided)
+	RefreshPins()
+end
+
 function Areas.Command(rest)
 	rest = strtrim(tostring(rest or "")):lower()
 	if rest == "clear" or rest == "hide" then
 		if current then WowMCPDB.hiddenAreasId = current.id end
+		if guided.key ~= nil then WowMCPDB.hiddenGuidedAreas = guided.key end
 		wipe(areas)
+		wipe(guided)
 		RefreshPins()
 		ns.Print("Area highlights hidden until your AI sends new ones.")
-	elseif #areas == 0 then
+	elseif #areas == 0 and #guided == 0 then
 		ns.Print("No highlighted areas.")
 	else
-		if current and current.title then ns.Print("|cffffffff" .. ns.Escape(current.title) .. "|r") end
+		if #areas > 0 and current and current.title then ns.Print("|cffffffff" .. ns.Escape(current.title) .. "|r") end
 		for _, a in ipairs(areas) do ns.Print(AreaLine(a)) end
-		if rest == "show" then OpenOn(areas[1].mapID) end
+		if #guided > 0 and guided.title then ns.Print("|cffffffff" .. ns.Escape(guided.title) .. "|r") end
+		for _, a in ipairs(guided) do ns.Print(AreaLine(a)) end
+		if rest == "show" then OpenOn((areas[1] or guided[1]).mapID) end
 	end
 end
 

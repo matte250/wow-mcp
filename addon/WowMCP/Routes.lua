@@ -1,10 +1,12 @@
 -- WowMCP routes: numbered stops joined by lines on the world map, and a navigator that points
 -- the way to the current stop and moves on as the player arrives (payload key "routes", sent
--- by the show_route tool).
+-- by the show_route tool). Other features guide the player through places of their own the
+-- same way with Routes.Guide (Plans.lua: the current step's places).
 
 local _, ns = ...
 
 local Routes = {}
+ns.Routes = Routes
 
 local STOP_TEMPLATE = "WowMCPRouteStopPinTemplate"
 local LINE_TEMPLATE = "WowMCPRouteLinePinTemplate"
@@ -21,25 +23,36 @@ local COLOR = {
 	line = { 1, 0.82, 0, 0.85 },
 }
 
-local route      -- the payload being shown
-local stops = {} -- resolved stops: an ns.Map.Locate location plus n, label, note
+-- Two sets of stops can drive the navigator and the map, each a "track": the route the AI sent
+-- with show_route, and a guide another feature set with Routes.Guide. The route shows while it's
+-- there, not hidden and not finished; otherwise the guide does. Each track's progress is saved,
+-- so it survives a /reload: WowMCPDB.route { id, index (current stop), done, hidden } and
+-- WowMCPDB.routeGuide { key, index, done, hidden }.
+local route      -- the route payload being shown
+local stops = {} -- the route's resolved stops: an ns.Map.Locate location plus n, label, note, track
+local plain = { stops = stops, link = "route", Saved = function() return WowMCPDB.route or {} end }
+local guide = { stops = {}, link = "guide", guided = true, Saved = function() return WowMCPDB.routeGuide or {} end }
+local shownTrack = false -- the track shown at the last refresh (nil: none; false: not refreshed yet)
+local restoring = true   -- while the saved payload is applied at login, the waypoint is left alone
 local provider, nav
 local armed      -- whether arriving at the current stop counts yet (see Go)
 local mapAfterCombat
 
 local atan2 = math.atan2 or math.atan -- Lua 5.1 (the game) or 5.3+ (the tests)
 
--- WowMCPDB.route: { id, index (current stop), done, hidden }, so progress survives a /reload.
-local function Saved()
-	return WowMCPDB.route or {}
+local function Visible(t)
+	return #t.stops > 0 and not t.Saved().hidden
 end
 
-local function Shown()
-	return route ~= nil and #stops > 0 and not Saved().hidden
+-- The track the navigator and the map show, if any.
+local function Track()
+	if Visible(plain) and not (plain.Saved().done and Visible(guide)) then return plain end
+	if Visible(guide) then return guide end
 end
 
-local function Loops()
-	return route and route.loop and #stops > 2
+-- A route needs three stops to go round; a guide (e.g. two farming spots) two.
+local function Loops(t)
+	return t.loop and #t.stops > (t.guided and 1 or 2)
 end
 
 ---------------------------------------------------------------------------
@@ -107,9 +120,9 @@ end
 local StopPin, LinePin = {}, {}
 
 local function StopColor(stop)
-	local saved = Saved()
+	local saved = stop.track.Saved()
 	if stop.n == saved.index and not saved.done then return COLOR.current end
-	if saved.done or (stop.n < (saved.index or 1) and not Loops()) then return COLOR.done end
+	if saved.done or (stop.n < (saved.index or 1) and not Loops(stop.track)) then return COLOR.done end
 	return COLOR.ahead
 end
 
@@ -145,7 +158,7 @@ function StopPin:OnMouseLeave()
 end
 
 function StopPin:OnMouseClickAction(button)
-	if button == "LeftButton" then Routes.GoTo(self.stop.n) end
+	if button == "LeftButton" then Routes.GoTo(self.stop.n, self.stop.track) end
 end
 
 function LinePin:OnLoad()
@@ -183,15 +196,16 @@ local function CreateProvider()
 	function p:RefreshAllData()
 		self:RemoveAllData()
 		local map = self:GetMap()
-		local mapID = map:GetMapID()
-		if not (mapID and Shown()) then return end
+		local mapID, t = map:GetMapID(), Track()
+		if not (mapID and t) then return end
+		local list = t.stops
 		-- A leg is drawn if either end is on this map; the map clips the rest.
-		for i = 1, Loops() and #stops or #stops - 1 do
-			local x1, y1, on1 = Place(stops[i], mapID)
-			local x2, y2, on2 = Place(stops[i % #stops + 1], mapID)
+		for i = 1, Loops(t) and #list or #list - 1 do
+			local x1, y1, on1 = Place(list[i], mapID)
+			local x2, y2, on2 = Place(list[i % #list + 1], mapID)
 			if x1 and x2 and (on1 or on2) then map:AcquirePin(LINE_TEMPLATE, x1, y1, x2, y2) end
 		end
-		for _, s in ipairs(stops) do
+		for _, s in ipairs(list) do
 			local x, y = ns.Map.Project(s, mapID)
 			if x then map:AcquirePin(STOP_TEMPLATE, s, x, y, s.mapID == mapID) end
 		end
@@ -255,17 +269,21 @@ local function OpenOn(mapID)
 end
 
 local function StopLine(s)
-	local current = s.n == Saved().index and not Saved().done
-	local line = string.format("%s%d. |Haddon:WowMCP:route:%d|h|cffffd100[%s]|r|h %s %.1f, %.1f",
-		current and "|cff33ff33>|r " or "", s.n, s.n, ns.Escape(s.label), ns.Escape(s.zone), s.x * 100, s.y * 100)
+	local saved = s.track.Saved()
+	local current = s.n == saved.index and not saved.done
+	local line = string.format("%s%d. |Haddon:WowMCP:%s:%d|h|cffffd100[%s]|r|h %s %.1f, %.1f",
+		current and "|cff33ff33>|r " or "", s.n, s.track.link, s.n, ns.Escape(s.label), ns.Escape(s.zone), s.x * 100, s.y * 100)
 	local yards = ns.Map.Distance(s)
 	if yards then line = line .. string.format(" |cffaaaaaa(%d yd)|r", math.floor(yards + 0.5)) end
 	return line
 end
 
-local function Heading()
-	local title = route.title and ns.Escape(route.title) or "Route"
-	return string.format("|cffffffff%s|r (%d stops%s)", title, #stops, Loops() and ", loop" or "")
+local function Title(t)
+	return t.title and ns.Escape(t.title) or (t.guided and "Directions" or "Route")
+end
+
+local function Heading(t)
+	return string.format("|cffffffff%s|r (%d stops%s)", Title(t), #t.stops, Loops(t) and ", loop" or "")
 end
 
 ---------------------------------------------------------------------------
@@ -372,7 +390,8 @@ local function CreateNavigator()
 end
 
 local function RefreshNavigator()
-	local show = Shown() and not Saved().done
+	local t = Track()
+	local show = t ~= nil and not t.Saved().done
 	if show and not nav then nav = CreateNavigator() end
 	if not nav then return end
 	nav:SetShown(show)
@@ -380,59 +399,81 @@ local function RefreshNavigator()
 end
 
 local function Refresh()
+	local t = Track()
+	if t ~= shownTrack then
+		-- The other track takes over (e.g. the guide once the route is finished or hidden), and the
+		-- waypoint goes with it.
+		if shownTrack ~= false and not restoring then
+			armed = false
+			local saved = t and t.Saved()
+			if saved and not saved.done and t.stops[saved.index] then SetWaypoint(t.stops[saved.index]) else ClearWaypoint() end
+		end
+		shownTrack = t
+	end
 	RefreshPins()
 	RefreshNavigator()
 end
 
--- Make stop `index` the current one. `arm`: arriving there counts straight away; otherwise the
--- player first has to be seen further than ARRIVE_YARDS from it, so choosing the stop you're
--- standing at (or a loop of stops close together) doesn't skip ahead by itself.
-local function Go(index, arm)
-	local saved = Saved()
+-- Make stop `index` of track t the current one. `arm`: arriving there counts straight away;
+-- otherwise the player first has to be seen further than ARRIVE_YARDS from it, so choosing the
+-- stop you're standing at (or a loop of stops close together) doesn't skip ahead by itself.
+local function Go(t, index, arm)
+	local saved = t.Saved()
 	saved.index, saved.done, saved.hidden = index, nil, nil
-	armed = arm
-	SetWaypoint(stops[index])
+	if Track() == t then -- otherwise the route is shown over this guide, which waits its turn
+		shownTrack, armed = t, arm
+		SetWaypoint(t.stops[index])
+	end
 	Refresh()
 end
 
--- The route is done: hide the navigator and remove its waypoint.
-local function Finish(message)
-	Saved().done = true
+-- The track is done: hide the navigator and remove its waypoint.
+local function Finish(t, message)
+	t.Saved().done = true
 	ClearWaypoint()
 	Refresh()
 	ns.Print(message)
 end
 
-local function Arrive()
-	local saved = Saved()
-	local reached = stops[saved.index]
+local function Arrive(t)
+	local saved = t.Saved()
+	local reached = t.stops[saved.index]
 	if PlaySound and SOUNDKIT and SOUNDKIT.UI_MAP_WAYPOINT_SUPER_TRACK_ON then
 		pcall(PlaySound, SOUNDKIT.UI_MAP_WAYPOINT_SUPER_TRACK_ON)
 	end
-	local nextIndex = saved.index < #stops and saved.index + 1 or (Loops() and 1)
+	local nextIndex = saved.index < #t.stops and saved.index + 1 or (Loops(t) and 1)
 	if nextIndex then
-		ns.Print(string.format("Reached %s. Next: %s", ns.Escape(reached.label), StopLine(stops[nextIndex])))
+		ns.Print(string.format("Reached %s. Next: %s", ns.Escape(reached.label), StopLine(t.stops[nextIndex])))
 		-- In a loop the next stop must be walked to; otherwise e.g. two quest givers side by side
 		-- both count as soon as you're there.
-		Go(nextIndex, not Loops())
-		return
+		Go(t, nextIndex, not Loops(t))
+	elseif t.guided then
+		Finish(t, string.format("Reached %s.", ns.Escape(reached.label)))
+	else
+		Finish(t, string.format("Route complete: reached %s, the last stop.", ns.Escape(reached.label)))
 	end
-	Finish(string.format("Route complete: reached %s, the last stop.", ns.Escape(reached.label)))
+	-- Told on the next frame, so whatever it changes doesn't happen inside this update.
+	local onArrive = t.onArrive
+	if onArrive then C_Timer.After(0, function() pcall(onArrive, reached.n, reached, not nextIndex) end) end
 end
 
 function Update()
-	local saved = Saved()
-	local stop = stops[saved.index]
-	if not (nav and stop and Shown() and not saved.done) then return end
+	local t = Track()
+	local saved = t and t.Saved()
+	local stop = saved and t.stops[saved.index]
+	if not (nav and stop and not saved.done) then return end
 	local ok, yards, angle, problem = pcall(Bearing, stop) -- position data may be secret here
 	if not ok then yards, angle, problem = nil, nil, NO_POSITION end
 	-- The last stop of a route counts even if just chosen: there's nothing to skip ahead to.
-	local last = not Loops() and saved.index == #stops
-	if yards and yards <= ARRIVE_YARDS and (armed or last) then return Arrive() end
+	local last = not Loops(t) and saved.index == #t.stops
+	if yards and yards <= ARRIVE_YARDS and (armed or last) then return Arrive(t) end
 	if yards and yards > ARRIVE_YARDS then armed = true end
 
-	local title = route.title and ns.Escape(route.title) or "Route"
-	nav.Title:SetText(string.format("%s  %d/%d", title, saved.index, #stops))
+	if t.guided and #t.stops == 1 then
+		nav.Title:SetText(Title(t))
+	else
+		nav.Title:SetText(string.format("%s  %d/%d", Title(t), saved.index, #t.stops))
+	end
 	nav.Stop:SetText(ns.Escape(stop.label))
 	nav.Distance:SetText(yards and string.format("%d yd", math.floor(yards + 0.5)) or problem)
 	nav.Arrow:SetShown(angle ~= nil)
@@ -444,6 +485,27 @@ end
 -- Payload and commands
 ---------------------------------------------------------------------------
 
+-- Resolves stop records ({ zone, x, y (0-100), label, note, mapID }) into track t's stops and
+-- returns the zones that couldn't be found.
+local function Load(t, raw)
+	wipe(t.stops)
+	local missing = {}
+	for i, r in ipairs(raw) do
+		local s = type(r) == "table" and type(r.x) == "number" and type(r.y) == "number"
+			and ns.Map.Locate(r.zone, r.x, r.y, r.mapID)
+		if s then
+			s.label = tostring(r.label or ("Stop " .. i))
+			s.note = r.note and tostring(r.note) or nil
+			s.track = t
+			table.insert(t.stops, s)
+			s.n = #t.stops
+		else
+			table.insert(missing, ns.Escape(type(r) == "table" and r.zone or "?"))
+		end
+	end
+	return missing
+end
+
 -- A route we've already announced (e.g. restored by a /reload) is picked up where it was, quietly.
 function Routes.Receive(payload)
 	local saved = WowMCPDB.route
@@ -453,37 +515,25 @@ function Routes.Receive(payload)
 		WowMCPDB.route = saved
 	end
 	route = payload
-	wipe(stops)
+	plain.title, plain.loop = payload.title, payload.loop
 
 	local raw = type(payload.stops) == "table" and payload.stops or {}
-	local missing = {}
-	for i, r in ipairs(raw) do
-		local s = type(r) == "table" and type(r.x) == "number" and type(r.y) == "number"
-			and ns.Map.Locate(r.zone, r.x, r.y, r.mapID)
-		if s then
-			s.label = tostring(r.label or ("Stop " .. i))
-			s.note = r.note and tostring(r.note) or nil
-			table.insert(stops, s)
-			s.n = #stops
-		else
-			table.insert(missing, ns.Escape(type(r) == "table" and r.zone or "?"))
-		end
-	end
+	local missing = Load(plain, raw)
 	if not stops[saved.index] then saved.index = 1 end
 
 	if not isNew then
-		armed = false
+		if shownTrack == plain then armed = false end
 		Refresh()
 		return
 	end
-	ClearWaypoint() -- the previous route's
+	if shownTrack ~= guide then ClearWaypoint() end -- the previous route's
 	if #raw == 0 then
 		Refresh()
 		ns.Print("Route cleared.")
 		return
 	end
 	if stops[1] then
-		ns.Print(Heading())
+		ns.Print(Heading(plain))
 		for _, s in ipairs(stops) do ns.Print(StopLine(s)) end
 	end
 	if #missing > 0 then
@@ -493,62 +543,119 @@ function Routes.Receive(payload)
 		Refresh()
 		return
 	end
-	Go(1, true)
+	Go(plain, 1, true)
 	if payload.openMap ~= false then OpenOn(stops[1].mapID) end
 end
 
-local function NoRoute()
-	if route and #stops > 0 then return false end
+-- For other features (Plans.lua): guide the player through `places` (records like show_route's
+-- stops) with the navigator, waypoint and map lines, in place of the route. The route the AI
+-- sent still shows over a guide while it's newer and not finished. opts:
+--   key: names these places; the same key again (e.g. after a /reload) picks up where it was.
+--   title: shown on the navigator. loop: go round the places until the guide changes.
+--   onArrive(n, stop, last): called after the player arrives at place n.
+--   front: show the guide now (also if hidden or finished), hiding the route if one is shown.
+-- No places removes the guide. Returns the zones that couldn't be found, and whether it hid
+-- the route.
+function Routes.Guide(places, opts)
+	opts = opts or {}
+	local saved = WowMCPDB.routeGuide
+	local isNew = not saved or saved.key ~= opts.key
+	if isNew then
+		saved = { key = opts.key, index = 1 }
+		WowMCPDB.routeGuide = saved
+	end
+	guide.title, guide.loop, guide.onArrive = opts.title, opts.loop and true or false, opts.onArrive
+	local missing = Load(guide, type(places) == "table" and places or {})
+	if not guide.stops[saved.index] then saved.index = 1 end
+
+	local replaced = false
+	if opts.front and Visible(plain) and not plain.Saved().done then
+		plain.Saved().hidden, replaced = true, true
+	end
+	if not guide.stops[1] then
+		WowMCPDB.routeGuide = nil
+		Refresh()
+	elseif isNew then
+		Go(guide, 1, true)
+	elseif opts.front then
+		Go(guide, saved.done and 1 or saved.index, false)
+	else
+		Refresh()
+	end
+	return missing, replaced
+end
+
+function Routes.Unguide()
+	Routes.Guide({})
+end
+
+-- What the route commands act on: the track shown, or else the route, or else the guide.
+local function Target()
+	return Track() or (#stops > 0 and plain) or (#guide.stops > 0 and guide) or nil
+end
+
+local function NoRoute(t)
+	if t then return false end
 	ns.Print("No route. Ask your AI for one!")
 	return true
 end
 
 function Routes.List()
-	if NoRoute() then return end
-	ns.Print(Heading() .. (Saved().hidden and " - hidden, /mcp route show brings it back" or ""))
-	for _, s in ipairs(stops) do ns.Print(StopLine(s)) end
+	local t = Target()
+	if NoRoute(t) then return end
+	ns.Print(Heading(t) .. (t.Saved().hidden and " - hidden, /mcp route show brings it back" or ""))
+	for _, s in ipairs(t.stops) do ns.Print(StopLine(s)) end
 end
 
-function Routes.GoTo(index)
-	if NoRoute() then return end
-	if not stops[index] then
+function Routes.GoTo(index, t)
+	t = t or Target()
+	if NoRoute(t) then return end
+	if not t.stops[index] then
 		ns.Print("No stop " .. tostring(index) .. ". Type /mcp route to list them.")
 		return
 	end
-	Go(index, false)
-	ns.Print("Heading to " .. StopLine(stops[index]))
+	-- Choosing one of the guide's stops brings it in front of a route shown over it.
+	if t == guide and Track() == plain and not plain.Saved().done then plain.Saved().hidden = true end
+	Go(t, index, false)
+	ns.Print("Heading to " .. StopLine(t.stops[index]))
 end
 
 function Routes.Step(delta)
-	if NoRoute() then return end
-	local saved = Saved()
-	local index = (saved.done and #stops + 1 or saved.index) + delta
-	if Loops() then
-		index = (index - 1) % #stops + 1
-	elseif index > #stops then
+	local t = Target()
+	if NoRoute(t) then return end
+	local saved = t.Saved()
+	local index = (saved.done and #t.stops + 1 or saved.index) + delta
+	if Loops(t) then
+		index = (index - 1) % #t.stops + 1
+	elseif index > #t.stops then
 		-- Past the last stop: that's the end of the route.
-		if not saved.done then Finish("Route complete.") end
+		if not saved.done then Finish(t, t.guided and "Directions complete." or "Route complete.") end
 		return
 	elseif index < 1 then
 		ns.Print("Already at the first stop.")
 		return
 	end
-	Routes.GoTo(index)
+	Routes.GoTo(index, t)
 end
 
+-- Brings back what was hidden last: a hidden guide, else the route, else the guide.
 function Routes.Show()
-	if NoRoute() then return end
-	local saved = Saved()
-	Go(saved.done and 1 or saved.index, false)
-	OpenOn(stops[saved.index].mapID)
+	local t = (#guide.stops > 0 and guide.Saved().hidden and guide) or (#stops > 0 and plain)
+		or (#guide.stops > 0 and guide) or nil
+	if NoRoute(t) then return end
+	local saved = t.Saved()
+	Go(t, saved.done and 1 or saved.index, false)
+	OpenOn(t.stops[saved.index].mapID)
 end
 
 function Routes.Stop()
-	if NoRoute() then return end
-	Saved().hidden = true
+	local t = Target()
+	if NoRoute(t) then return end
+	t.Saved().hidden = true
 	ClearWaypoint()
 	Refresh()
-	ns.Print("Route hidden. /mcp route show brings it back.")
+	ns.Print(t.guided and "Directions hidden. /mcp route show brings them back."
+		or "Route hidden. /mcp route show brings it back.")
 end
 
 local SUBCOMMANDS = {
@@ -582,13 +689,15 @@ function Routes.Init()
 	elseif EventUtil and EventUtil.ContinueOnAddOnLoaded then
 		EventUtil.ContinueOnAddOnLoaded("Blizzard_WorldMap", AttachToWorldMap)
 	end
-	-- Chat links: |Haddon:WowMCP:route:<n>|h
+	-- Chat links: |Haddon:WowMCP:route:<n>|h, or guide:<n> for a guide's stops.
 	if EventRegistry then
 		EventRegistry:RegisterCallback("SetItemRef", function(_, link)
-			local index = type(link) == "string" and link:match("^addon:WowMCP:route:(%d+)")
-			if index then Routes.GoTo(tonumber(index)) end
+			local kind, index = (type(link) == "string" and link or ""):match("^addon:WowMCP:(%a+):(%d+)")
+			if kind == "route" or kind == "guide" then Routes.GoTo(tonumber(index), kind == "guide" and guide or plain) end
 		end, Routes)
 	end
+	-- The saved payload is applied right after the login hooks; changes after that are live.
+	C_Timer.After(0, function() restoring = false end)
 end
 
 ns.RegisterReceiver("routes", function(payload)
