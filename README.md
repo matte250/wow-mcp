@@ -98,8 +98,8 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
 | Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown), `get_plan_progress`, `clear_plan` |
 | Goals | `set_goals` (background goals next to the plan that track themselves and point out chances: zones and areas, a tooltip line on mobs, vendors and the auction house selling the item; a plan step can wait for one), `get_goals`, `clear_goals` |
-| Gear | `find_upgrades` (the best upgrades per slot this character can use, from the auction house's last full scan, quest rewards in the log and vendors seen: stats, required level, where to get it and what it costs, and the score change; random-suffix items priced per suffix; `item_ids` for "is X an upgrade") |
-| Auction house | `get_auction_prices` (cheapest buyout, how many listed in how many auctions, from the game's full scan or a search, with its age; an item that's gone says when it was last listed and at what), `watch_auction_prices` (puts items on the priority list checked at every visit) |
+| Gear | `find_upgrades` (the best upgrades per slot this character can use, from the auction house's last full scan, quest rewards in the log and vendors seen: stats, required level, where to get it and what it costs, and the score change; random-suffix items priced per suffix; `item_ids` for "is X an upgrade"; auction prices brought up to date from the online snapshot when it's newer) |
+| Auction house | `get_auction_prices` (online from Blizzard's API when set up: a snapshot of your auction house at most about an hour old, plus the game's own price when that's newer; otherwise the game's full scan or a search, with its age; `history` adds the usual price (7-day median) and price history; an item that's gone says when it was last listed and at what), `watch_auction_prices` (puts items on the priority list checked at every visit) |
 | Routes | `show_route` (numbered stops, lines, navigator arrow; a plan's current step uses the same navigator), `clear_route` |
 | Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
 | Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
@@ -142,6 +142,26 @@ from the install's `.build.info` and the running WoW processes. It's also told w
 that version. If you're running a different WoW client than the one the addon is installed for,
 the tools say so instead of failing silently.
 
+## Online auction prices (optional)
+
+Blizzard's API has had Forever's auction houses since 2026-11-06. Create a client at
+https://develop.battle.net/access/clients and put its ID and secret in
+`~/.config/wow-mcp/battlenet.env` (chmod 600):
+
+```
+BATTLENET_CLIENT_ID=...
+BATTLENET_CLIENT_SECRET=...
+```
+
+`get_auction_prices` then answers from a snapshot of your auction house that's at most about an hour
+old, even if you haven't been there lately, and keeps price history. The API has no realms, only 15
+houses per region (five each called Alliance, Horde and Blackwater Auction House). wow-mcp works out
+which one is yours by comparing them with the prices your game saw; `BATTLENET_AUCTION_HOUSE=<id>` in
+the same file sets it instead. Every snapshot is kept in `~/.cache/wow-mcp/auctions.sqlite3` (about
+0.7 MB an hour). `wow-mcp-bridge` fetches each new one in the background; `--no-auction-refresh` turns
+that off. `cd server && uv run wow-mcp-auctions status` shows the house and how sure the match is, the
+latest snapshot and how much history there is; `houses`, `refresh` and `match` do what they say.
+
 ## In game
 
 | Command | Does |
@@ -172,7 +192,7 @@ Layout: one file per feature on each side, plugged into small registries.
   can ask for), `Stream.lua` (sending to the server), then one file per feature (`Map.lua`,
   `Player.lua`, `Quests.lua`, ...).
 - `server/wow_mcp/`: `app.py` (shared helpers), `item_text.py` (the item markup, shared by the tools and the bridge), `tools/` (one module per feature, picked up
-  automatically), `transport.py` / `stream.py` (the two directions), `game.py`, `install.py`.
+  automatically), `transport.py` / `stream.py` (the two directions), `battlenet.py` (Blizzard's API), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
 - `server/tests/`: `stub/client.lua` runs the addon in Lua, with game APIs in `stub/apis/` (one file
   per area). There's one `test_<feature>.py` per feature, and `conftest.py` has the fixtures
   (`run_client` for scripted sessions, `live_game` for end-to-end runs against the real tools).

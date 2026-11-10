@@ -26,6 +26,7 @@ only by the integrator, who merges the workstreams one by one.
 | W18 | Goals: background targets that point out chances | `Goals.lua` | `tools/goals.py` | payload key `goals`, STATE section `goals` |
 | W20 | Mail as last seen, new mail | `Inventory.lua` | `tools/inventory.py` | kind `ITEMS`, section `mail` |
 | W21 | Gear upgrades | `Auction.lua` (finder, per-suffix scan prices), `Player.lua` (spec), `Inventory.lua` (exports) | `tools/upgrades.py`, `tools/items.py` (`ask`) | payload key `upgradeQuery`, ITEM_DETAILS section `upgrades` |
+| W22 | Online auction prices (Blizzard's API) | – | `battlenet.py`, `online_auctions.py`, `tools/auction.py`, `tools/upgrades.py`, `bridge.py` | config `~/.config/wow-mcp/battlenet.env`, cache `~/.cache/wow-mcp/auctions.sqlite3` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -83,6 +84,12 @@ startup, so after the one restart for this restructure, every feature only needs
   random suffixes; `ns.Inventory = { Equipment, GearStats, Lines }`; STATE `character` also has
   `classFile`, `spec`, `role`. Server: `items.ask(...)` is the publish-then-ask loop for ITEM_DETAILS
   sections. Guidance order 47 is upgrades.
+- **Online prices** (`online_auctions.py`): `lookup(items, realm, faction, seen, with_history)` returns
+  `Prices(enabled, house, how, at, since, items={id: ItemPrice(at, listing, commodity, last, usual,
+  history)}, notes)`. API problems become notes and never raise. In-game prices passed as `seen` are the
+  evidence for which house is the player's. Tests: conftest's autouse `no_online_prices` keeps every
+  test away from the real config, cache and API; tests that need the API patch
+  `online_auctions.make_client` with an `httpx2.MockTransport`.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
