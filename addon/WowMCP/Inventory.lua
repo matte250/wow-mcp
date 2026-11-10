@@ -84,9 +84,10 @@ end
 -- Bags and equipment
 ---------------------------------------------------------------------------
 
--- A container slot as { slot, id, name, count, quality, ilvl, sell, stats, armor }, or nil if it's
--- empty. count is left out when 1; ilvl for anything but gear; stats and armor for anything but
--- gear, and unless asked for (the bank leaves them out to stay small); sell for what vendors won't buy.
+-- A container slot as { slot, id, name, count, quality, ilvl, sell, bound, stats, armor }, or nil if
+-- it's empty. count is left out when 1; ilvl for anything but gear; stats and armor for anything but
+-- gear, and unless asked for (the bank leaves them out to stay small); sell for what vendors won't buy;
+-- bound if it's soulbound (Auction.lua's baseline leaves those out, also from the bank as last seen).
 local function Item(bag, slot, withStats)
 	local info = C_Container.GetContainerItemInfo(bag, slot)
 	if not (info and info.itemID) then return nil end
@@ -103,6 +104,7 @@ local function Item(bag, slot, withStats)
 		if withStats and info.hyperlink then item.stats, item.armor = GearStats(info.hyperlink, class, subclass) end
 	end
 	if sell and sell > 0 and not info.hasNoValue then item.sell = sell end
+	if info.isBound then item.bound = true end
 	return item
 end
 
