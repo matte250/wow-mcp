@@ -44,6 +44,11 @@ class FlightPaths(BaseModel):
         description="Flight masters for the player's faction (or neutral) they haven't talked to yet. Talking to "
         "one discovers it."
     )
+    flight_masters: list[FlightPath] = Field(
+        description="Every flight master for the player's faction (or neutral), discovered or not. Given when "
+        "the game's world map doesn't say which ones the character has discovered (as on Forever); then "
+        "`known` only has the ones seen on a flight master's map."
+    )
     flight_maps_seen: list[FlightMapSeen] = Field(
         description="The flight map last opened at a flight master on each continent, newest first."
     )
@@ -68,6 +73,7 @@ async def get_flight_paths() -> FlightPaths:
     data = section(reply, "flightPaths")
     known = [_path(p) for p in as_list(data.get("known"))]
     undiscovered = [_path(p) for p in as_list(data.get("undiscovered"))]
+    masters = [_path(p) for p in as_list(data.get("flightMasters"))]
     # The world map's data is current; flight maps only add paths it didn't mention.
     listed = {p.name for p in known + undiscovered}
     maps = []
@@ -82,6 +88,12 @@ async def get_flight_paths() -> FlightPaths:
             unreachable=[n["name"] for n in nodes if n.get("state") == "unreachable"],
         ))
     notes = []
+    if "flightMasters" in data and not maps:
+        notes.append(
+            "This game's world map doesn't say which flight paths the character has discovered, and no flight "
+            "master's map has been seen yet, so `known` is empty and `flight_masters` lists them all. Ask the "
+            "player to talk to any flight master once on each continent; their flight map records what's known."
+        )
     if problem := data.get("worldMapProblem"):
         notes.append(
             f"The game's world map data wasn't readable ({problem}), so the known paths only come from the "
@@ -89,5 +101,5 @@ async def get_flight_paths() -> FlightPaths:
         )
     if problem := data.get("flightMapProblem"):
         notes.append(f"The last flight map couldn't be cached: {problem}")
-    return FlightPaths(game=version, known=known, not_yet_discovered=undiscovered, flight_maps_seen=maps,
-                       note=" ".join(notes) or None)
+    return FlightPaths(game=version, known=known, not_yet_discovered=undiscovered, flight_masters=masters,
+                       flight_maps_seen=maps, note=" ".join(notes) or None)

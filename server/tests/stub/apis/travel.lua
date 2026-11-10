@@ -102,6 +102,7 @@ client.taxiNodes = {
 -- known: discovered node IDs; flightMap: the open one ({ from = node ID }); unreachable: node
 -- IDs with no route from there. worldMap = "zones only" makes continent maps list nothing,
 -- "broken" makes it fail. oldFlightMap: only the older flight map API answers.
+-- noDiscoveryFlag: like Forever's client, never mark a world-map node undiscovered.
 client.taxi = { known = { [2] = true, [80] = true }, unreachable = {} }
 
 local function NodesOn(mapID, filter)
@@ -149,7 +150,7 @@ C_TaxiMap = {
 			local node = entry.node
 			list[i] = {
 				nodeID = node.id, name = node.name, position = entry.position, faction = node.faction,
-				isUndiscovered = not client.taxi.known[node.id], atlasName = "TaxiNode_Neutral", textureKit = "",
+				isUndiscovered = not client.taxi.noDiscoveryFlag and not client.taxi.known[node.id] or nil, atlasName = "TaxiNode_Neutral", textureKit = "",
 			}
 		end
 		return list

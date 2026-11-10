@@ -164,3 +164,20 @@ def test_reply_shapes(monkeypatch):
     reply = {"errors": {"flightPaths": "attempt to index nil"}}
     with pytest.raises(ToolError, match="couldn't collect flightPaths: attempt to index nil"):
         asyncio.run(travel.get_flight_paths())
+
+
+def test_client_that_never_flags_undiscovered(live_game):
+    """Forever's world map marks no flight master undiscovered, so it only gives locations;
+    what's known then comes from the flight maps seen."""
+    with live_game("client.taxi.noDiscoveryFlag = true"):
+        fresh = asyncio.run(travel.get_flight_paths())
+    assert fresh.known == [] and fresh.not_yet_discovered == []
+    masters = [p.name for p in fresh.flight_masters]
+    assert "Stormwind, Elwynn" in masters and "Ratchet, The Barrens" in masters
+    assert {p.faction for p in fresh.flight_masters} <= {"Alliance", "Neutral"}, "no Horde flight masters"
+    assert "talk to any flight master" in fresh.note
+
+    with live_game("client.taxi.noDiscoveryFlag = true\n" + EARLIER_FLIGHT_MAPS):
+        later = asyncio.run(travel.get_flight_paths())
+    assert [p.name for p in later.known] == ["Stormwind, Elwynn", "Ironforge, Dun Morogh", "Ratchet, The Barrens"]
+    assert later.flight_masters and later.note is None

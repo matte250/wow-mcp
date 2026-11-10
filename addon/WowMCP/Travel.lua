@@ -71,24 +71,26 @@ local function Continents()
 	return list or {}
 end
 
--- What the world map shows: the flight masters the character has discovered, and those of
--- their faction (or neutral) still to find. Continent maps list all of theirs; if one doesn't,
--- its zones are asked instead.
+-- What the world map shows: every flight master, and (where the client says so) which ones the
+-- character hasn't discovered. Continent maps list all of theirs; if one doesn't, its zones are
+-- asked instead. Forever's client never marks a node undiscovered, so when none is, discovery
+-- isn't known from here: return the player's faction's (and neutral) flight masters as
+-- locations, and leave "known" to the flight maps seen at flight masters.
 local function FromWorldMap()
 	local faction = UnitFactionGroup("player")
-	local known, undiscovered, seen = {}, {}, {}
+	local nodes, seen, flagged = {}, {}, false
 	local function Add(mapID)
-		local nodes = C_TaxiMap.GetTaxiNodesForMap(mapID) or {}
-		for _, node in ipairs(nodes) do
-			local side = FACTIONS[node.faction]
-			if not seen[node.nodeID] and (not node.isUndiscovered or side == "Neutral" or side == faction) then
+		local list = C_TaxiMap.GetTaxiNodesForMap(mapID) or {}
+		for _, node in ipairs(list) do
+			if not seen[node.nodeID] then
 				seen[node.nodeID] = true
 				local entry = Entry(mapID, node)
-				entry.faction = side
-				table.insert(node.isUndiscovered and undiscovered or known, entry)
+				entry.faction = FACTIONS[node.faction]
+				nodes[#nodes + 1] = { entry = entry, undiscovered = node.isUndiscovered == true }
+				flagged = flagged or node.isUndiscovered == true
 			end
 		end
-		return #nodes
+		return #list
 	end
 	for _, continent in ipairs(Continents()) do
 		if Add(continent.mapID) == 0 then
@@ -97,6 +99,18 @@ local function FromWorldMap()
 			end
 		end
 	end
+	local known, undiscovered, masters = {}, {}, {}
+	for _, node in ipairs(nodes) do
+		local ours = node.entry.faction == "Neutral" or node.entry.faction == faction
+		if not flagged then
+			if ours then masters[#masters + 1] = node.entry end
+		elseif not node.undiscovered then
+			known[#known + 1] = node.entry
+		elseif ours then
+			undiscovered[#undiscovered + 1] = node.entry
+		end
+	end
+	if not flagged then return nil, nil, masters end
 	return known, undiscovered
 end
 
@@ -139,9 +153,9 @@ end
 
 local function FlightPaths()
 	local reply = { flightMapProblem = problem }
-	local ok, known, undiscovered = pcall(FromWorldMap)
+	local ok, known, undiscovered, masters = pcall(FromWorldMap)
 	if ok then
-		reply.known, reply.undiscovered = known, undiscovered
+		reply.known, reply.undiscovered, reply.flightMasters = known, undiscovered, masters
 	else
 		reply.worldMapProblem = tostring(known)
 	end
