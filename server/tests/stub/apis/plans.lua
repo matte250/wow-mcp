@@ -35,6 +35,49 @@ function Frame:SetHighlightTexture(texture) self.highlightTexture = texture end
 function Frame:GetParent() return self.parent end
 function Region:SetJustifyV(justify) self.justifyV = justify end
 
+-- Model frames remember the creature they were asked to draw. The client has a model for every
+-- creature but the ones in client.unseenCreatures, and for any display ID.
+client.unseenCreatures = {}
+local NewFrame = CreateFrame
+function CreateFrame(kind, ...)
+	local frame = NewFrame(kind, ...)
+	if kind ~= "PlayerModel" then return frame end
+	function frame:ClearModel() self.creature, self.display = nil, nil end
+	function frame:SetCreature(creatureID) self.creature = creatureID end
+	function frame:SetDisplayInfo(displayID) self.display = displayID end
+	function frame:GetModelFileID()
+		if self.display or (self.creature and not client.unseenCreatures[self.creature]) then return 123456 end
+	end
+	return frame
+end
+
+-- The game's question popups, for tests that want them (without, the addon doesn't ask):
+-- client.popup is the one on screen, { which, text, data }; client.AnswerPopup presses its first
+-- button ("accept") or its third ("alt").
+function client.UsePopups()
+	StaticPopupDialogs = {}
+	function StaticPopup_Show(which, text, _, data) client.popup = { which = which, text = text, data = data } end
+	function StaticPopup_Hide(which)
+		if client.popup and client.popup.which == which then client.popup = nil end
+	end
+end
+function client.AnswerPopup(button)
+	local popup = assert(client.popup, "no popup on screen")
+	client.popup = nil
+	StaticPopupDialogs[popup.which][button == "alt" and "OnAlt" or "OnAccept"](nil, popup.data)
+end
+
+-- The mouse, for tests that drag: where the cursor is and whether the left button is held. Until a
+-- test moves it the stub has no cursor.
+function client.Mouse(x, y, held)
+	client.cursor = { x = x, y = y, held = held }
+	function GetCursorPosition() return client.cursor.x, client.cursor.y end
+	function IsMouseButtonDown(button) return client.cursor.held and (button or "LeftButton") == "LeftButton" end
+	function Frame:GetEffectiveScale() return 1 end
+	function Frame:GetLeft() return 24 end
+	function Frame:GetTop() return 500 end
+end
+
 ---------------------------------------------------------------------------
 -- Items. The client counts the bank also away from the banker (once it knows its contents), and
 -- counts by an item ID, a link, or the name of an item the player has.

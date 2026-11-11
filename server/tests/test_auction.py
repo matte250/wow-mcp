@@ -518,7 +518,7 @@ def test_a_big_full_scan_is_read_in_small_chunks(game, tmp_path):
         f:write(string.format('{"first": %d, "second": %d, "items": %d, %s}', first, second, count, timing))
         f:close()
         noErrors()
-    """.replace("OUT", str(out)))
+    """.replace("OUT", out.as_posix()))
     sizes = json.loads(out.read_text())
     print(f"SavedVariables: {sizes}")
     # Size isn't capped (every item is kept); this just catches a format that grew by accident.
@@ -625,7 +625,7 @@ def test_the_reply_stays_small(game, tmp_path):
         local f = assert(io.open("OUT", "w"))
         f:write(C_EncodingUtil.SerializeJSON({ list = list, lookup = lookup }))
         f:close()
-    """.replace("OUT", str(out)))
+    """.replace("OUT", out.as_posix()))
     replies = json.loads(out.read_text())
     for name, reply in replies.items():
         body = json.dumps(reply, separators=(",", ":")).encode()

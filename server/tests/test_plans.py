@@ -28,9 +28,10 @@ from wow_mcp.tools import plans, routes
 game.running_folders = lambda proc=None: set()  # the stub game waits for this script: it can't check item IDs
 args = json.loads(sys.argv[1])
 if "plan" in args:
-    asyncio.run(plans.show_plan(args["plan"]["title"], [plans.Step(**s) for s in args["plan"]["steps"]]))
-elif args.get("clear_plan"):
-    plans.clear_plan()
+    asyncio.run(plans.show_plan(args["plan"]["title"], [plans.Step(**s) for s in args["plan"]["steps"]],
+                                tab=args["plan"].get("tab"), kind=args["plan"].get("kind")))
+elif "clear_plan" in args:
+    plans.clear_plan(args["clear_plan"] if isinstance(args["clear_plan"], str) else None)
 elif "route" in args:
     routes.show_route([routes.Stop(**s) for s in args["route"]["stops"]], title=args["route"].get("title"),
                       open_map=False)
@@ -50,8 +51,8 @@ def lua_json(value):
     return json.dumps(value).replace("'", "\\u0027")
 
 
-def plan(title, *steps):
-    return lua_json({"plan": {"title": title, "steps": list(steps)}})
+def plan(title, *steps, **more):
+    return lua_json({"plan": {"title": title, "steps": list(steps), **more}})
 
 
 SILK_SPOTS = [place("Durotar", 60, 50, "Silk spot 1"), place("Durotar", 60, 40, "Silk spot 2"),
@@ -726,9 +727,9 @@ def test_plan_commands_and_window(game):
         mcp("plan PREV")
         assert(last():find("Already at the first step.", 1, true))
         mcp("plan bogus")
-        assert(last():find("/mcp plan [show, hide, next, prev, <n>, reset, clear]", 1, true))
+        assert(last():find("/mcp plan [show, hide, next, prev, <n>, reset, clear, tabs, tab <n or name>, name <text>, archive, archived, restore <n or name>, size <width> [steps]]", 1, true))
         mcp("")
-        assert(has("WowMCP|r /mcp plan [show, hide, next, prev, <n>, reset, clear] - the plan from your AI"))
+        assert(has("WowMCP|r /mcp plan [show, hide, next, prev, <n>, reset, clear, tabs, tab <n or name>, name <text>, archive, archived, restore <n or name>, size <width> [steps]] - the plan from your AI"))
         mcp("plan clear")
         assert(not f:IsShown() and last():find("Plan removed. Ask your AI for a new one!", 1, true))
         mcp("plan next")
@@ -813,7 +814,11 @@ def test_show_plan_payload(addons):
     bank = {"zone": "Orgrimmar", "x": 50.12, "y": 50, "label": "Bank", "note": None, "mapID": None}
     area = {"zone": "Durotar", "x": 55, "y": 45, "radius": 6, "label": "Spiders", "color": "cc66ff", "mapID": None}
     nothing = {"places": [], "loop": False, "areas": []}
-    assert state["plan"] == {"id": state["seq"], "title": "Gloves", "steps": [
+    # One plan, in the tab every plan goes to unless it names another; its steps train a profession.
+    assert "It's in the tab 'Plan' (Leatherworking icon)." in result
+    assert state["plan"]["id"] == state["seq"] and len(state["plan"]["list"]) == 1
+    assert state["plan"]["list"][0] == {"id": state["seq"], "tab": "Plan", "kind": "profession",
+                                        "profession": "Leatherworking", "title": "Gloves", "steps": [
         {"text": "Take out the leather", "places": [bank], "loop": False, "areas": [],
          "conditions": [{"have": 2318, "count": 10, "bank": True}]},
         {"text": "Farm silk", "places": [bank, bank], "loop": True, "areas": [area],
@@ -833,7 +838,27 @@ def test_show_plan_payload(addons):
 
     assert plans.clear_plan() == "Cleared the plan."
     state = Transport(addons).load_state()
-    assert state["plan"] == {"id": state["seq"], "steps": []}
+    assert state["plan"] == {"id": state["seq"], "list": []}
+
+
+def test_show_plan_sends_the_npcs_of_a_step(addons):
+    run(plans.show_plan("Kobolds", [
+        plans.Step(text="Accept it from Marshal McBride", npcs=[plans.Npc(id=197, name="Marshal McBride")]),
+        plans.Step(text="Kill kobolds", npcs=[{"id": 6, "name": "Kobold Vermin"}, {"id": 80, "display_id": 373}]),
+        plans.Step(text="Hand it in"),
+    ]))
+    steps = Transport(addons).load_state()["plan"]["list"][0]["steps"]
+    # As the addon reads them, without what wasn't given; a step without NPCs has no key at all.
+    assert steps[0]["npcs"] == [{"id": 197, "name": "Marshal McBride"}]
+    assert steps[1]["npcs"] == [{"id": 6, "name": "Kobold Vermin"}, {"id": 80, "display": 373}]
+    assert "npcs" not in steps[2]
+    inbox = (addons / "WowMCP" / "Inbox.lua").read_text()
+    assert inbox.count("npcs = {") == 2 and "display = 373," in inbox and 'name = "Marshal McBride",' in inbox
+
+    with pytest.raises(ValidationError, match="greater than 0"):
+        plans.Step(text="Nobody", npcs=[{"id": 0}])
+    with pytest.raises(ValidationError, match="at most 4 items"):
+        plans.Step(text="A crowd", npcs=[{"id": n} for n in range(1, 6)])
 
 
 def test_show_plan_checks_item_ids_in_game(live_game):
@@ -889,7 +914,7 @@ def test_show_plan_when_the_game_cant_check_items(addons, monkeypatch):
     monkeypatch.setattr(plans, "look_up", look_up)
     result = run(plans.show_plan("Belt", belt))
     assert result.endswith("Its item IDs weren't checked against the game: The game didn't answer."), result
-    assert Transport(addons).load_state()["plan"]["title"] == "Belt"
+    assert [p["title"] for p in Transport(addons).load_state()["plan"]["list"]] == ["Belt"]
 
     # Still loading after the retries.
     async def look_up(ids):
@@ -941,6 +966,11 @@ def test_plan_tools_live(live_game, tmp_path):
         time.sleep(0.5)
         progress = run(plans.get_plan_progress())
         assert progress.game.startswith("World of Warcraft: Forever")
+        assert (progress.tab, progress.renamed_to, progress.kind, progress.note) == ("Plan", None, "general", None)
+        assert [t.model_dump() for t in progress.tabs] == [{
+            "plan_id": 2, "tab": "Plan", "renamed_to": None, "kind": "general", "title": "Silk", "shown": True,
+            "archived": False, "steps_done": 0, "total_steps": 2, "complete": False,
+        }]
         assert (progress.active, progress.plan_id, progress.title, progress.current_step, progress.total_steps) == (
             True, 2, "Silk", 1, 2)
         assert progress.steps[0].model_dump() == {
@@ -991,3 +1021,821 @@ def test_plan_progress_notes(addons, monkeypatch):
     del reply["plan"]
     with pytest.raises(ToolError, match="doesn't send plan yet"):
         run(plans.get_plan_progress())
+
+
+@pytest.fixture
+def answers(addons, monkeypatch):
+    """The game's answer to get_plan_progress: a dict a test fills in ('plan' is the plan section)."""
+    reply = {}
+
+    async def request(kind):
+        return reply, "World of Warcraft: Forever 1.60.1"
+
+    monkeypatch.setattr(plans, "request", request)
+    return reply
+
+
+def sent(addons):
+    """The server's plans and the id of the last plan payload."""
+    state = Transport(addons).load_state()
+    return state["plan"]["list"], state["plan"]["id"]
+
+
+def test_plan_progress_lists_the_tabs(addons, answers):
+    quests = [plans.Step(text="Accept it", conditions=[{"quest_accepted": 900}]), plans.Step(text="Hand it in")]
+    run(plans.show_plan("Kobold quests", quests, tab="Quests"))
+    run(plans.show_plan("Hunter rotation", [plans.Step(text="Serpent Sting first")], tab="Rotation", kind="class"))
+    (first, second), payload = sent(addons)
+
+    # The player named the open tab 'Shots' and archived the other. The tab keeps the name the tools know.
+    game_tabs = [
+        {"id": first["id"], "tab": "Quests", "kind": "questing", "title": "Kobold quests", "steps": 2, "done": 1,
+         "complete": False, "archived": True, "shown": False},
+        {"id": second["id"], "tab": "Rotation", "name": "Shots", "kind": "class", "title": "Hunter rotation",
+         "steps": 1, "done": 0, "complete": False, "shown": True},
+    ]
+    answers["plan"] = {"id": second["id"], "tab": "Rotation", "name": "Shots", "kind": "class",
+                       "title": "Hunter rotation", "current": 1, "complete": False, "hidden": False,
+                       "steps": [{"done": False, "needsClick": True, "progress": {}}], "tabs": game_tabs,
+                       "seen": payload}
+    progress = run(plans.get_plan_progress())
+    assert (progress.active, progress.plan_id, progress.tab, progress.renamed_to, progress.kind) == (
+        True, second["id"], "Rotation", "Shots", "class")
+    assert progress.steps[0].text == "Serpent Sting first" and progress.note is None
+    assert [t.model_dump() for t in progress.tabs] == [
+        {"plan_id": first["id"], "tab": "Quests", "renamed_to": None, "kind": "questing", "title": "Kobold quests",
+         "shown": False, "archived": True, "steps_done": 1, "total_steps": 2, "complete": False},
+        {"plan_id": second["id"], "tab": "Rotation", "renamed_to": "Shots", "kind": "class",
+         "title": "Hunter rotation", "shown": True, "archived": False, "steps_done": 0, "total_steps": 1,
+         "complete": False},
+    ]
+    # The name the tools take is the one that addresses the plan, whatever the game calls the tab.
+    answers["plan"]["tab"] = answers["plan"]["tabs"][1]["tab"] = "Shots"
+    progress = run(plans.get_plan_progress())
+    assert progress.tab == "Rotation" and progress.tabs[1].tab == "Rotation"
+    assert plans.clear_plan(progress.tab) == "Cleared the plan in the tab 'Rotation'."
+
+
+def test_plan_progress_when_whats_left_is_archived(addons, answers):
+    """No plan open, the game up to date: the player archived what's left. Not 'type /reload'."""
+    run(plans.show_plan("Old", [plans.Step(text="One")], tab="Old"))
+    (old,), payload = sent(addons)
+    archived = {"id": old["id"], "tab": "Old", "kind": "general", "title": "Old", "steps": 1, "done": 0,
+                "archived": True, "shown": False}
+
+    answers["plan"] = {"none": True, "archived": True, "tabs": [archived], "seen": payload}
+    progress = run(plans.get_plan_progress())
+    assert not progress.active and progress.note.startswith("The player archived their plans"), progress.note
+    assert [(t.tab, t.archived, t.shown) for t in progress.tabs] == [("Old", True, False)]
+    # The tabs say so too.
+    answers["plan"] = {"none": True, "tabs": [archived], "seen": payload}
+    assert run(plans.get_plan_progress()).note.startswith("The player archived their plans")
+    # Unless a plan sent since hasn't arrived: that one would open.
+    run(plans.show_plan("New", [plans.Step(text="Two")], tab="New"))
+    assert "hasn't received the plan yet" in run(plans.get_plan_progress()).note
+
+
+def test_plan_progress_says_when_the_game_is_behind(addons, answers):
+    run(plans.show_plan("Quests", [plans.Step(text="One")], tab="Quests"))
+    (quests,), payload = sent(addons)
+    shows = {"id": quests["id"], "tab": "Quests", "kind": "general", "title": "Quests", "current": 1,
+             "complete": False, "hidden": False, "steps": [{"done": False, "needsClick": True, "progress": {}}],
+             "tabs": [{"id": quests["id"], "tab": "Quests", "kind": "general", "title": "Quests", "steps": 1,
+                       "done": 0, "shown": True}],
+             "seen": payload}
+    answers["plan"] = shows
+    assert run(plans.get_plan_progress()).note is None
+
+    # A second tab that hasn't arrived: the game still shows the first, and doesn't list the new one.
+    run(plans.show_plan("Leather", [plans.Step(text="Two")], tab="Leather"))
+    progress = run(plans.get_plan_progress())
+    assert progress.active and [t.tab for t in progress.tabs] == ["Quests"]
+    assert "hasn't received the latest change to the player's plans" in progress.note and "/reload" in progress.note
+    # Once it has, there's nothing to say.
+    shows["seen"] = sent(addons)[1]
+    assert run(plans.get_plan_progress()).note is None
+
+    # A plan sent to the same tab that hasn't arrived: the game shows the one it replaced.
+    run(plans.show_plan("Quests again", [plans.Step(text="Three")], tab="Quests"))
+    progress = run(plans.get_plan_progress())
+    assert "still shows an older plan" in progress.note and progress.steps[0].text is None
+
+    # clear_plan() that hasn't arrived: the game still shows a plan the server no longer has.
+    plans.clear_plan()
+    progress = run(plans.get_plan_progress())
+    assert progress.active and progress.plan_id == quests["id"]
+    assert "still shows a plan that was cleared" in progress.note and "/reload" in progress.note
+    # An addon that doesn't say what it has received: nothing can be said about a cleared plan.
+    del shows["seen"]
+    assert run(plans.get_plan_progress()).note is None
+
+
+def test_plans_the_player_removed_stop_counting(addons, answers, monkeypatch):
+    one = [plans.Step(text="One")]
+    for n in range(1, 11):
+        run(plans.show_plan(f"Plan {n}", one, tab=f"Tab {n}"))
+    listed, payload = sent(addons)
+    ids = [p["id"] for p in listed]
+    inbox = addons / "WowMCP" / "Inbox.lua"
+
+    # The game isn't running, so it can't be asked: the limit stands, and the error says what would help.
+    with pytest.raises(ToolError, match="already has 10 plans .*removed in game still count.*get_plan_progress"):
+        run(plans.show_plan("Eleventh", one, tab="Eleven"))
+
+    # The player removed two in game (the x on their tabs): the game says which, and the server forgets them.
+    answers["plan"] = {"none": True, "cleared": True, "tabs": {}, "removed": [ids[0], ids[4], 999], "seen": payload}
+    before = inbox.read_bytes()
+    progress = run(plans.get_plan_progress())
+    assert "The player removed the plan" in progress.note
+    listed, same = sent(addons)
+    assert [p["tab"] for p in listed] == [f"Tab {n}" for n in (2, 3, 4, 6, 7, 8, 9, 10)] and same == payload
+    assert inbox.read_bytes() == before, "nothing is sent for it"
+
+    # There's room again, and what's sent next doesn't have them.
+    result = run(plans.show_plan("Eleventh", one, tab="Eleven"))
+    assert "the player's tabs are now: Tab 2, Tab 3, Tab 4, Tab 6, Tab 7, Tab 8, Tab 9, Tab 10, Eleven." in result
+    now = inbox.read_text(encoding="utf-8")
+    assert 'tab = "Tab 1",' not in now and 'tab = "Tab 5",' not in now and 'tab = "Tab 2",' in now
+
+    # At the limit show_plan asks the game itself, when it can.
+    run(plans.show_plan("Twelfth", one, tab="Twelve"))
+    monkeypatch.setattr(plans, "delivery_note", lambda: "")
+    with pytest.raises(ToolError, match=r"already has 10 plans \(tabs: 'Tab 2', .*clear_plan\(tab=\.\.\.\) first\.$"):
+        run(plans.show_plan("Thirteenth", one, tab="Thirteen"))
+    answers["plan"]["removed"] = [ids[1]]
+    result = run(plans.show_plan("Thirteenth", one, tab="Thirteen"))
+    assert "the player's tabs are now: Tab 3, Tab 4, Tab 6, Tab 7, Tab 8, Tab 9, Tab 10, Eleven, Twelve, Thirteen." \
+        in result
+
+
+@pytest.mark.parametrize("title, conditions, given, expected", [
+    # A profession's skill or a recipe: a profession plan; quests: a questing plan.
+    ("To 75", [{"skill": "leatherworking", "rank": 75}], {}, ("profession", "Leatherworking")),
+    ("Gloves", [{"recipe": 3770}], {}, ("profession", None)),
+    ("Kobolds", [{"quest_accepted": 900}], {}, ("questing", None)),
+    # A skill that isn't a profession says nothing about the plan.
+    ("Westfall", [{"quest_accepted": 900}, {"skill": "Riding", "rank": 75}], {}, ("questing", None)),
+    ("Train swords", [{"skill": "Swords", "rank": 100}], {}, ("general", None)),
+    # A profession's skill among quests and other skills still makes it that profession's plan.
+    ("Ores", [{"quest_accepted": 900}, {"skill": "Riding", "rank": 75}, {"skill": "Mining", "rank": 75}], {},
+     ("profession", "Mining")),
+    # The title names a profession only as a word of its own.
+    ("Undermining the Defias", [{"quest_accepted": 900}], {}, ("questing", None)),
+    ("Disenchanting your greens", [], {}, ("general", None)),
+    ("First aid 1 to 75", [], {}, ("profession", "First Aid")),
+    ("Mining: copper", [{"quest_accepted": 900}], {}, ("profession", "Mining")),
+    # A profession given without a kind makes it a profession plan; a kind given stands.
+    ("Farm Rugged Leather", [{"have": 8170}], {"profession": "Leatherworking"}, ("profession", "Leatherworking")),
+    ("Farm Rugged Leather", [{"have": 8170}], {"profession": "Leatherworking", "kind": "general"}, ("general", None)),
+])
+def test_a_plans_kind_is_worked_out_from_its_steps(addons, title, conditions, given, expected):
+    run(plans.show_plan(title, [plans.Step(text="Do it", conditions=[c]) for c in conditions]
+                        or [plans.Step(text="Do it")], **given))
+    (plan_sent,), _ = sent(addons)
+    assert (plan_sent["kind"], plan_sent.get("profession")) == expected
+
+
+# Several plans, each under its own tab --------------------------------------------------------
+
+
+def test_plans_go_to_tabs(addons):
+    one = [plans.Step(text="One")]
+    quests = [plans.Step(text="Accept it", conditions=[{"quest_accepted": 900}])]
+    train = [plans.Step(text="Train", conditions=[{"skill": "Leatherworking", "rank": 75}])]
+
+    def tabs():
+        return [(p["tab"], p["kind"], p.get("profession"), p["title"]) for p in
+                Transport(addons).load_state()["plan"]["list"]]
+
+    # A plan without a tab name goes to the tab 'Plan' and replaces the one there; its kind is worked out.
+    result = run(plans.show_plan("First", one))
+    assert "tab" not in result, result
+    run(plans.show_plan("Kobolds", quests))
+    assert tabs() == [("Plan", "questing", None, "Kobolds")]
+
+    # A tab name adds a plan next to it; the profession comes from the skill its steps train, or the title.
+    result = run(plans.show_plan("To 75", train, tab="  Leather   work "))
+    assert "It's in the tab 'Leather work' (Leatherworking icon); the player's tabs are now: Plan, Leather work." \
+        in result, result
+    run(plans.show_plan("Tailoring 1 to 75", one, tab="Cloth"))
+    run(plans.show_plan("Hunter rotation", one, tab="Rotation", kind="class"))
+    run(plans.show_plan("Mounts", one, tab="Other", kind="profession", profession="Riding"))
+    assert tabs() == [
+        ("Plan", "questing", None, "Kobolds"), ("Leather work", "profession", "Leatherworking", "To 75"),
+        ("Cloth", "profession", "Tailoring", "Tailoring 1 to 75"), ("Rotation", "class", None, "Hunter rotation"),
+        ("Other", "profession", "Riding", "Mounts"),
+    ]
+
+    # The name of an existing tab (any case) replaces that plan where it is, with a new id.
+    before = Transport(addons).load_state()["plan"]["list"][1]["id"]
+    run(plans.show_plan("To 100", train, tab="leather WORK"))
+    state = Transport(addons).load_state()
+    assert tabs()[1] == ("leather WORK", "profession", "Leatherworking", "To 100") and len(tabs()) == 5
+    assert state["plan"]["list"][1]["id"] == state["seq"] > before
+
+    # There's room for ten, counting the ones the player archived.
+    for n in range(6, 11):
+        run(plans.show_plan(f"Plan {n}", one, tab=f"Tab {n}"))
+    with pytest.raises(ToolError, match=r"already has 10 plans \(tabs: 'Plan', 'leather WORK', .*clear_plan"):
+        run(plans.show_plan("Eleventh", one, tab="Eleven"))
+    assert len(tabs()) == 10
+    run(plans.show_plan("Sixth again", one, tab="tab 6"))
+    for n in range(7, 11):
+        plans.clear_plan(f"Tab {n}")
+
+    # Removing one tab's plan, or all of them.
+    with pytest.raises(ToolError, match="No plan in a tab 'Nope'; the player's tabs: 'Plan', "):
+        plans.clear_plan("Nope")
+    assert plans.clear_plan("cloth") == "Cleared the plan in the tab 'Cloth'."
+    assert [t[0] for t in tabs()] == ["Plan", "leather WORK", "Rotation", "Other", "tab 6"]
+    assert plans.clear_plan() == "Cleared the 5 plans."
+    assert tabs() == []
+
+
+def test_a_plan_from_before_tabs_keeps_its_place(addons):
+    """The state of a server from before there were tabs holds one plan; it becomes the tab 'Plan'."""
+    transport = Transport(addons)
+    old = {"id": 1, "title": "Old", "steps": [{"text": "One", "places": [], "loop": False, "areas": [],
+                                              "conditions": []}]}
+    transport.publish(lambda state, seq: state.update(plan=old))
+    run(plans.show_plan("Quests", [plans.Step(text="Two")], tab="Quests"))
+    sent = transport.load_state()["plan"]["list"]
+    assert [(p["id"], p["tab"], p["title"]) for p in sent] == [(1, "Plan", "Old"), (2, "Quests", "Quests")]
+    assert sent[0]["steps"] == old["steps"]
+
+
+QUESTS_TAB = plan("Kobold quests", step("Accept Kobold Camp Cleanup", {"quest_accepted": 900}), step("Hand it in"),
+                  tab="Quests")
+LEATHER_TAB = plan("Leatherworking 75", step("Train", {"skill": "Leatherworking", "rank": 75}), tab="Leather")
+CLASS_TAB = plan("Hunter rotation", step("Serpent Sting first"), step("Then Arcane Shot"), tab="Rotation",
+                 kind="class")
+NOTES_TAB = plan("Things to do", step("Feed the pet"), tab="Notes")
+
+
+def test_plans_under_tabs(game):
+    game(f"local QUESTS, LEATHER, CLASS, NOTES = [[{QUESTS_TAB}]], [[{LEATHER_TAB}]], [[{CLASS_TAB}]], [[{NOTES_TAB}]]\n"
+         + r"""
+        client.LoadAddon()
+        client.Wait()
+        local function tabs()
+            local list = {}
+            for _, tab in ipairs(WowMCPPlanFrame.Tabs) do
+                if tab:IsShown() then table.insert(list, tab) end
+            end
+            return list
+        end
+        local function names()
+            local list = {}
+            for i, tab in ipairs(tabs()) do list[i] = (tab.open and "*" or "") .. plain(tab.Name.text) end
+            return table.concat(list, ",")
+        end
+        local function icons()
+            local list = {}
+            for i, tab in ipairs(tabs()) do list[i] = tab.Icon.texture:match("[^\\]+$") end
+            return table.concat(list, ",")
+        end
+        local function mcp(command) SlashCmdList.WOWMCP(command) end
+
+        -- One plan: one tab, with the icon of its kind.
+        client.Publish(QUESTS)
+        client.Wait()
+        local f = WowMCPPlanFrame
+        assert(names() == "*Quests" and icons() == "AvailableQuestIcon" and plain(f.Title.text) == "Kobold quests")
+
+        -- Each new plan gets a tab next to the others and is the one shown. A profession has its own
+        -- icon, a class guide the player's class, anything else a note.
+        client.Publish(LEATHER)
+        client.Wait()
+        client.Publish(CLASS)
+        client.Wait()
+        client.Publish(NOTES)
+        client.Wait()
+        assert(names() == "Quests,Leather,Rotation,*Notes", names())
+        assert(icons() == "AvailableQuestIcon,Trade_LeatherWorking,ClassIcon_HUNTER,INV_Misc_Note_01", icons())
+        assert(plain(f.Title.text) == "Things to do" and f.Count.text == "1/1")
+        assert(has("New plan: |cffffffffThings to do|r (1 steps)."))
+        -- They share the window's width, each right of the one before, on top of the window.
+        local first, second = tabs()[1], tabs()[2]
+        assert(first.width == second.width and first.width * 4 <= 300)
+        assert(first.points[1][1] == "BOTTOMLEFT" and first.points[1][3] == "TOPLEFT" and first.points[1][4] == 0)
+        assert(second.points[1][4] > first.width)
+
+        -- Clicking a tab shows its plan, which goes on where it was.
+        first.OnMouseUp(first)
+        assert(names() == "*Quests,Leather,Rotation,Notes" and plain(f.Title.text) == "Kobold quests")
+        assert(f.Count.text == "1/2" and WowMCPDB.plan.id == WowMCPDB.plans[WowMCPDB.plan.id].id)
+        assert(last():find("Plan: |cffffffffQuests|r (step 1/2).", 1, true), last())
+        client.AcceptQuest(900)
+        client.Wait(2)
+        assert(f.Count.text == "2/2")
+
+        -- By number or by name; what happened meanwhile ticks off when its tab is opened.
+        mcp("plan tab 3")
+        assert(names() == "Quests,Leather,*Rotation,Notes" and f.Count.text == "1/2")
+        mcp("plan next")
+        mcp("plan tab leather")
+        assert(names() == "Quests,*Leather,Rotation,Notes" and f.Count.text == "1/1")
+        client.SetSkill("Leatherworking", 75)
+        mcp("plan tab QUESTS")
+        assert(f.Count.text == "2/2")
+        mcp("plan tab 2")
+        assert(plain(f.Count.text) == "Done", f.Count.text)
+        mcp("plan tab 9")
+        assert(last():find("No such plan. /mcp plan tabs lists them.", 1, true))
+
+        -- The player can name a tab; the list says what each plan is.
+        mcp("plan tab rotation")
+        mcp("plan name Hunter things, all of them!")
+        assert(names() == "Quests,Leather,*Hunter things, all o,Notes", names())
+        mcp("plan name Shots")
+        mcp("plan tabs")
+        assert(has("1. |cffffffffQuests|r (Questing): Kobold quests"), chat())
+        assert(has("2. |cffffffffLeather|r (Leatherworking): Leatherworking 75"))
+        assert(has("|cff33ff33>|r 3. |cffffffffShots|r (Hunter): Hunter rotation"))
+        assert(has("4. |cffffffffNotes|r (General): Things to do"))
+
+        -- A /reload keeps the tabs, the open one, its name and everyone's progress.
+        Reload()
+        f = WowMCPPlanFrame
+        assert(names() == "Quests,Leather,*Shots,Notes" and f.Count.text == "2/2", names())
+        mcp("plan tab 1")
+        assert(f.Count.text == "2/2")
+        assert(not has("New plan"), chat())
+
+        -- A plan sent to a tab's name replaces that plan, in place.
+        client.Publish(QUESTS)
+        client.Wait()
+        assert(names() == "*Quests,Leather,Shots,Notes" and f.Count.text == "2/2" and has("New plan: |cffffffffKobold quests|r"))
+
+        -- Removing the open plan removes its tab and opens another; the AI removing one does the same.
+        mcp("plan clear")
+        assert(names() == "*Leather,Shots,Notes", names())
+        assert(has("Plan removed: |cffffffffQuests|r.") and plain(f.Title.text) == "Leatherworking 75")
+        client.Publish('{"clear_plan": "Leather"}')
+        client.Wait()
+        assert(names() == "*Shots,Notes" and plain(f.Title.text) == "Hunter rotation", names())
+        -- Hiding hides the tabs with the window; opening a tab brings it back.
+        mcp("plan hide")
+        assert(not f:IsShown())
+        mcp("plan tab notes")
+        assert(f:IsShown() and names() == "Shots,*Notes")
+
+        -- All of them gone.
+        client.Publish('{"clear_plan": true}')
+        client.Wait()
+        assert(not f:IsShown() and has("Plan cleared."))
+        mcp("plan tabs")
+        assert(last():find("No plan. Ask your AI for one!", 1, true))
+        noErrors()
+    """)
+
+
+def test_a_plan_without_a_kind_gets_its_icon_from_its_steps(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        -- As a server from before there were tabs sends it: one plan, no tab or kind.
+        WowMCP_Receive({ seq = 1000, plan = { id = 1000, title = "Old style", steps = {
+            { text = "Get to 75", conditions = { { skill = "Mining", rank = 75 } } },
+        } } })
+        client.Wait(2)
+        local tab = WowMCPPlanFrame.Tabs[1]
+        assert(tab:IsShown() and tab.open and tab.Name.text:find("Plan", 1, true))
+        assert(tab.Icon.texture == "Interface\\Icons\\Trade_Mining", tab.Icon.texture)
+        WowMCP_Receive({ seq = 1001, plan = { id = 1001, title = "Quests", steps = {
+            { text = "Hand it in", conditions = { { questTurnedIn = 900 } } },
+        } } })
+        client.Wait(2)
+        assert(not WowMCPPlanFrame.Tabs[2] and tab.Icon.texture == "Interface\\GossipFrame\\AvailableQuestIcon")
+        assert(WowMCPDB.plan.id == 1001 and WowMCPDB.plans[1000] == nil)
+        noErrors()
+    """)
+
+
+def test_closing_a_tab_archives_or_removes_its_plan(game):
+    game(f"local QUESTS, LEATHER, CLASS = [[{QUESTS_TAB}]], [[{LEATHER_TAB}]], [[{CLASS_TAB}]]\n" + r"""
+        client.LoadAddon()
+        client.Wait()
+        local function mcp(command) SlashCmdList.WOWMCP(command) end
+        local function tabs()
+            local list = {}
+            for _, tab in ipairs(WowMCPPlanFrame.Tabs) do
+                if tab:IsShown() then table.insert(list, tab) end
+            end
+            return list
+        end
+        local function names()
+            local list = {}
+            for i, tab in ipairs(tabs()) do list[i] = (tab.open and "*" or "") .. plain(tab.Name.text) end
+            return table.concat(list, ",")
+        end
+        local function shelf() return WowMCPPlanFrame.Shelf end
+        local function archived()
+            local list = {}
+            for _, row in ipairs(shelf() and shelf().List:IsShown() and shelf().List.Rows or {}) do
+                if row:IsShown() then table.insert(list, row) end
+            end
+            return list
+        end
+        client.Publish(QUESTS)
+        client.Wait()
+        client.Publish(LEATHER)
+        client.Wait()
+        client.Publish(CLASS)
+        client.Wait()
+        local f = WowMCPPlanFrame
+        assert(names() == "Quests,Leather,*Rotation" and not shelf())
+
+        -- Progress on a plan, then its tab's x: here that archives it (in game it asks: archive or remove).
+        mcp("plan next")
+        assert(f.Count.text == "2/2")
+        local x = tabs()[3].Close
+        x.OnMouseUp(x)
+        assert(names() == "*Quests,Leather", names())
+        assert(has("Plan archived: |cffffffffRotation|r. The box at the end of the tabs, or /mcp plan restore, brings it back."))
+        assert(plain(f.Title.text) == "Kobold quests" and WowMCPDB.plans[WowMCPDB.plan.id] == WowMCPDB.plan)
+
+        -- The archive button appears at the end of the tabs, which make room for it.
+        assert(shelf():IsShown() and plain(shelf().Count.text) == "1" and #archived() == 0)
+        local last_tab = tabs()[2]
+        assert(last_tab.points[1][4] + last_tab.width <= 300 - shelf().width)
+        -- The x of a tab that isn't open leaves the open one alone.
+        x = tabs()[2].Close
+        x.OnMouseUp(x)
+        assert(names() == "*Quests" and plain(shelf().Count.text) == "2")
+
+        -- Clicking the button lists the archived plans; clicking one brings it back, where it was.
+        shelf().OnMouseUp(shelf())
+        assert(#archived() == 2 and plain(archived()[1].Name.text) == "Leather  Leatherworking 75", archived()[1].Name.text)
+        assert(archived()[2].Icon.texture == "Interface\\Icons\\ClassIcon_HUNTER")
+        archived()[2].OnMouseUp(archived()[2], "LeftButton")
+        assert(names() == "Quests,*Rotation" and f.Count.text == "2/2" and plain(f.Title.text) == "Hunter rotation", names())
+        assert(#archived() == 0 and plain(shelf().Count.text) == "1")
+
+        -- By command, and it all survives a /reload.
+        mcp("plan archive")
+        assert(names() == "*Quests")
+        mcp("plan archived")
+        assert(has("1. |cffffffffLeather|r (Leatherworking): Leatherworking 75"))
+        assert(has("2. |cffffffffRotation|r (Hunter): Hunter rotation"))
+        Reload()
+        f = WowMCPPlanFrame
+        assert(names() == "*Quests" and plain(shelf().Count.text) == "2")
+        mcp("plan restore rotation")
+        assert(names() == "Quests,*Rotation" and f.Count.text == "2/2")
+        mcp("plan restore 5")
+        assert(last():find("No such archived plan. /mcp plan archived lists them.", 1, true))
+
+        -- With every plan archived the window stays, small, for the archive button.
+        mcp("plan archive")
+        mcp("plan archive")
+        assert(f:IsShown() and names() == "" and plain(f.Title.text) == "No plan open" and plain(shelf().Count.text) == "3")
+        assert(not nav() or not nav():IsShown())
+        mcp("plan next")
+        assert(last():find("No plan. Ask your AI for one!", 1, true))
+        mcp("plan hide")
+        assert(not f:IsShown())
+        mcp("plan show")
+        assert(f:IsShown())
+        Reload()
+        f = WowMCPPlanFrame
+        assert(f:IsShown() and names() == "" and plain(shelf().Count.text) == "3")
+
+        -- Right-clicking an archived plan removes it for good; bringing the last one back opens it.
+        shelf().OnMouseUp(shelf())
+        archived()[1].OnMouseUp(archived()[1], "RightButton")
+        assert(has("Plan removed: |cffffffffQuests|r.") and plain(shelf().Count.text) == "2")
+        mcp("plan restore 1")
+        assert(names() == "*Leather" and plain(f.Title.text) == "Leatherworking 75" and plain(shelf().Count.text) == "1")
+        -- A new plan for an archived plan's tab replaces it: nothing left in the archive.
+        client.Publish(CLASS)
+        client.Wait()
+        assert(names() == "Leather,*Rotation" and not shelf():IsShown() and f.Count.text == "1/2")
+        noErrors()
+    """)
+
+
+def test_a_question_about_a_plan_thats_gone_does_nothing(game):
+    game(f"local QUESTS, LEATHER, CLASS = [[{QUESTS_TAB}]], [[{LEATHER_TAB}]], [[{CLASS_TAB}]]\n" + r"""
+        client.UsePopups()
+        client.LoadAddon()
+        client.Wait()
+        local function tabs()
+            local list = {}
+            for _, tab in ipairs(WowMCPPlanFrame.Tabs) do
+                if tab:IsShown() then table.insert(list, tab) end
+            end
+            return list
+        end
+        local function names()
+            local list = {}
+            for i, tab in ipairs(tabs()) do list[i] = (tab.open and "*" or "") .. plain(tab.Name.text) end
+            return table.concat(list, ",")
+        end
+        local function x(n) tabs()[n].Close.OnMouseUp(tabs()[n].Close) end
+        client.Publish(QUESTS)
+        client.Wait()
+        client.Publish(LEATHER)
+        client.Wait()
+        client.Publish(CLASS)
+        client.Wait()
+        assert(names() == "Quests,Leather,*Rotation")
+
+        -- The x on a tab asks: archive or remove. Nothing happens until the player answers.
+        x(1)
+        local asked = client.popup
+        assert(asked.which == "WOWMCP_CLOSE_PLAN" and asked.text == "Quests" and names() == "Quests,Leather,*Rotation")
+
+        -- Meanwhile the AI sends another plan to that tab: the question goes with the plan it was about.
+        client.Publish(QUESTS)
+        client.Wait()
+        assert(client.popup == nil and names() == "*Quests,Leather,Rotation", names())
+        -- An answer that still comes (the old plan's id) touches no other plan: not the one now open.
+        local dialog = StaticPopupDialogs.WOWMCP_CLOSE_PLAN
+        dialog.OnAlt(nil, asked.data)
+        assert(last():find("That plan is gone: your AI replaced or removed it.", 1, true), last())
+        dialog.OnAccept(nil, asked.data)
+        assert(names() == "*Quests,Leather,Rotation" and not has("Plan removed") and not has("Plan archived"), chat())
+        assert(not WowMCPPlanFrame.Shelf or not WowMCPPlanFrame.Shelf:IsShown())
+
+        -- The same when the AI removes the plan asked about; a question about another plan stays.
+        x(2)
+        client.Publish('{"clear_plan": "Rotation"}')
+        client.Wait()
+        assert(client.popup and client.popup.text == "Leather" and names() == "*Quests,Leather")
+        client.Publish('{"clear_plan": "Leather"}')
+        client.Wait()
+        assert(client.popup == nil and names() == "*Quests")
+
+        -- Answered in time, it does what was asked: to the plan asked about, open or not.
+        client.Publish(LEATHER)
+        client.Wait()
+        client.Publish(CLASS)
+        client.Wait()
+        x(1)
+        client.AnswerPopup("alt")
+        assert(names() == "Leather,*Rotation" and has("Plan removed: |cffffffffQuests|r."), names())
+        x(1)
+        client.AnswerPopup("accept")
+        assert(names() == "*Rotation" and has("Plan archived: |cffffffffLeather|r."), names())
+        noErrors()
+    """)
+
+
+def test_the_game_reports_its_tabs_and_what_the_player_removed(game):
+    game(f"local QUESTS, LEATHER, CLASS = [[{QUESTS_TAB}]], [[{LEATHER_TAB}]], [[{CLASS_TAB}]]\n" + r"""
+        local ns = client.LoadAddon()
+        client.Wait()
+        local function mcp(command) SlashCmdList.WOWMCP(command) end
+        local function report() return ns.Plans.Progress() end
+        local ids = {}
+        for i, sent in ipairs({ QUESTS, LEATHER, CLASS }) do
+            client.Publish(sent)
+            client.Wait()
+            ids[i] = WowMCPDB.plan.id
+        end
+        local quests, leather, class = ids[1], ids[2], ids[3]
+
+        -- The open plan and every tab, by the names the AI sent; the last payload received.
+        local r = report()
+        assert(r.id == class and r.tab == "Rotation" and r.name == nil and r.kind == "class" and r.removed == nil)
+        assert(r.seen == class and WowMCPDB.planSeen == class)
+        assert(#r.tabs == 3 and r.tabs[1].tab == "Quests" and r.tabs[2].kind == "profession" and r.tabs[3].shown)
+
+        -- A tab the player names keeps the AI's name too: that's the one its tools know.
+        mcp("plan name Shots")
+        r = report()
+        assert(r.tab == "Rotation" and r.name == "Shots", r.tab)
+        assert(r.tabs[3].tab == "Rotation" and r.tabs[3].name == "Shots" and r.tabs[1].name == nil)
+
+        -- An archived plan is still listed; a removed one isn't, but its id is reported.
+        local x = WowMCPPlanFrame.Tabs[2].Close
+        x.OnMouseUp(x)
+        mcp("plan clear")
+        r = report()
+        assert(r.id == quests and #r.tabs == 2 and r.tabs[2].id == leather and r.tabs[2].archived and not r.tabs[2].shown)
+        assert(#r.removed == 1 and r.removed[1] == class)
+
+        -- The AI removes the open plan: what's left is archived, and that's what the game says (it
+        -- has received everything: a /reload wouldn't change a thing).
+        client.Publish('{"clear_plan": "Quests"}')
+        client.Wait()
+        r = report()
+        assert(r.none and r.archived == true and r.cleared == nil and r.id == nil)
+        assert(#r.tabs == 1 and r.tabs[1].archived and r.removed[1] == class)
+        assert(r.seen == WowMCPDB.planSeen and r.seen > class)
+
+        -- Back from the archive and removed: nothing left but what was removed.
+        mcp("plan restore 1")
+        assert(report().id == leather and report().archived == nil)
+        mcp("plan clear")
+        r = report()
+        assert(r.none and r.cleared == true and r.archived == nil and #r.tabs == 0 and #r.removed == 2)
+        noErrors()
+    """)
+
+
+def test_dragging_the_corner_resizes_until_let_go(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + TEN + r"""]])
+        client.Wait()
+        local f = WowMCPPlanFrame
+        local grip = f.Grip
+        local function held() return grip.OnUpdate ~= nil and grip.Corner.texture:find("Down") ~= nil end
+
+        -- Held by the left button, the window follows the cursor from its top left corner: 60 px to
+        -- the right is 60 wider, 66 px up three steps fewer.
+        client.Mouse(500, 400, true)
+        grip.OnMouseDown(grip, "RightButton")
+        assert(not held())
+        grip.OnMouseDown(grip, "LeftButton")
+        assert(held() and f.points[1][1] == "TOPLEFT" and f.points[1][3] == "BOTTOMLEFT")
+        client.Mouse(560, 400 + 66, true)
+        client.Tick()
+        assert(f.width == 360 and #rows() == 5, f.width)
+        grip.OnMouseUp(grip, "LeftButton")
+        assert(not held() and grip.Corner.texture:find("Up"))
+        client.Mouse(900, 100, false)
+        client.Tick()
+        assert(f.width == 360 and #rows() == 5)
+
+        -- The window goes while the button is held (the AI cleared the plans): the drag is over, and
+        -- doesn't pick up again when the window is back.
+        grip.OnMouseDown(grip, "LeftButton")
+        assert(held())
+        f.OnHide(f)
+        assert(not held())
+        grip.OnMouseDown(grip, "LeftButton")
+        grip.OnHide(grip)
+        assert(not held())
+        -- Let go without the grip being told: it stops by itself, where it was.
+        grip.OnMouseDown(grip, "LeftButton")
+        client.Mouse(300, 300, false)
+        client.Tick()
+        assert(not held() and f.width == 360 and #rows() == 5, f.width)
+        assert(WowMCPDB.planWindow.width == 360 and WowMCPDB.planWindow.rows == 5)
+        noErrors()
+    """)
+
+
+def test_the_window_can_be_resized(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        local function mcp(command) SlashCmdList.WOWMCP(command) end
+        client.Publish([[""" + TEN + r"""]])
+        client.Wait()
+        local f = WowMCPPlanFrame
+        assert(f.width == 300 and #rows() == 8 and rows()[1].width == 284 and rows()[1].Text.width == 266)
+        assert(f.Grip.points[1][1] == "BOTTOMRIGHT")
+
+        -- Dragging the corner ends up here: wider, and fewer steps at once.
+        local ns = select(2, ...)
+        WowMCPPlanFrame.Grip.OnMouseDown(WowMCPPlanFrame.Grip) -- no cursor in the stub: nothing happens
+        mcp("plan size 420 5")
+        assert(last():find("The plan window is 420 wide and shows up to 5 steps.", 1, true), last())
+        assert(f.width == 420 and #rows() == 5 and rows()[1].width == 404 and rows()[1].Text.width == 386)
+        assert(f.Title.width == 420 - 16 - 80)
+        assert(f.Later:IsShown() and f.Later.text == "5 more steps below", f.Later.text)
+        -- The tabs share the new width.
+        assert(f.Tabs[1].width == 120)
+        -- The mouse wheel still scrolls to the last step.
+        for _ = 1, 20 do f.OnMouseWheel(f, -1) end
+        assert(rows()[5].n == 10 and #rows() == 5)
+
+        -- Only the width; and no narrower, wider, fewer or more than is useful.
+        mcp("plan size 250")
+        assert(f.width == 250 and #rows() == 5)
+        mcp("plan size 50 1")
+        assert(f.width == 220 and #rows() == 2)
+        mcp("plan size 5000 99")
+        assert(f.width == 600 and #rows() == 10)
+        mcp("plan size huge")
+        assert(last():find("/mcp plan size <width> [steps shown]", 1, true))
+
+        -- It's kept over a /reload, and can be reset.
+        mcp("plan size 380 6")
+        Reload()
+        f = WowMCPPlanFrame
+        assert(f.width == 380 and #rows() == 6, f.width)
+        mcp("plan size reset")
+        assert(f.width == 300 and #rows() == 8 and WowMCPDB.planWindow.width == nil)
+        noErrors()
+    """)
+
+
+WHO = plan(
+    "Kobold Camp Cleanup",
+    step("Accept Kobold Camp Cleanup from Marshal McBride", npcs=[{"id": 197, "name": "Marshal McBride"}]),
+    step("Kill Kobold Vermin and Workers", npcs=[{"id": 6, "name": "Kobold Vermin"}, {"id": 257, "name": "Kobold Worker"}]),
+    step("Look for the others", npcs=[
+        {"id": 999999, "name": "Nobody"}, {"id": 40, "name": "Kobold Miner"},
+        {"id": 888888, "name": "Old Kobold", "display_id": 373}, {"id": 475, "name": "Kobold Tunneler"}]),
+    step("Hand it in"),
+)
+
+
+def test_hovering_a_step_shows_its_npcs(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.unseenCreatures[999999], client.unseenCreatures[888888] = true, true
+        client.Publish([[""" + WHO + r"""]])
+        client.Wait()
+        -- The model frames there are, and the ones to be seen (in their box), left to right.
+        local function seen(frame) return frame.parent:IsShown() and frame.parent:GetAlpha() > 0 end
+        local function models(shown)
+            local list = {}
+            for _, frame in ipairs(client.frames) do
+                if frame.SetCreature and (not shown or seen(frame)) then table.insert(list, frame) end
+            end
+            return list
+        end
+        local function name(model) return model.parent.Name.text end
+        local function left(model) return model.parent.points[1][4] end
+        local lines
+        GameTooltip.SetText = function() lines = {} end
+        GameTooltip.AddLine = function(_, text) table.insert(lines, text) end
+        local function tip() return table.concat(lines, "\n") end
+        local function enter(n) row(n).OnEnter(row(n)) end
+        local function leave(n) row(n).OnLeave(row(n)) end
+
+        -- Nothing until a step is hovered: not even the frames.
+        assert(#models() == 0)
+
+        -- A step with two NPCs: both beside the tooltip, side by side, named; the tooltip names them too.
+        enter(2)
+        local shown = models(true)
+        assert(#shown == 2 and shown[1].creature == 6 and shown[2].creature == 257)
+        assert(name(shown[1]) == "Kobold Vermin" and name(shown[2]) == "Kobold Worker")
+        local point = shown[1].parent.points[1]
+        assert(point[1] == "TOPLEFT" and point[2] == GameTooltip and point[3] == "TOPRIGHT" and point[4] == 4)
+        assert(left(shown[2]) == 4 + 130 + 4 and shown[1].width == 130 and shown[1].height == 170)
+        assert(shown[1].parent.Back.color[4] > 0.5, "on a dark background")
+        assert(tip():find("NPC: Kobold Vermin\nNPC: Kobold Worker", 1, true), tip())
+
+        -- Only while it's hovered.
+        leave(2)
+        assert(#models(true) == 0)
+
+        -- A step without NPCs shows none; the same frames serve every step.
+        enter(4)
+        assert(#models(true) == 0 and not tip():find("NPC:", 1, true), tip())
+        leave(4)
+        enter(1)
+        shown = models(true)
+        assert(#shown == 1 and shown[1].creature == 197 and name(shown[1]) == "Marshal McBride" and #models() == 2)
+        enter(2) -- straight on to the next step
+        assert(#models(true) == 2 and models(true)[1].creature == 6 and #models() == 2)
+        leave(2)
+
+        -- Three at most. A creature the client can't draw leaves no empty box (the tooltip still names
+        -- it), unless its display ID can be drawn.
+        enter(3)
+        shown = models(true)
+        assert(#models() == 3 and #shown == 2, #shown)
+        assert(shown[1].creature == 40 and left(shown[1]) == 4 and name(shown[1]) == "Kobold Miner")
+        assert(shown[2].creature == 888888 and shown[2].display == 373 and left(shown[2]) == 138)
+        assert(tip():find("NPC: Nobody\nNPC: Kobold Miner\nNPC: Old Kobold\nNPC: Kobold Tunneler", 1, true), tip())
+        -- It may only have needed loading, which a hidden model might never do: its box is shown, but
+        -- can't be seen. Once it's loaded it joins the others.
+        local late = models()[1]
+        assert(late.creature == 999999 and late.parent:IsShown() and late.parent:GetAlpha() == 0)
+        client.unseenCreatures[999999] = nil
+        late.OnModelLoaded(late)
+        shown = models(true)
+        assert(#shown == 3 and shown[1].creature == 999999 and left(shown[1]) == 4 and left(shown[3]) == 272)
+        leave(3)
+        assert(not late.parent:IsShown(), "no box waits once the mouse left")
+        late.OnModelLoaded(late)
+        assert(#models(true) == 0 and not late.parent:IsShown(), "not after the mouse left")
+        -- One that never loads is never seen, and gone with the mouse.
+        client.unseenCreatures[999999] = true
+        enter(3)
+        assert(#models(true) == 2 and late.parent:IsShown() and late.parent:GetAlpha() == 0)
+        leave(3)
+        assert(not late.parent:IsShown())
+
+        -- They go with the window.
+        enter(2)
+        assert(#models(true) == 2)
+        SlashCmdList.WOWMCP("plan hide")
+        assert(#models(true) == 0)
+        SlashCmdList.WOWMCP("plan show")
+        assert(#models(true) == 0)
+
+        -- Straight from a payload, past the server's checks: what isn't an NPC is left out.
+        WowMCP_Receive({ seq = 1000, plan = { id = 1000, title = "Odd", steps = {
+            { text = "Odd NPCs", npcs = { "junk", { id = "abc" }, { name = "No ID" }, { id = 12, name = 5 }, { id = -1 } } },
+            { text = "No list", npcs = "junk" },
+        } } })
+        client.Wait(2)
+        enter(1)
+        shown = models(true)
+        assert(#shown == 1 and shown[1].creature == 12 and name(shown[1]) == "" and not tip():find("NPC:", 1, true))
+        enter(2)
+        assert(#models(true) == 0)
+        noErrors()
+    """)

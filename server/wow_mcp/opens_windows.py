@@ -4,8 +4,8 @@
 Windows has no notification for a file being opened, but an oplock comes close: a program holding
 an exclusive oplock on a file is told when another program opens it, and that open waits until the
 holder lets go. So a watcher holds an oplock on every symbol file; on each break it notes the
-file, lets go (the game's open goes on), and takes the oplock again once the game has closed the
-file. It needs no administrator rights.
+file, lets go (the game's open goes on), and takes the oplock again. It needs no administrator
+rights.
 
 Only one handle can hold a file's oplock, while several processes listen at once (each MCP
 server, the bridge). So the watcher is one background process per folder, started on demand
@@ -48,6 +48,10 @@ class Lost(Exception):
 
 
 def _names(folder: Path) -> dict[str, str]:
+    # "Local\": the names are per logon session. Listeners in another session (a service, a
+    # scheduled task, an SSH login) don't see this session's watcher and start their own, which
+    # gets no oplocks while this one runs and empties the log this one writes. Not handled: run
+    # everything that listens to one game in the same session.
     key = hashlib.sha1(os.path.normcase(str(folder.resolve())).encode()).hexdigest()[:16]
     return {name: f"Local\\wow-mcp-opens-{key}-{name}" for name in ("instance", "ready", "users", "stop")}
 
@@ -89,6 +93,7 @@ if sys.platform == "win32":
     _OPLOCK_READ_WRITE = 0x1 | 0x4  # exclusive: broken by any other open that reads or writes
     _OPLOCK_REQUEST = 0x1
     _ERROR_IO_PENDING = 997
+    _ERROR_OPLOCK_NOT_GRANTED = 300
     _ERROR_ALREADY_EXISTS = 183
     _SYNCHRONIZE = 0x00100000
     _EVENT_MODIFY_STATE = 0x0002
@@ -112,6 +117,21 @@ if sys.platform == "win32":
             _k32.CloseHandle(handle)
         return bool(handle)
 
+    def _failed(what: str, path: str, error: int) -> Unavailable:
+        return Unavailable(f"{what} {path}: {ctypes.FormatError(error).strip()} (Windows error {error})")
+
+    def _oplock_taken(done: int, error: int, path: str) -> bool:
+        """What a request for a file's oplock came to: True if it's held now, False if it can't be
+        had yet (worth another try), and Unavailable if this file will never give one."""
+        if not done and error == _ERROR_IO_PENDING:
+            return True
+        # Not granted: something else holds an oplock on the file. (The file merely being open
+        # elsewhere is no obstacle: the oplock is granted, and breaks at the next open.)
+        if done or error == _ERROR_OPLOCK_NOT_GRANTED:
+            return False
+        # Anything else stays that way, e.g. a disk or network share without oplocks.
+        raise _failed("Windows gives no oplock on", path, error)
+
 
 # The watcher ----------------------------------------------------------------------------------
 
@@ -132,20 +152,22 @@ def watch(folder: Path) -> int:
     request = _OplockRequest(1, ctypes.sizeof(_OplockRequest), _OPLOCK_READ_WRITE, _OPLOCK_REQUEST)
 
     def arm(symbol: int) -> bool:
-        """Take the oplock on a symbol file; False while another program still has the file open."""
+        """Take the oplock on a symbol file; False while something else holds one on it.
+        Raises Unavailable if the file can't be watched at all."""
         if handles[symbol] is None:
             handle = _k32.CreateFileW(paths[symbol], _FILE_READ_ATTRIBUTES, _SHARE_ALL, None, _OPEN_EXISTING,
                                       _FILE_FLAG_OVERLAPPED, None)
             if handle == _INVALID:
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise _failed("can't open", paths[symbol], ctypes.get_last_error())
             _k32.CreateIoCompletionPort(handle, port, symbol, 0)
             handles[symbol] = handle
         ctypes.memset(ctypes.byref(overlapped[symbol]), 0, ctypes.sizeof(_Overlapped))
         done = _k32.DeviceIoControl(handles[symbol], _FSCTL_REQUEST_OPLOCK, ctypes.byref(request),
                                     ctypes.sizeof(request), ctypes.byref(replies[symbol]),
                                     ctypes.sizeof(_OplockReply), None, ctypes.byref(overlapped[symbol]))
-        return not done and ctypes.get_last_error() == _ERROR_IO_PENDING
+        return _oplock_taken(done, ctypes.get_last_error(), paths[symbol])
 
+    # Before the watcher says it's ready: a folder that can't be watched ends it here, with the reason.
     waiting = [symbol for symbol in range(SYMBOLS) if not arm(symbol)]
     log = os.open(log_path(folder), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND | os.O_BINARY)
     ctypes.WinDLL("winmm").timeBeginPeriod(1)  # so the 1 ms waits below are that short
@@ -169,7 +191,7 @@ def watch(folder: Path) -> int:
             # Closing the handle lets go of the oplock, and the game's open goes on.
             _k32.CloseHandle(handles[opened])
             handles[opened] = None
-        # Whatever was opened before has been closed by now, or will be within a moment.
+        # Whatever was opened before is taken again, unless something else holds an oplock on it.
         waiting = [symbol for symbol in waiting if not arm(symbol)]
         if opened is not None:
             waiting.append(opened)
@@ -190,7 +212,11 @@ def main() -> None:
         sys.exit("wow_mcp.opens_windows only runs on Windows; Linux uses inotify (stream.py).")
     if len(sys.argv) != 2:
         sys.exit("usage: python -m wow_mcp.opens_windows <folder of symbol files>")
-    sys.exit(watch(Path(sys.argv[1])))
+    try:
+        status = watch(Path(sys.argv[1]))
+    except (Unavailable, OSError) as e:
+        sys.exit(str(e))  # one line, which the listener that started this watcher reports (_start)
+    sys.exit(status)
 
 
 # Listeners ------------------------------------------------------------------------------------
@@ -204,9 +230,13 @@ def _start(folder: Path) -> None:
     flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     package = str(Path(__file__).resolve().parents[1])
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [package, os.environ.get("PYTHONPATH")]))}
+    folder = Path(os.path.abspath(folder))
     command = [sys.executable, "-m", "wow_mcp.opens_windows", str(folder)]
     with open(folder.parent / ERRORS_NAME, "w") as errors:
-        options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors, env=env, close_fds=True)
+        # In the addon's folder, not the caller's: Windows can't remove or rename a folder that a
+        # running program works in, and the watcher outlives whoever started it.
+        options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors, env=env, close_fds=True,
+                       cwd=str(folder.parent))
         try:
             # Outside the job of whoever started this process, so it outlives an agent session.
             process = subprocess.Popen(command, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **options)

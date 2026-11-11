@@ -73,8 +73,10 @@ cd server
 uv run wow-mcp-install "D:\World of Warcraft\_forever_\Interface\AddOns"
 claude mcp add --scope user wow `
   -e "WOW_MCP_ADDONS_DIR=D:\World of Warcraft\_forever_\Interface\AddOns" `
-  -- uv run --directory "$PWD" wow-mcp
+  "--" uv run --directory "$PWD" wow-mcp
 ```
+
+The quotes around `"--"` matter: PowerShell drops a bare `--` before `claude` sees it.
 
 Windows can't report file opens the way Linux's `inotify` does, so the server holds an oplock on each
 `out/` file instead and is told when the game opens one (`server/wow_mcp/opens_windows.py`). One small
@@ -119,7 +121,7 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Area | Tools |
 |---|---|
 | Map | `show_on_map` (markers + waypoint; `nearest_first` sorts by real distance), `clear_map` (`all_waypoints` also removes yours) |
-| Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown), `get_plan_progress`, `clear_plan` |
+| Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown; hovering a step shows the models of the NPCs it names; up to ten plans at once, each under a named tab above the window with an icon for its kind: questing, your class, its profession, or general; the x on a tab archives or removes its plan, and plans you removed stop counting), `get_plan_progress`, `clear_plan` (one tab's plan, or all) |
 | Goals | `set_goals` (background goals next to the plan that track themselves and point out chances: zones and areas, a tooltip line on mobs, vendors and the auction house selling the item; a plan step can wait for one), `get_goals`, `clear_goals` |
 | Gear | `find_upgrades` (the best upgrades per slot this character can use, from the auction house's last full scan, quest rewards in the log and vendors seen: stats, required level, where to get it and what it costs, and the score change; random-suffix items priced per suffix; `item_ids` for "is X an upgrade"; auction prices brought up to date from the online snapshot when it's newer) |
 | Auction house | `get_auction_prices` (online from Blizzard's API when set up: a snapshot of your auction house at most about an hour old, plus the game's own price when that's newer; otherwise the game's full scan or a search, with its age; `history` adds the usual price (7-day median) and price history; an item that's gone says when it was last listed and at what), `watch_auction_prices` (puts items on the priority list checked at every visit) |
@@ -193,8 +195,11 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |
-| `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |
-| `/mcp plan [show, hide, next, prev, <n>, reset, clear]` | The plan window. Click a step to make it current; right-click it or click its box to tick or un-tick it; the wheel scrolls; − collapses |
+| `/mcp show`, `/mcp <n>`, `/mcp remove <n>`, `/mcp clear` | Open the map on them, navigate to marker n, remove marker n (or right-click or shift-click its pin on the map), hide them |
+| `/mcp plan [show, hide, next, prev, <n>, reset, clear]` | The plan window. Click a step to make it current; right-click it or click its box to tick or un-tick it; the wheel scrolls; − collapses; hovering a step shows the models of its NPCs |
+| `/mcp plan [tabs, tab <n or name>, name <text>]` | Several plans: list their tabs, show another (or click its tab), name the tab of the one showing. Only the plan showing guides you and ticks itself off; the others catch up when you open them |
+| `/mcp plan [archive, archived, restore <n or name>]` | Put the plan showing away with its progress, list the archived ones, bring one back. The x on a tab asks: archive or remove; the box at the end of the tabs lists the archive (click one to bring it back, right-click to remove it) |
+| `/mcp plan size <width> [steps]`, `/mcp plan size reset` | The plan window's width and how many steps it shows at once; or drag its bottom right corner |
 | `/mcp goals [show, hide, mute <n>, unmute <n>, clear [<n>, all]]` | The goals list (docks under the plan window): right-click a goal to mute it; − collapses; `clear` removes the done ones |
 | `/mcp prices` | Auction prices your AI has: the last full scan, the priority list, searches left; at the auction house, look the list up again |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |

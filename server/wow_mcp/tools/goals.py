@@ -14,7 +14,7 @@ from wow_mcp.app import as_list, guidance, request, section, tool, transport
 from wow_mcp.tools.messages import delivery_note
 from wow_mcp.tools.plans import (
     GOAL_ID, Have, Level, QuestAccepted, QuestComplete, QuestObjective, QuestTurnedIn, Recipe, Skill,
-    _lua, describe,
+    _lua, describe, sent_plans,
 )
 
 guidance(
@@ -281,9 +281,11 @@ def clear_goals(
             raise ToolError(f"No goal {', '.join(map(repr, unknown))}; get_goals lists them.")
         removed[:] = [g["id"] for g in current if all or g["id"] in (ids or [])]
         state["goals"] = {"id": seq, "goals": [g for g in current if g["id"] not in removed]}
-        for n, step in enumerate((state.get("plan") or {}).get("steps") or [], 1):
-            if any(isinstance(c, dict) and c.get("goal") in removed for c in step.get("conditions") or []):
-                linked.append(str(n))
+        plans = sent_plans(state)
+        for plan in plans:
+            for n, step in enumerate(plan.get("steps") or [], 1):
+                if any(isinstance(c, dict) and c.get("goal") in removed for c in step.get("conditions") or []):
+                    linked.append(str(n) if len(plans) == 1 else f"{n} of {plan.get('tab')!r}")
 
     transport().publish(change)
     result = f"Removed {len(removed)} goal(s): {', '.join(removed) or 'none'}."

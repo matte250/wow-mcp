@@ -96,7 +96,7 @@ def run_client(addons, tmp_path):
         if not LUA:
             pytest.skip("lua interpreter not installed")
         test = tmp_path / "test.lua"
-        test.write_text(textwrap.dedent(script))
+        test.write_text(textwrap.dedent(script), encoding="utf-8")
         result = subprocess.run([LUA, str(STUB), str(addons), str(test)], capture_output=True, text=True)
         assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 

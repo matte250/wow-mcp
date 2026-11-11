@@ -202,7 +202,7 @@ def test_full_quest_log_stays_compact(run_client, tmp_path):
         local f = assert(io.open("OUT", "w"))
         f:write(C_EncodingUtil.SerializeJSON(reply))
         f:close()
-    """.replace("OUT", str(out)))
+    """.replace("OUT", out.as_posix()))
     body = out.read_bytes()
     assert len(json.loads(body)["quests"]["log"]) == 25
     assert len(zlib.compress(body, 9)) < 3000, len(zlib.compress(body, 9))

@@ -8,6 +8,12 @@
 -- current step. Done stays done: crafting uses up the farmed items, the farming step stays ticked.
 -- The current step's places drive the route navigator (Routes.Guide) and its areas are
 -- highlighted (Areas.Guide). Progress is kept in WowMCPDB.plan, so a /reload picks up where it was.
+--
+-- There can be several plans, each under a tab above the window with its name and an icon for its
+-- kind (questing, the player's class, a profession, or general). One is open at a time: that's the
+-- plan the rest of this file works with, and the only one checked. The others keep their progress
+-- (WowMCPDB.plans) and catch up when their tab is opened. The x on a tab closes its plan: archived
+-- (the archive button at the end of the tabs brings it back, with its progress) or removed.
 
 local _, ns = ...
 
@@ -18,13 +24,22 @@ local CHECK_INTERVAL = 1 -- seconds; positions have no events, and the window sh
 local DEFAULT_YARDS = 12
 local MAX_ROWS = 8       -- steps shown at once; the mouse wheel scrolls through the rest
 local WIDTH, PAD, BOX, GAP, HEADER = 300, 8, 18, 3, 20
+-- The player can drag the window's corner: wider or narrower, more or fewer steps at once.
+local MIN_WIDTH, MAX_WIDTH, MIN_ROWS, MOST_ROWS, ROW_DRAG = 220, 600, 2, 25, 22
+local TAB_HEIGHT, TAB_GAP, TAB_ICON, TAB_PAD, TAB_MAX = 20, 2, 14, 4, 120
+local TAB_NAME = 20      -- characters of a tab's name
+local TAB_CLOSE = 10     -- the x on a tab
+local SHELF_WIDTH, SHELF_LIST, SHELF_ROW = 34, 230, 18 -- the archive button, and its list of archived plans
+-- The models of a step's NPCs, beside its tooltip: how many at once, their size, the room for a name.
+local MAX_MODELS, MODEL_WIDTH, MODEL_HEIGHT, MODEL_GAP, MODEL_NAME = 3, 130, 170, 4, 16
 local SOUNDS = { step = { "IG_QUEST_LIST_COMPLETE", 878 }, plan = { "READY_CHECK", 8960 } } -- SOUNDKIT names, IDs
 local TICK = "|TInterface\\Buttons\\UI-CheckBox-Check:0|t"
 local GREEN, GREY, GOLD, WHITE, LIGHT, TODO = "|cff33ff33", "|cff808080", "|cffffd100", "|cffffffff", "|cffd9d9d9", "|cffffcc66"
 -- Skill line IDs of the professions and secondary skills, for lines under a collapsed header.
 local SKILL_IDS = { 164, 165, 171, 182, 186, 197, 202, 333, 393, 129, 185, 356 }
 
-local plan        -- the payload being shown
+local plans = {}  -- every plan the AI sent, in tab order: { id, tab, kind, profession, title, steps }
+local plan        -- the one that's open: the payload being shown
 local steps = {}  -- parsed: { n, text, places, loop, areas, conditions = { { kind, value, ..., met, text } } }
 local wanted = {} -- item IDs the plan counts: their names may arrive later
 local session = { turnedIn = {} } -- what events said before the game's own lists catch up
@@ -34,16 +49,54 @@ local hovered     -- the row whose tooltip is showing
 local first       -- the first step shown in the window; nil follows the current step
 local pending     -- a check is scheduled
 
--- WowMCPDB.plan: progress of the plan with this id: { id, done = { [n] = "auto" | "click" },
+-- WowMCPDB.plan: progress of the open plan: { id, done = { [n] = "auto" | "click" },
 -- undone = { [n] = true } (un-ticked by hand: not ticked again until its conditions have failed),
--- current, complete, hidden, cleared }. A plan with another id starts over.
+-- current, complete, hidden, cleared (removed by the player), archived (put away by the player),
+-- name (the tab's name, if the player renamed it) }. A plan
+-- with another id starts over. WowMCPDB.plans has the same for every plan, by id.
 local function State()
 	return WowMCPDB.plan
 end
 
+local function States()
+	WowMCPDB.plans = WowMCPDB.plans or {}
+	return WowMCPDB.plans
+end
+
+local function StateOf(p)
+	local states = States()
+	local state = states[p.id]
+	if not state then
+		state = { id = p.id }
+		states[p.id] = state
+	end
+	state.done, state.undone = state.done or {}, state.undone or {}
+	return state
+end
+
+-- The plans that have a tab: all but the ones the player removed or archived.
+local function Tabs()
+	local list = {}
+	for _, p in ipairs(plans) do
+		local state = StateOf(p)
+		if not state.cleared and not state.archived then list[#list + 1] = p end
+	end
+	return list
+end
+
+-- The plans the player archived, oldest first.
+local function Archived()
+	local list = {}
+	for _, p in ipairs(plans) do
+		local state = StateOf(p)
+		if state.archived and not state.cleared then list[#list + 1] = p end
+	end
+	return list
+end
+
 local function Active()
 	local state = State()
-	return plan ~= nil and #steps > 0 and state ~= nil and not state.cleared
+	return plan ~= nil and #steps > 0 and state ~= nil and not state.cleared and not state.archived
 end
 
 -- Errors are kept for get_plan_progress and said once in chat, so they can't go unnoticed.
@@ -453,12 +506,95 @@ function Guide(front)
 end
 
 ---------------------------------------------------------------------------
+-- Tabs: a plan's kind, icon and name
+---------------------------------------------------------------------------
+
+local ICONS = "Interface\\Icons\\"
+local KIND_ICONS = {
+	questing = "Interface\\GossipFrame\\AvailableQuestIcon",
+	class = ICONS .. "INV_Misc_Book_09",
+	profession = ICONS .. "INV_Misc_Gear_01",
+	general = ICONS .. "INV_Misc_Note_01",
+}
+local KIND_NAMES = { questing = "Questing", class = "Class guide", profession = "Profession", general = "General" }
+-- By normalized name, for professions the character doesn't have (the game gives the icon of one they have).
+local PROFESSION_ICONS = {
+	alchemy = "Trade_Alchemy", blacksmithing = "Trade_BlackSmithing", cooking = "INV_Misc_Food_15",
+	enchanting = "Trade_Engraving", engineering = "Trade_Engineering", firstaid = "Spell_Holy_SealOfSacrifice",
+	fishing = "Trade_Fishing", herbalism = "Trade_Herbalism", inscription = "INV_Inscription_Tradeskill01",
+	jewelcrafting = "INV_Misc_Gem_01", leatherworking = "Trade_LeatherWorking", mining = "Trade_Mining",
+	skinning = "INV_Misc_Pelt_Wolf_01", tailoring = "Trade_Tailoring",
+}
+
+-- A plan's kind and, for a profession plan, its profession. The AI says; a plan without a kind
+-- (sent before there were tabs) is told from what its steps wait for.
+local function KindOf(p)
+	if KIND_ICONS[p.kind] then return p.kind, p.profession end
+	local quests
+	for _, raw in ipairs(type(p.steps) == "table" and p.steps or {}) do
+		for _, c in ipairs(type(raw) == "table" and type(raw.conditions) == "table" and raw.conditions or {}) do
+			if type(c) == "table" then
+				if c.skill then return "profession", tostring(c.skill) end
+				if c.recipe then return "profession", nil end
+				quests = quests or c.questAccepted or c.questComplete or c.questObjective or c.questTurnedIn
+			end
+		end
+	end
+	return quests and "questing" or "general", nil
+end
+
+local function TabIcon(p)
+	local kind, profession = KindOf(p)
+	if kind == "class" then
+		local _, class = UnitClass("player")
+		if class then return ICONS .. "ClassIcon_" .. class end
+	elseif kind == "profession" and profession then
+		if C_Spell and C_Spell.GetSpellTexture then
+			local ok, icon = pcall(C_Spell.GetSpellTexture, profession) -- a profession the character has
+			if ok and icon then return icon end
+		end
+		local known = PROFESSION_ICONS[Normalize(profession)]
+		if known then return ICONS .. known end
+	end
+	return KIND_ICONS[kind]
+end
+
+-- The tab's name as the AI sent it: what show_plan and clear_plan know the plan by.
+local function SentTab(p)
+	return type(p.tab) == "string" and p.tab ~= "" and p.tab or "Plan"
+end
+
+-- The name on the tab: the player's, if they named it (/mcp plan name).
+local function TabName(p)
+	local name = StateOf(p).name
+	return type(name) == "string" and name ~= "" and name or SentTab(p)
+end
+
+-- What the tab's tooltip and /mcp plan tabs say about a plan's kind.
+local function KindText(p)
+	local kind, profession = KindOf(p)
+	if kind == "class" then return (UnitClass("player")) or KIND_NAMES.class end
+	return kind == "profession" and profession or KIND_NAMES[kind]
+end
+
+---------------------------------------------------------------------------
 -- The window
 ---------------------------------------------------------------------------
 
 local function WindowSaved()
 	WowMCPDB.planWindow = WowMCPDB.planWindow or {}
 	return WowMCPDB.planWindow
+end
+
+-- The window's width and how many steps it shows at once: the player's, if they resized it.
+local function Width()
+	local width = tonumber(WindowSaved().width)
+	return width and math.max(MIN_WIDTH, math.min(MAX_WIDTH, math.floor(width + 0.5))) or WIDTH
+end
+
+local function MaxRows()
+	local rows = tonumber(WindowSaved().rows)
+	return rows and math.max(MIN_ROWS, math.min(MOST_ROWS, math.floor(rows + 0.5))) or MAX_ROWS
 end
 
 local function SavePosition(f)
@@ -485,11 +621,110 @@ local function ProgressText(step)
 	return table.concat(lines, "\n")
 end
 
+---------------------------------------------------------------------------
+-- NPC models: a step can name the characters and mobs it's about (step.npcs). While the mouse is
+-- over the step, and only then, they're shown beside its tooltip. Nothing is fetched: the game
+-- draws a creature from its ID.
+---------------------------------------------------------------------------
+
+local models = {} -- the boxes, made when first needed and shared by all steps: { Model, Name, npc }
+
+-- A model method the client may not have, or that may fail for a creature it doesn't know.
+local function Call(model, method, ...)
+	if not model[method] then return false end
+	return pcall(model[method], model, ...)
+end
+
+-- Whether the client says the model has nothing to draw. Clients that can't say: not empty.
+local function Empty(model)
+	local ok, file = Call(model, "GetModelFileID")
+	return ok and (file == nil or file == 0)
+end
+
+-- The boxes with something to see side by side, the first beside the tooltip's text. A box that's
+-- waiting for its model is shown too (a hidden model may never load), but can't be seen and takes
+-- no place: it waits after the others (a frame that's nowhere may not load its model either).
+local function PlaceModels()
+	local shown = 0
+	local function place(box)
+		box:ClearAllPoints()
+		box:SetPoint("TOPLEFT", GameTooltip, "TOPRIGHT", MODEL_GAP + shown * (MODEL_WIDTH + MODEL_GAP), 0)
+	end
+	for _, box in ipairs(models) do
+		if box:IsShown() and box:GetAlpha() > 0 then
+			place(box)
+			shown = shown + 1
+		end
+	end
+	for _, box in ipairs(models) do
+		if box:IsShown() and box:GetAlpha() == 0 then place(box) end
+	end
+end
+
+local function CreateModel()
+	local box = CreateFrame("Frame", nil, UIParent)
+	box:SetSize(MODEL_WIDTH, MODEL_HEIGHT + MODEL_NAME)
+	box:SetFrameStrata("TOOLTIP")
+	box:SetClampedToScreen(true)
+	box:Hide()
+	box.Back = box:CreateTexture(nil, "BACKGROUND")
+	box.Back:SetAllPoints()
+	box.Back:SetColorTexture(0, 0, 0, 0.8)
+	box.Name = box:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	box.Name:SetPoint("BOTTOM", box, "BOTTOM", 0, 3)
+	box.Name:SetWidth(MODEL_WIDTH - 6)
+	box.Name:SetWordWrap(false)
+	local ok, model = pcall(CreateFrame, "PlayerModel", nil, box)
+	if not ok or not model then return nil end -- a client without model frames: the tooltip names the NPCs
+	box.Model = model
+	model:SetSize(MODEL_WIDTH, MODEL_HEIGHT)
+	model:SetPoint("TOP", box, "TOP", 0, 0)
+	-- A creature the client had to load first is there a moment after it was asked for: its box
+	-- waited, unseen. Not after the mouse left the step.
+	pcall(model.SetScript, model, "OnModelLoaded", function()
+		if not box.npc or box:GetAlpha() > 0 then return end
+		box:SetAlpha(1)
+		PlaceModels()
+	end)
+	return box
+end
+
+-- By its ID; by its display ID if that shows nothing (or this client can't). False if there's
+-- nothing to see (yet), so an NPC the client doesn't know leaves no empty box.
+local function ShowCreature(model, npc)
+	Call(model, "ClearModel")
+	local asked = Call(model, "SetCreature", npc.id)
+	if npc.display and (not asked or Empty(model)) then Call(model, "SetDisplayInfo", npc.display) end
+	return not Empty(model)
+end
+
+local function HideModels()
+	for _, box in ipairs(models) do
+		box.npc = nil
+		box:Hide()
+	end
+end
+
+local function ShowModels(npcs)
+	HideModels()
+	for i = 1, math.min(#npcs, MAX_MODELS) do
+		local box = models[i] or CreateModel()
+		if not box then return end
+		models[i] = box
+		local npc = npcs[i]
+		box.npc = npc
+		box.Name:SetText(npc.name and ns.Escape(npc.name) or "")
+		box:Show() -- first, and it stays shown while the step is hovered: a hidden model may not load
+		box:SetAlpha(ShowCreature(box.Model, npc) and 1 or 0) -- nothing to see: unseen until OnModelLoaded
+	end
+	PlaceModels()
+end
+
 local function RowTooltip(row)
 	row.Hover:Show()
 	hovered = row
 	local step = steps[row.n]
-	if not step then return end
+	if not step then return HideModels() end
 	local done = State().done[step.n]
 	GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
 	GameTooltip:SetText(ns.RenderItems(string.format("%d. %s", step.n, StepText(step.n))), 1, 0.82, 0, 1, true)
@@ -503,12 +738,25 @@ local function RowTooltip(row)
 	for _, c in ipairs(done and {} or step.conditions) do
 		GameTooltip:AddLine(ConditionText(c), c.met and 0.2 or 1, c.met and 1 or 0.8, c.met and 0.2 or 0.4, true)
 	end
+	-- Named here too: a model the client can't draw shouldn't take the name with it.
+	for _, npc in ipairs(step.npcs) do
+		if npc.name then GameTooltip:AddLine("NPC: " .. ns.Escape(npc.name), 0.7, 0.7, 0.7, true) end
+	end
 	if done then
 		GameTooltip:AddLine("Done. Right-click or click the box to mark it not done.", 0.4, 0.8, 1, true)
 	else
 		GameTooltip:AddLine("Click: make this the current step. Right-click or click the box: mark it done.", 0.4, 0.8, 1, true)
 	end
 	GameTooltip:Show()
+	ShowModels(step.npcs) -- after the tooltip, which they sit beside
+end
+
+-- The mouse left the step, or the step went from under it.
+local function RowLeave(row)
+	row.Hover:Hide()
+	if hovered == row then hovered = nil end
+	GameTooltip:Hide()
+	HideModels()
 end
 
 local function CreateRow(f)
@@ -516,7 +764,6 @@ local function CreateRow(f)
 	row:EnableMouse(true)
 	row:EnableMouseWheel(true)
 	row:SetScript("OnMouseWheel", function(_, delta) Plans.Scroll(delta) end)
-	row:SetWidth(WIDTH - 2 * PAD)
 	row.Current = row:CreateTexture(nil, "BACKGROUND")
 	row.Current:SetAllPoints()
 	row.Current:SetColorTexture(1, 0.82, 0, 0.14)
@@ -534,17 +781,14 @@ local function CreateRow(f)
 	row.Check:SetAllPoints()
 	row.Check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
 
-	local width = WIDTH - 2 * PAD - BOX
 	row.Text = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
 	row.Text:SetPoint("TOPLEFT", row, "TOPLEFT", BOX, -1)
 	row.Progress = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
 	row.Progress:SetPoint("TOPLEFT", row.Text, "BOTTOMLEFT", 6, -2)
 	for _, text in ipairs({ row.Text, row.Progress }) do
-		text:SetWidth(width)
 		text:SetJustifyH("LEFT")
 		text:SetWordWrap(true)
 	end
-	row.Progress:SetWidth(width - 6)
 	row.Text:SetMaxLines(3)
 	row.Progress:SetMaxLines(8)
 
@@ -553,11 +797,7 @@ local function CreateRow(f)
 	end)
 	row.Box:SetScript("OnClick", function() Plans.Toggle(row.n) end)
 	row:SetScript("OnEnter", RowTooltip)
-	row:SetScript("OnLeave", function(self)
-		self.Hover:Hide()
-		hovered = nil
-		GameTooltip:Hide()
-	end)
+	row:SetScript("OnLeave", RowLeave)
 	return row
 end
 
@@ -578,11 +818,181 @@ local function HeaderButton(f, size, template, onClick, tooltip)
 	return b
 end
 
+local function CreateTab(f)
+	local tab = CreateFrame("Frame", nil, f)
+	tab:EnableMouse(true)
+	tab:SetHeight(TAB_HEIGHT)
+	tab.Back = tab:CreateTexture(nil, "BACKGROUND")
+	tab.Back:SetAllPoints()
+	tab.Icon = tab:CreateTexture(nil, "ARTWORK")
+	tab.Icon:SetSize(TAB_ICON, TAB_ICON)
+	tab.Icon:SetPoint("LEFT", tab, "LEFT", TAB_PAD, 0)
+	tab.Name = tab:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	tab.Name:SetPoint("LEFT", tab.Icon, "RIGHT", 3, 0)
+	tab.Name:SetJustifyH("LEFT")
+	tab.Name:SetWordWrap(false)
+	tab.Close = CreateFrame("Frame", nil, tab)
+	tab.Close:SetSize(TAB_CLOSE, TAB_CLOSE)
+	tab.Close:SetPoint("RIGHT", tab, "RIGHT", -3, 0)
+	tab.Close:EnableMouse(true)
+	tab.Close.X = tab.Close:CreateTexture(nil, "ARTWORK")
+	tab.Close.X:SetAllPoints()
+	tab.Close.X:SetTexture("Interface\\Buttons\\UI-StopButton")
+	tab.Close:SetScript("OnMouseUp", function() Plans.AskClose(tab.id) end)
+	tab.Close:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText("Close this plan: archive it or remove it", 1, 1, 1)
+		GameTooltip:Show()
+	end)
+	tab.Close:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	tab:SetScript("OnMouseUp", function(self) Plans.Open(nil, self.id) end)
+	tab:SetScript("OnEnter", function(self)
+		local p = self.plan
+		if not p then return end
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(ns.Escape(TabName(p)), 1, 0.82, 0)
+		GameTooltip:AddLine(ns.ItemText(p.title or "Plan"), 1, 1, 1, true)
+		GameTooltip:AddLine(ns.Escape(KindText(p)), 0.7, 0.7, 0.7)
+		if not self.open then GameTooltip:AddLine("Click: show this plan.", 0.4, 0.8, 1, true) end
+		GameTooltip:Show()
+	end)
+	tab:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	return tab
+end
+
+-- The archive button: at the right end of the tabs while there are archived plans. Clicking it
+-- lists them; clicking one brings it back.
+local function CreateShelf(f)
+	local shelf = CreateFrame("Frame", nil, f)
+	shelf:EnableMouse(true)
+	shelf:SetSize(SHELF_WIDTH, TAB_HEIGHT)
+	shelf:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", 0, 1)
+	shelf.Back = shelf:CreateTexture(nil, "BACKGROUND")
+	shelf.Back:SetAllPoints()
+	shelf.Back:SetColorTexture(0, 0, 0, 0.4)
+	shelf.Icon = shelf:CreateTexture(nil, "ARTWORK")
+	shelf.Icon:SetSize(TAB_ICON, TAB_ICON)
+	shelf.Icon:SetPoint("LEFT", shelf, "LEFT", TAB_PAD, 0)
+	shelf.Icon:SetTexture(ICONS .. "INV_Box_02")
+	shelf.Count = shelf:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	shelf.Count:SetPoint("LEFT", shelf.Icon, "RIGHT", 3, 0)
+	shelf:SetScript("OnMouseUp", function() Plans.ToggleArchive() end)
+	shelf:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText("Archived plans", 1, 0.82, 0)
+		GameTooltip:AddLine("Click to list them, then click one to bring it back.", 0.4, 0.8, 1, true)
+		GameTooltip:Show()
+	end)
+	shelf:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	shelf.List = CreateFrame("Frame", nil, f)
+	shelf.List:SetFrameStrata("DIALOG")
+	shelf.List:EnableMouse(true)
+	shelf.List:SetWidth(SHELF_LIST)
+	shelf.List:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
+	shelf.List.Back = shelf.List:CreateTexture(nil, "BACKGROUND")
+	shelf.List.Back:SetAllPoints()
+	shelf.List.Back:SetColorTexture(0, 0, 0, 0.92)
+	shelf.List.Rows = {}
+	shelf.List:Hide()
+	return shelf
+end
+
+local function CreateShelfRow(list)
+	local row = CreateFrame("Frame", nil, list)
+	row:EnableMouse(true)
+	row:SetSize(SHELF_LIST - 2 * TAB_PAD, SHELF_ROW)
+	row.Hover = row:CreateTexture(nil, "BACKGROUND")
+	row.Hover:SetAllPoints()
+	row.Hover:SetColorTexture(1, 1, 1, 0.1)
+	row.Hover:Hide()
+	row.Icon = row:CreateTexture(nil, "ARTWORK")
+	row.Icon:SetSize(TAB_ICON, TAB_ICON)
+	row.Icon:SetPoint("LEFT", row, "LEFT", 0, 0)
+	row.Name = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	row.Name:SetPoint("LEFT", row.Icon, "RIGHT", 4, 0)
+	row.Name:SetWidth(SHELF_LIST - 2 * TAB_PAD - TAB_ICON - 4)
+	row.Name:SetJustifyH("LEFT")
+	row.Name:SetWordWrap(false)
+	row:SetScript("OnMouseUp", function(self, button)
+		if button == "RightButton" then Plans.Remove(self.id) else Plans.Restore(nil, self.id) end
+	end)
+	row:SetScript("OnEnter", function(self)
+		self.Hover:Show()
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText(ns.ItemText(self.plan and self.plan.title or "Plan"), 1, 1, 1, 1, true)
+		GameTooltip:AddLine("Click: bring this plan back. Right-click: remove it for good.", 0.4, 0.8, 1, true)
+		GameTooltip:Show()
+	end)
+	row:SetScript("OnLeave", function(self)
+		self.Hover:Hide()
+		GameTooltip:Hide()
+	end)
+	return row
+end
+
+local function LayoutShelf(f, archived)
+	if #archived == 0 then
+		if f.Shelf then
+			f.Shelf:Hide()
+			f.Shelf.List:Hide()
+		end
+		f.shelfOpen = nil
+		return
+	end
+	f.Shelf = f.Shelf or CreateShelf(f)
+	local shelf = f.Shelf
+	shelf:Show()
+	shelf.Count:SetText(GREY .. #archived .. "|r")
+	shelf.Back:SetColorTexture(0, 0, 0, f.shelfOpen and 0.75 or 0.4)
+	local list = shelf.List
+	for _, row in ipairs(list.Rows) do row:Hide() end
+	list:SetShown(f.shelfOpen and true or false)
+	if not f.shelfOpen then return end
+	for i, p in ipairs(archived) do
+		local row = list.Rows[i] or CreateShelfRow(list)
+		list.Rows[i] = row
+		row.id, row.plan = p.id, p
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", list, "TOPLEFT", TAB_PAD, -TAB_PAD - (i - 1) * SHELF_ROW)
+		row.Icon:SetTexture(TabIcon(p))
+		row.Name:SetText(GOLD .. ns.Escape(TabName(p)) .. "|r  " .. ns.ItemText(p.title or "Plan"))
+		row:Show()
+	end
+	list:SetHeight(#archived * SHELF_ROW + 2 * TAB_PAD)
+end
+
+-- The tabs sit on top of the window, one per plan, sharing its width (less the archive button).
+local function LayoutTabs(f)
+	local tabs, archived = Tabs(), Archived()
+	for _, tab in ipairs(f.Tabs) do tab:Hide() end
+	LayoutShelf(f, archived)
+	if #tabs == 0 then return end
+	local room = Width() - (#archived > 0 and SHELF_WIDTH + TAB_GAP or 0)
+	local width = math.min(TAB_MAX, math.floor((room - (#tabs - 1) * TAB_GAP) / #tabs))
+	for i, p in ipairs(tabs) do
+		local tab = f.Tabs[i] or CreateTab(f)
+		f.Tabs[i] = tab
+		local open = plan ~= nil and p.id == plan.id
+		tab.id, tab.plan, tab.open = p.id, p, open
+		tab:SetWidth(width)
+		tab:ClearAllPoints()
+		tab:SetPoint("BOTTOMLEFT", f, "TOPLEFT", (i - 1) * (width + TAB_GAP), 1)
+		tab.Back:SetColorTexture(0, 0, 0, open and 0.75 or 0.4)
+		tab.Icon:SetTexture(TabIcon(p))
+		tab.Name:SetWidth(math.max(1, width - TAB_ICON - 2 * TAB_PAD - 3 - TAB_CLOSE - 3))
+		tab.Name:SetText((open and GOLD or GREY) .. ns.Escape(TabName(p)) .. "|r")
+		tab:Show()
+	end
+end
+
 local function CreateWindow()
 	local f = CreateFrame("Frame", "WowMCPPlanFrame", UIParent)
-	f:SetSize(WIDTH, 60)
+	f:SetSize(Width(), 60)
 	f:SetFrameStrata("MEDIUM")
 	f:SetClampedToScreen(true)
+	if f.SetClampRectInsets then f:SetClampRectInsets(0, 0, TAB_HEIGHT + 1, 0) end -- the tabs stay on screen too
+	f.Tabs = {}
 	f:SetMovable(true)
 	f:SetDontSavePosition(true) -- we keep the position ourselves, in WowMCPDB
 	f:EnableMouse(true)
@@ -611,7 +1021,7 @@ local function CreateWindow()
 	f.Count:SetPoint("RIGHT", f.Collapse, "LEFT", -5, 0)
 	f.Title = f:CreateFontString(nil, "ARTWORK", "GameFontNormal")
 	f.Title:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -PAD + 2)
-	f.Title:SetWidth(WIDTH - 2 * PAD - 80) -- the rest of the header: count, collapse and close
+	f.Title:SetWidth(Width() - 2 * PAD - 80) -- the rest of the header: count, collapse and close
 	f.Title:SetJustifyH("LEFT")
 	f.Title:SetWordWrap(false)
 	f.Earlier = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
@@ -624,17 +1034,70 @@ local function CreateWindow()
 		SavePosition(self)
 	end)
 	f:SetScript("OnMouseWheel", function(_, delta) Plans.Scroll(delta) end)
+	-- The drag of the corner ends when the button is let go, or the window goes while it's held
+	-- (a hidden frame isn't told the button was let go).
+	local function StopResizing()
+		f.Grip:SetScript("OnUpdate", nil)
+		f.Grip.Corner:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+	end
+	f:SetScript("OnHide", function()
+		HideModels() -- a step that's hidden under the mouse isn't told the mouse left
+		StopResizing()
+	end)
+
+	-- The corner to drag, as on the chat window: sideways for the width, up and down for the steps shown.
+	f.Grip = CreateFrame("Frame", nil, f)
+	f.Grip:SetSize(16, 16)
+	f.Grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+	f.Grip:EnableMouse(true)
+	f.Grip.Corner = f.Grip:CreateTexture(nil, "OVERLAY")
+	f.Grip.Corner:SetAllPoints()
+	f.Grip.Corner:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+	f.Grip:SetScript("OnMouseDown", function(self, button)
+		if button and button ~= "LeftButton" then return end
+		if not (GetCursorPosition and f.GetEffectiveScale) then return end
+		-- Held by its top left corner, so it grows right and down from where it is.
+		local left, top = f:GetLeft(), f:GetTop()
+		if left and top then
+			f:ClearAllPoints()
+			f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+			SavePosition(f)
+		end
+		local scale = f:GetEffectiveScale()
+		local x0, y0 = GetCursorPosition()
+		local width, rows = Width(), MaxRows()
+		self.Corner:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+		self:SetScript("OnUpdate", function()
+			-- Let go where the grip couldn't tell (the window was hidden meanwhile): the drag is over.
+			if IsMouseButtonDown and not IsMouseButtonDown("LeftButton") then return StopResizing() end
+			local x, y = GetCursorPosition()
+			Plans.Resize(width + (x - x0) / scale, rows + (y0 - y) / scale / ROW_DRAG)
+		end)
+	end)
+	f.Grip:SetScript("OnMouseUp", StopResizing)
+	f.Grip:SetScript("OnHide", StopResizing)
+	f.Grip:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Drag to resize", 1, 1, 1)
+		GameTooltip:AddLine("Sideways: wider or narrower. Up and down: fewer or more steps at once.", 0.4, 0.8, 1, true)
+		GameTooltip:Show()
+	end)
+	f.Grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	return f
 end
 
 -- The mouse wheel over the window (or a step) scrolls through the steps.
 function Plans.Scroll(delta)
 	if not (window and window.from) or WindowSaved().collapsed then return end
-	first = math.max(1, math.min(window.from - delta, #steps - math.min(MAX_ROWS, #steps) + 1))
+	first = math.max(1, math.min(window.from - delta, #steps - math.min(MaxRows(), #steps) + 1))
 	Layout()
 end
 
 local function FillRow(row, step, current, done)
+	local width = Width() - 2 * PAD
+	row:SetWidth(width)
+	row.Text:SetWidth(width - BOX)
+	row.Progress:SetWidth(width - BOX - 6)
 	row.n = step.n
 	row.Check:SetShown(done)
 	row.Current:SetShown(current)
@@ -653,12 +1116,36 @@ end
 function Layout()
 	local state = State()
 	if not (Active() and not state.hidden) then
-		if window then window:Hide() end
+		-- No plan open, but some archived: the window stays, small, so the archive button is there.
+		HideModels() -- no steps on show to hover
+		if Active() or #Archived() == 0 or WindowSaved().shelfHidden then
+			if window then window:Hide() end
+			return
+		end
+		window = window or CreateWindow()
+		local f = window
+		f:Show()
+		f:SetWidth(Width())
+		f.Title:SetWidth(Width() - 2 * PAD - 80)
+		LayoutTabs(f)
+		f.from = nil
+		f.Title:SetText(GREY .. "No plan open|r")
+		f.Count:SetText("")
+		for _, row in ipairs(f.Rows) do row:Hide() end
+		f.Earlier:Hide()
+		f.Later:SetText("Your archived plans are behind the box above.")
+		f.Later:ClearAllPoints()
+		f.Later:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -(PAD + HEADER))
+		f.Later:Show()
+		f:SetHeight(PAD + HEADER + 12 + PAD)
 		return
 	end
 	window = window or CreateWindow()
 	local f = window
 	f:Show()
+	f:SetWidth(Width())
+	f.Title:SetWidth(Width() - 2 * PAD - 80)
+	LayoutTabs(f)
 	local collapsed = WindowSaved().collapsed
 	f.Title:SetText(ns.ItemText(plan.title or "Plan"))
 	f.Count:SetText(state.current and string.format("%d/%d", state.current, #steps) or GREEN .. "Done|r")
@@ -668,7 +1155,7 @@ function Layout()
 	if collapsed then
 		from, to = state.current, state.current
 	else
-		local count = math.min(MAX_ROWS, #steps)
+		local count = math.min(MaxRows(), #steps)
 		from = math.max(1, math.min(first or (state.current or #steps) - 2, #steps - count + 1))
 		to = from + count - 1
 	end
@@ -700,6 +1187,7 @@ function Layout()
 		or string.format("%d more step%s below", below, below > 1 and "s" or ""))
 	Note(f.Later, (below > 0 and not collapsed) or (collapsed and not state.current))
 	f:SetHeight(y + PAD - GAP)
+	if hovered and not hovered:IsShown() then HideModels() end -- its step went from under the mouse
 end
 
 ---------------------------------------------------------------------------
@@ -795,6 +1283,11 @@ function Plans.List()
 end
 
 function Plans.Show()
+	if not Active() and #Archived() > 0 then -- just the archive button
+		WindowSaved().shelfHidden = nil
+		Layout()
+		return
+	end
 	if NoPlan() then return end
 	State().hidden = nil
 	first = nil
@@ -803,11 +1296,34 @@ function Plans.Show()
 end
 
 function Plans.Hide()
+	if not Active() and #Archived() > 0 then
+		WindowSaved().shelfHidden = true
+		Layout()
+		ns.Print("Hidden. /mcp plan show brings the archive button back; /mcp plan archived lists your archived plans.")
+		return
+	end
 	if NoPlan() then return end
 	State().hidden = true
 	Guide()
 	Layout()
 	ns.Print("Plan hidden; it keeps track of your progress. /mcp plan show brings it back.")
+end
+
+-- The window's size: its width, and how many steps it shows at once (nil leaves one as it is,
+-- "reset" goes back to the usual size).
+function Plans.Resize(width, rows)
+	local saved = WindowSaved()
+	if width == "reset" then
+		saved.width, saved.rows = nil, nil
+	else
+		local wide, many = Width(), MaxRows()
+		if tonumber(width) then saved.width = tonumber(width) end
+		if tonumber(rows) then saved.rows = tonumber(rows) end
+		saved.width, saved.rows = Width(), MaxRows() -- within what's allowed
+		if saved.width == wide and saved.rows == many then return end
+	end
+	first = nil
+	Layout()
 end
 
 function Plans.Collapse()
@@ -827,23 +1343,222 @@ function Plans.Reset()
 	Guide(true)
 end
 
+local function Find(id)
+	for _, p in ipairs(plans) do
+		if p.id == id then return p end
+	end
+end
+
+-- Closes a plan: archived (it can be brought back, with its progress) or removed. If it was the
+-- open one, another plan's tab opens, if there is one.
+local function Close(p, archive)
+	local state = StateOf(p)
+	local name = TabName(p)
+	local wasArchived = state.archived
+	if archive then
+		state.archived = true
+	else
+		state.cleared, state.archived = true, nil
+	end
+	WindowSaved().shelfHidden = nil
+	local wasOpen = plan ~= nil and p.id == plan.id
+	local other = wasOpen and Tabs()[1]
+	if archive then
+		ns.Print(string.format("Plan archived: |cffffffff%s|r. The box at the end of the tabs, or /mcp plan restore, brings it back.",
+			ns.Escape(name)))
+	elseif other or not wasOpen or wasArchived then
+		ns.Print(string.format("Plan removed: |cffffffff%s|r.", ns.Escape(name)))
+	else
+		ns.Print("Plan removed. Ask your AI for a new one!")
+	end
+	if other then
+		Plans.Open(nil, other.id)
+		return
+	end
+	if wasOpen then Guide() end
+	Layout()
+end
+
+-- Removes the open plan and its tab.
 function Plans.Clear()
 	if NoPlan() then return end
-	State().cleared = true
-	Guide()
+	Close(plan, false)
+end
+
+-- A plan asked for by an id that's no longer there (the AI replaced or removed it while the
+-- player was being asked): nothing is done, least of all to another plan.
+local function Gone()
+	ns.Print("That plan is gone: your AI replaced or removed it.")
+end
+
+-- Removes a plan by id (the open one without): from the x on its tab, or from the archive.
+function Plans.Remove(id)
+	if id == nil then return Plans.Clear() end
+	local p = Find(id)
+	if not p then return Gone() end
+	Close(p, false)
+end
+
+-- Archives a plan by id (the open one without): its tab goes, its progress is kept.
+function Plans.Archive(id)
+	local p
+	if id == nil then
+		if NoPlan() then return end
+		p = plan
+	else
+		p = Find(id)
+		if not p then return Gone() end
+	end
+	if StateOf(p).archived then return end
+	Close(p, true)
+end
+
+local asking -- the id of the plan the popup last asked about
+
+-- The x on a tab: asks whether to archive the plan or remove it.
+function Plans.AskClose(id)
+	local p = Find(id)
+	if not p then return end
+	if not (StaticPopupDialogs and StaticPopup_Show) then return Plans.Archive(id) end
+	StaticPopupDialogs.WOWMCP_CLOSE_PLAN = StaticPopupDialogs.WOWMCP_CLOSE_PLAN or {
+		text = "Close the plan \"%s\"?\n\nAn archived plan keeps its progress; the box at the end of the tabs brings it back.",
+		button1 = "Archive", button2 = CANCEL or "Cancel", button3 = "Remove",
+		OnAccept = function(_, data) Plans.Archive(data) end,
+		OnAlt = function(_, data) Plans.Remove(data) end,
+		timeout = 0, whileDead = true, hideOnEscape = true,
+	}
+	asking = id
+	StaticPopup_Show("WOWMCP_CLOSE_PLAN", TabName(p), nil, id)
+end
+
+-- The archive button: shows or hides the list of archived plans.
+function Plans.ToggleArchive()
+	if not window then return end
+	window.shelfOpen = not window.shelfOpen or nil
 	Layout()
-	ns.Print("Plan removed. Ask your AI for a new one!")
+end
+
+function Plans.ListArchived()
+	local archived = Archived()
+	if #archived == 0 then
+		ns.Print("No archived plans. The x on a plan's tab, or /mcp plan archive, archives one.")
+		return
+	end
+	WindowSaved().shelfHidden = nil
+	Layout()
+	for i, p in ipairs(archived) do
+		ns.Print(string.format("%d. |cffffffff%s|r (%s): %s", i, ns.Escape(TabName(p)), ns.Escape(KindText(p)),
+			ns.Escape(p.title or "Plan")))
+	end
+	ns.Print("/mcp plan restore <number or name> brings one back.")
+end
+
+-- Brings an archived plan back (by its number in the archive, its name, or its id) and opens it.
+function Plans.Restore(which, id)
+	local found
+	for i, p in ipairs(Archived()) do
+		local match
+		if id then
+			match = p.id == id
+		else
+			match = i == tonumber(which) or (type(which) == "string" and Same(TabName(p), which))
+		end
+		if match then
+			found = p
+			break
+		end
+	end
+	if not found then
+		ns.Print("No such archived plan. /mcp plan archived lists them.")
+		return
+	end
+	StateOf(found).archived = nil
+	WindowSaved().shelfHidden = nil
+	if window then window.shelfOpen = nil end
+	Plans.Open(nil, found.id, true)
+end
+
+-- Tabs: open another plan (by its tab's number or name), list them, name the open one.
+local Open
+
+function Plans.Open(which, id, again)
+	local found
+	for i, p in ipairs(Tabs()) do
+		local match
+		if id then
+			match = p.id == id
+		else
+			match = i == tonumber(which) or (type(which) == "string" and Same(TabName(p), which))
+		end
+		if match then
+			found = p
+			break
+		end
+	end
+	if not found then
+		ns.Print("No such plan. /mcp plan tabs lists them.")
+		return
+	end
+	local state = StateOf(found)
+	if plan and found.id == plan.id and not state.hidden and not again then return end
+	Open(found)
+	state.hidden = nil
+	first = nil
+	local ok, err = pcall(Evaluate, true) -- what got done while another tab was open ticks off quietly
+	if not ok then Report(err) end
+	Guide(true)
+	Layout()
+	ns.Print(string.format("Plan: |cffffffff%s|r (%s).", ns.Escape(TabName(found)),
+		state.current and string.format("step %d/%d", state.current, #steps) or "complete"))
+end
+
+function Plans.ListTabs()
+	local tabs = Tabs()
+	if #tabs == 0 then
+		ns.Print("No plan. Ask your AI for one!")
+		return
+	end
+	for i, p in ipairs(tabs) do
+		local open = plan ~= nil and p.id == plan.id
+		ns.Print(string.format("%s%d. |cffffffff%s|r (%s): %s", open and "|cff33ff33>|r " or "", i, ns.Escape(TabName(p)),
+			ns.Escape(KindText(p)), ns.Escape(p.title or "Plan")))
+	end
+	ns.Print("/mcp plan tab <number or name> shows another; /mcp plan name <text> names the one showing.")
+end
+
+function Plans.Rename(name)
+	if NoPlan() then return end
+	name = strtrim(tostring(name or "")):sub(1, TAB_NAME)
+	State().name = name ~= "" and name or nil
+	Layout()
+	ns.Print(string.format("This plan's tab is now called |cffffffff%s|r.", ns.Escape(TabName(plan))))
 end
 
 ---------------------------------------------------------------------------
 -- Payload
 ---------------------------------------------------------------------------
 
+-- The NPCs a step names: { { id, name, display } }, without what isn't one.
+local function ParseNpcs(raw)
+	local list = {}
+	for _, r in ipairs(type(raw) == "table" and raw or {}) do
+		local id = type(r) == "table" and tonumber(r.id)
+		if id and id > 0 then
+			list[#list + 1] = {
+				id = math.floor(id), display = tonumber(r.display),
+				name = type(r.name) == "string" and r.name ~= "" and r.name or nil,
+			}
+		end
+	end
+	return list
+end
+
 local function ParseStep(raw, n, missing)
 	local step = {
 		n = n, text = tostring(raw.text or ("Step " .. n)), loop = raw.loop == true, conditions = {},
 		places = type(raw.places) == "table" and raw.places or {},
 		areas = type(raw.areas) == "table" and raw.areas or {},
+		npcs = ParseNpcs(raw.npcs),
 	}
 	for _, list in ipairs({ step.places, step.areas }) do
 		for _, r in ipairs(list) do
@@ -858,27 +1573,75 @@ local function ParseStep(raw, n, missing)
 	return step
 end
 
--- A plan we've already announced (e.g. restored by a /reload, or sent again with another
--- feature's update) is picked up where it was, quietly.
-function Plans.Receive(payload)
-	local state = WowMCPDB.plan
-	local isNew = not state or state.id ~= payload.id
-	if isNew then
-		state = { id = payload.id }
-		WowMCPDB.plan = state
-	end
-	state.done, state.undone = state.done or {}, state.undone or {}
-	plan = payload
+-- Makes a plan the open one: the plan the checks, the window and the navigator work with.
+-- Returns the zones of its places that the map doesn't know.
+function Open(p)
+	WowMCPDB.plan = StateOf(p)
+	plan = p
 	wipe(steps)
 	wipe(wanted)
 	local missing = {}
-	for _, raw in ipairs(type(payload.steps) == "table" and payload.steps or {}) do
+	for _, raw in ipairs(type(p.steps) == "table" and p.steps or {}) do
 		if type(raw) == "table" then table.insert(steps, ParseStep(raw, #steps + 1, missing)) end
 	end
+	return missing
+end
+
+-- The payload has every plan: { id, list = { plan, ... } }; before there were tabs it was one
+-- plan, { id, title, steps }. A plan that wasn't there before is announced and opened. The ones
+-- we've already announced (e.g. restored by a /reload, or sent again with another feature's
+-- update) are picked up where they were, quietly, with the same one open.
+function Plans.Receive(payload)
+	local states = States()
+	local was = WowMCPDB.plan -- the open plan's progress, as saved
+	if type(was) == "table" and was.id then states[was.id] = was end
+	local seen = WowMCPDB.planSeen or (type(was) == "table" and was.id)
+	WowMCPDB.planSeen = payload.id
+
+	local list = {}
+	for _, p in ipairs(type(payload.list) == "table" and payload.list or { payload }) do
+		if type(p) == "table" and p.id and type(p.steps) == "table" and #p.steps > 0 then list[#list + 1] = p end
+	end
+	local newest, listed = nil, {}
+	for _, p in ipairs(list) do
+		listed[p.id] = true
+		if not states[p.id] and (not newest or p.id > newest.id) then newest = p end
+	end
+	for id in pairs(states) do
+		if not listed[id] then states[id] = nil end -- plans the AI replaced or removed
+	end
+	plans = list
+	for _, p in ipairs(list) do StateOf(p) end
+	-- The plan the player is being asked about is gone: so is the question.
+	if asking and not listed[asking] then
+		if StaticPopup_Hide then pcall(StaticPopup_Hide, "WOWMCP_CLOSE_PLAN") end
+		asking = nil
+	end
+
+	-- A new plan opens; else the one that was open stays, or the first that has a tab.
+	local open = newest
+	local wasOpen = plan and plan.id or (type(was) == "table" and was.id)
+	for _, p in ipairs(not open and list or {}) do
+		if p.id == wasOpen then open = p end
+	end
+	if not open or (not newest and (states[open.id].cleared or states[open.id].archived)) then open = Tabs()[1] or open end
+	if not open then
+		plan = nil
+		wipe(steps)
+		wipe(wanted)
+		WowMCPDB.plan = { id = payload.id, done = {}, undone = {} }
+		Guide()
+		Layout()
+		if seen ~= payload.id then ns.Print("Plan cleared.") end
+		return
+	end
+
+	local isNew = open == newest
+	local missing = Open(open)
+	local state = State()
 	if not Active() then
 		Guide()
 		Layout()
-		if isNew and #steps == 0 then ns.Print("Plan cleared.") end
 		return
 	end
 	if isNew then
@@ -903,9 +1666,47 @@ function Plans.Receive(payload)
 	Layout()
 end
 
--- For get_plan_progress: each step's state and the live progress of the ones not done.
+-- For get_plan_progress: every plan's tab, with its progress as of when it was last open. `tab` is
+-- the tab's name as the AI sent it (what its tools know the plan by), `name` the player's own for it.
+local function TabList()
+	local list = {}
+	for _, p in ipairs(plans) do
+		local state = StateOf(p)
+		local done = 0
+		for _ in pairs(state.done) do done = done + 1 end
+		if not state.cleared then
+			list[#list + 1] = {
+				id = p.id, tab = SentTab(p), name = state.name, kind = (KindOf(p)), title = p.title,
+				steps = #p.steps, done = done,
+				complete = state.complete or false, archived = state.archived or nil,
+				shown = plan ~= nil and p.id == plan.id and not state.hidden and not state.archived,
+			}
+		end
+	end
+	return list
+end
+
+-- For get_plan_progress: the ids of the plans the player removed, so the server stops counting
+-- and sending them.
+local function Removed()
+	local list = {}
+	for _, p in ipairs(plans) do
+		if StateOf(p).cleared then list[#list + 1] = p.id end
+	end
+	return #list > 0 and list or nil
+end
+
+-- For get_plan_progress: each step's state and the live progress of the ones not done. `seen` is
+-- the id of the last payload received, so the server can tell when its newest hasn't arrived.
 local function Progress()
-	if not Active() then return { none = true, cleared = plan ~= nil and #steps > 0 or nil } end
+	if not Active() then
+		-- No plan open: the player archived what's left, or removed it.
+		local archived = #Archived() > 0 or nil
+		return {
+			none = true, cleared = not archived and plan ~= nil and #steps > 0 or nil, archived = archived,
+			tabs = TabList(), removed = Removed(), seen = WowMCPDB.planSeen,
+		}
+	end
 	Plans.Check()
 	local state = State()
 	local list = {}
@@ -923,6 +1724,8 @@ local function Progress()
 	return {
 		id = plan.id, title = plan.title, current = state.current, complete = state.complete or false,
 		hidden = state.hidden or false, steps = list, problem = problem,
+		tab = SentTab(plan), name = state.name, kind = (KindOf(plan)), tabs = TabList(),
+		removed = Removed(), seen = WowMCPDB.planSeen,
 	}
 end
 
@@ -930,16 +1733,40 @@ end
 
 local SUBCOMMANDS = {
 	[""] = Plans.List, list = Plans.List, show = Plans.Show, hide = Plans.Hide, next = Plans.Next, prev = Plans.Prev,
-	reset = Plans.Reset, clear = Plans.Clear,
+	reset = Plans.Reset, clear = Plans.Clear, tabs = Plans.ListTabs,
+	archive = function() Plans.Archive() end, archived = Plans.ListArchived, restore = Plans.ListArchived,
 }
 
-local USAGE = "/mcp plan [show, hide, next, prev, <n>, reset, clear] - the plan from your AI: list its steps, "
-	.. "show or hide its checklist, tick off the current step, go back, go to step n, start over, remove it"
+local USAGE = "/mcp plan [show, hide, next, prev, <n>, reset, clear, tabs, tab <n or name>, name <text>, archive, "
+	.. "archived, restore <n or name>, size <width> [steps]] - the plan from your AI: list its steps, show or hide "
+	.. "its checklist, tick off the current step, go back, go to step n, start over, remove it; with several plans: "
+	.. "list their tabs, show another, name the tab of the one showing; archive the one showing, list the archived "
+	.. "ones, bring one back; the window's size (or drag its corner)"
 
 function Plans.Command(rest)
-	rest = strtrim(tostring(rest or "")):lower()
+	local typed = strtrim(tostring(rest or ""))
+	rest = typed:lower()
 	local run = SUBCOMMANDS[rest]
-	if run then
+	local word, more = typed:match("^(%a+)%s+(.+)$")
+	word = word and word:lower()
+	if word == "tab" then
+		Plans.Open(tonumber(more) or more)
+	elseif word == "name" then
+		Plans.Rename(more)
+	elseif word == "restore" then
+		Plans.Restore(tonumber(more) or more)
+	elseif word == "size" then
+		local width, rows = more:match("^(%d+)%s*(%d*)$")
+		if more:lower() == "reset" then
+			Plans.Resize("reset")
+		elseif width then
+			Plans.Resize(tonumber(width), tonumber(rows))
+		else
+			ns.Print("/mcp plan size <width> [steps shown], e.g. /mcp plan size 400 12; /mcp plan size reset")
+			return
+		end
+		ns.Print(string.format("The plan window is %d wide and shows up to %d steps.", Width(), MaxRows()))
+	elseif run then
 		run()
 	elseif tonumber(rest) then
 		Plans.GoTo(math.floor(tonumber(rest)))
@@ -1002,6 +1829,7 @@ function CHECKS.goal(c)
 end
 
 Plans.ParseCondition = ParseCondition -- raw condition -> parsed, for CheckCondition
+Plans.Progress = Progress -- what get_plan_progress is told
 
 -- Whether a parsed condition holds, and its progress line (position conditions count as current).
 function Plans.CheckCondition(c)

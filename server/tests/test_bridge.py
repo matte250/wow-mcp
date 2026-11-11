@@ -139,7 +139,7 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
         busy.remove(prompt)
         return answer
 
-    with live_game(GAME.replace("LOG", str(log)).replace("TYPED", str(typed)), seconds=25):
+    with live_game(GAME.replace("LOG", log.as_posix()).replace("TYPED", typed.as_posix()), seconds=25):
         running(Bridge(addons, agent))
         type_in(typed, "/ai where am I?", "/ask what now?")
         wait_for(lambda: log.exists() and "Then come back." in log.read_text(), seconds=15)
@@ -149,7 +149,7 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
         "Thorgrim asks, in game: where am I?",
         earlier(("where am I?", 0, "**You're in Durotar**, at 50, 50.")) + "Thorgrim asks, in game: what now?",
     ]
-    lines = log.read_text().splitlines()
+    lines = log.read_text(encoding="utf-8").splitlines()  # the game writes UTF-8 (the "…"), whatever the locale
     assert "chat: |cff33ff99WowMCP|r Asking… where am I?" in lines
     assert "chat: |cff33ff99WowMCP|r Asking… what now?" in lines
     received = [line.split(" ", 2)[2] for line in dict.fromkeys(lines) if line.startswith("message ")]
@@ -175,7 +175,7 @@ def test_new_conversation_in_game_end_to_end(live_game, addons, tmp_path, monkey
     def answered(n):
         return lambda: log.exists() and f"Claude: Answer {n}." in log.read_text()
 
-    with live_game(GAME.replace("LOG", str(log)).replace("TYPED", str(typed)), seconds=30):
+    with live_game(GAME.replace("LOG", log.as_posix()).replace("TYPED", typed.as_posix()), seconds=30):
         running(Bridge(addons, agent))
         type_in(typed, "/ai where am I?")
         wait_for(answered(1), seconds=15)
@@ -564,3 +564,74 @@ def test_only_one_bridge_per_game(tmp_path):
         bridge.claim(tmp_path)
     first.close()
     bridge.claim(tmp_path).close()  # free again once the first one stops
+
+
+def test_agent_command_line_is_split_the_platforms_way():
+    words = bridge.split_command(r'"C:\Program Files\Agent\agent.exe" --flag "a b" --dir=C:\tmp "{system_prompt}"',
+                                 windows=True)
+    assert words == [r"C:\Program Files\Agent\agent.exe", "--flag", "a b", r"--dir=C:\tmp", "{system_prompt}"]
+    assert bridge.split_command("agent 'one word' ''", windows=True) == ["agent", "one word", ""]
+    # Elsewhere: the shell's rules, as ever.
+    assert bridge.split_command(r'/opt/my\ agent/run --flag "a b" "{system_prompt}"', windows=False) == [
+        "/opt/my agent/run", "--flag", "a b", "{system_prompt}"]
+
+
+def test_agent_runs_as_given_except_on_windows(addons, monkeypatch):
+    """Linux: the command exactly as asked for, and its output read the way the system reads text."""
+    started = []
+
+    def popen(command, **options):
+        started.append((command, options))
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(bridge, "WINDOWS", False)
+    monkeypatch.setattr(bridge.shutil, "which", lambda name: None if name == "missing" else f"/usr/local/bin/{name}")
+    assert bridge.resolve_command(["agent", "--fast"]) == ["agent", "--fast"]
+    assert bridge.resolve_command(["missing"]) is None and bridge.resolve_command([]) is None
+    agent = CommandAgent(["agent", "--fast"], addons)
+    monkeypatch.setattr(bridge.subprocess, "Popen", popen)
+    with pytest.raises(AgentError, match="couldn't start agent"):
+        agent("Where?")
+    command, options = started[0]
+    assert command == ["agent", "--fast"]
+    assert options["text"] is True and options["start_new_session"] is True
+    assert not {"encoding", "errors", "creationflags"} & set(options)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launchers")
+def test_windows_launchers(addons, tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    (tmp_path / "native.cmd").write_text('@ECHO off\n"%dp0%\\node_modules\\x\\bin\\native.exe" %*\n')
+    program = tmp_path / "node_modules" / "x" / "bin" / "native.exe"
+    program.parent.mkdir(parents=True)
+    program.touch()
+    (tmp_path / "script.cmd").write_text('@ECHO off\n"%_prog%" "%dp0%\\node_modules\\x\\cli.js" %*\n')
+
+    # A launcher that only starts a program runs as that program, whatever its arguments.
+    command = bridge.resolve_command(["native", "--append-system-prompt", "{system_prompt}"])
+    assert command == [str(program), "--append-system-prompt", "{system_prompt}"]
+    assert bridge.launcher_problem(CommandAgent(command, addons).command) is None
+
+    # Any other launcher runs through cmd.exe, which the system prompt and the MCP config don't survive.
+    command = bridge.resolve_command(["script", "--append-system-prompt", "{system_prompt}"])
+    assert Path(command[0]).name.lower() == "script.cmd"
+    problem = bridge.launcher_problem(CommandAgent(command, addons).command)
+    assert f"{command[0]} is a batch launcher" in problem
+    assert "WOW_MCP_SYSTEM_PROMPT and WOW_MCP_MCP_CONFIG" in problem and "{system_prompt}" in problem
+    assert bridge.launcher_problem(CommandAgent([command[0], "--mcp-config", "{mcp_config}"], addons).command)
+    # Without them it's fine: the agent finds both in its environment.
+    assert bridge.launcher_problem(CommandAgent([command[0], "--fast", "a b"], addons).command) is None
+    assert bridge.launcher_problem([str(program), "line\nbreak", '"quoted"']) is None, "a program takes anything"
+    assert bridge.launcher_problem([command[0], "line\nbreak"], windows=False) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launchers")
+def test_bridge_refuses_a_launcher_that_would_garble_the_prompt(addons, tmp_path, monkeypatch):
+    (tmp_path / "wrapper.cmd").write_text("@ECHO off\npython %~dp0agent.py %*\n")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["wow-mcp-bridge", "--addons-dir", str(addons),
+                                      "--agent", 'wrapper --system "{system_prompt}"'])
+    with pytest.raises(SystemExit) as stopped:
+        bridge.main()
+    assert "wrapper.cmd is a batch launcher" in str(stopped.value).lower()
+    assert "WOW_MCP_SYSTEM_PROMPT" in str(stopped.value)
