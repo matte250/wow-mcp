@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from wow_mcp import kinds
-from wow_mcp.tools import auction
+from wow_mcp import bridge, kinds, online_auctions, server
+from wow_mcp.tools import auction, items
 from wow_mcp.transport import Transport
 
 PUBLISH_SCRIPT = """
@@ -1047,6 +1047,157 @@ def test_get_auction_prices_asks_for_what_it_needs(addons, monkeypatch):
         run(auction.get_auction_prices())
 
 
+def test_the_game_says_what_was_never_listed(game):
+    game(r"""
+        -- Two full scans four days apart: Medium Hide was listed at the first, Salt at both, Gray Dye only with bids;
+        -- nothing ever had the pattern.
+        local first = time() - 4 * 86400
+        client.Scanned({ 4232, 4289 }, 45, first)
+        client.Scanned({ 4289 }, 38, time() - 600)
+        realm().scan[4340] = ",3,1,2"
+        local ns = client.LoadAddon()
+        client.Wait()
+        WowMCP_Receive({ seq = 1, auctionWatch = { items = {}, lookup = { id = 1, at = time(), items = { 4232, 4289,
+            4340, 7613 } } } })
+        local reply
+        ns.Stream.Send = function(_, value) reply = value end
+        ns.Answer(5, ns.Kinds.KNOWLEDGE)
+        local scan = reply.auction.scan
+        assert(scan.first == first and scan.scans == 2 and scan.at > first)
+        local hides, salt, dye, pattern = table.unpack(reply.auction.prices)
+        assert(hides.listed == 0 and hides.last.price == 45 and hides.scanned)
+        assert(salt.listed == 1 and salt.scanned)
+        assert(dye.listed == 3 and dye.price == nil and dye.scanned)
+        assert(pattern.listed == 0 and pattern.last == nil and pattern.scanned == nil and pattern.src == "scan")
+    """)
+
+
+def test_items_never_listed(addons, monkeypatch):
+    """Items no full scan or search ever saw listed are flagged, with how much history that is, and the game is asked
+    what the ones asked about bind to, as get_item_details does: one lookup for at most 20, none if there are none."""
+    now = int(time.time())
+    scan = {"at": now - 600, "items": 4812, "listings": 19022, "place": 1, "first": now - 4 * 86400 - 900, "scans": 12}
+    seen = {
+        4232: {"price": 45, "listed": 80, "n": 3, "scanned": True},
+        2321: {"last": {"price": 450, "listed": 3, "at": now - 3 * 86400}, "scanned": True},
+        4340: {"scanned": True},  # only ever listed with bids, which last leaves out
+    }
+
+    async def prices(kind):
+        assert kind == kinds.KNOWLEDGE
+        lookup = (Transport(addons).load_state().get("auctionWatch") or {}).get("lookup")
+        asked = lookup["items"] if lookup and lookup["items"] else [7613]
+        return {"auction": {
+            "realm": "Firemaw", "places": [{"zone": "Ironforge", "faction": "Alliance"}], "nextScan": now + 300,
+            "priority": 12, "tracked": 5, "scan": scan, "open": False, "lookup": lookup and lookup["id"],
+            "prices": [{"item": i, "listed": 0, "at": now - 600, "src": "scan", "place": 1, **seen.get(i, {})}
+                       for i in asked],
+        }}, "World of Warcraft: Forever 1.60.1"
+
+    looked_up = []
+    bind_types = {7613: 1, 7114: 1, 7560: 1, 4340: 0}
+
+    async def details(kind):
+        assert kind == kinds.ITEM_DETAILS
+        lookup = Transport(addons).load_state()["itemLookup"]
+        looked_up.append(lookup["items"])
+        return {"itemDetails": {"lookup": lookup["id"], "items": [
+            {"id": i, "name": f"Item {i}", "bind": bind_types.get(i, 0),
+             "lines": [{"left": f"Item {i}"}, *([{"left": "Conjured Item"}] if i == 5350 else [])]}
+            for i in lookup["items"]]}}, "World of Warcraft: Forever 1.60.1"
+
+    monkeypatch.setattr(auction, "request", prices)
+    monkeypatch.setattr(items, "request", details)
+    monkeypatch.setattr(auction, "LIST_WAIT", 0)
+
+    def seq():
+        return Transport(addons).load_state()["seq"]
+
+    result = run(auction.get_auction_prices([4232, 2321, 4340, 7613, 7114, 7560, 5350]))
+    by_id = {p.item_id: p for p in result.prices}
+    assert [i for i, p in by_id.items() if p.never_listed] == [7613, 7114, 7560, 5350]
+    assert all(by_id[i].history_covers is None and by_id[i].binds is None for i in (4232, 2321, 4340))
+    pattern = by_id[7613]
+    assert (pattern.history_covers, pattern.binds, pattern.can_be_auctioned, pattern.name) == (
+        "12 full scans in game over 4 days", "on pickup", False, "Item 7613")
+    assert (by_id[5350].binds, by_id[5350].can_be_auctioned) == ("no", False)
+    assert looked_up == [[7613, 7114, 7560, 5350]] and seq() == 2, "the prices' list, then the items' lookup"
+    assert ("Never listed at any point in the price history (12 full scans in game over 4 days): item(s) 7613, 7114, "
+            "7560, 5350. That usually means it can't be traded (e.g. it binds when picked up) or nobody sells it; it's "
+            "not an empty market to exploit. The game says these can't be auctioned at all: 7613, 7114, 7560, 5350."
+            ) in result.note
+    assert "Check binds" not in result.note
+
+    # The same again: both lists are in the game already, so no live-update slot.
+    run(auction.get_auction_prices([4232, 2321, 4340, 7613, 7114, 7560, 5350]))
+    assert seq() == 2 and len(looked_up) == 2
+
+    # Nothing never listed: no lookup.
+    result = run(auction.get_auction_prices([4232, 2321, 4340]))
+    assert len(looked_up) == 2 and "Never listed" not in (result.note or "")
+
+    # The priority list is flagged too, but not looked up.
+    result = run(auction.get_auction_prices())
+    assert [(p.item_id, p.never_listed, p.binds) for p in result.prices] == [(7613, True, None)]
+    assert len(looked_up) == 2 and "Check binds and can_be_auctioned (get_item_details)" in result.note
+
+    # At most 20 are looked up; the rest say to check.
+    many = list(range(80001, 80026))
+    result = run(auction.get_auction_prices(many))
+    assert looked_up[-1] == many[:20] and [p.binds for p in result.prices] == ["no"] * 20 + [None] * 5
+    assert "Check binds" in result.note
+
+    # The game can't say: the prices still come, with why.
+    async def no_list(kind):
+        return {"itemDetails": {"lookup": None, "items": []}}, "World of Warcraft: Forever 1.60.1"
+
+    monkeypatch.setattr(items, "request", no_list)
+    monkeypatch.setattr(items, "LIST_WAIT", 0)
+    result = run(auction.get_auction_prices([7114, 4232]))
+    assert result.prices[0].never_listed and result.prices[0].binds is None
+    assert "Couldn't look up whether they can be auctioned: The game hasn't received the list of items yet." in (
+        result.note)
+
+
+def test_how_much_history(monkeypatch):
+    now = 1_800_000_000
+    monkeypatch.setattr(time, "time", lambda: now)
+    scan = {"at": now - 600, "first": now - 3 * 3600, "scans": 9}
+    assert auction._game_history(scan) == "9 full scans in game over 2 hours"
+    assert auction._game_history({"at": now - 600, "first": now - 600, "scans": 1}) == "one full scan in game"
+    assert auction._game_history({"at": now - 600}) == "full scans in game", "an addon from before it said"
+    assert auction._game_history(None) == "one search in game"
+    assert auction._online_history(online_auctions.Prices(since=now - 6 * 86400, at=now)) == \
+        "online snapshots over 6 days"
+    assert auction._online_history(online_auctions.Prices(since=now, at=now)) == "one online snapshot"
+    assert [auction._duration(s) for s in (59, 60, 7199, 7200, 48 * 3600)] == [
+        "0 minutes", "1 minute", "119 minutes", "2 hours", "2 days"]
+
+    # Online and in game, both never: the history is both; the game saw one: not never listed.
+    house = online_auctions.House(110, "Alliance Auction House")
+    nothing = online_auctions.ItemPrice(7613, now - 600, None)
+    never = auction._price({"item": 7613, "listed": 0, "at": now - 60, "src": "search"}, [], scan)
+    online = auction._online_price(7613, nothing, house, never, False, "online snapshots over 6 days")
+    assert online.never_listed and online.history_covers == "online snapshots over 6 days, 9 full scans in game over " \
+        "2 hours"
+    searched = auction._price({"item": 7613, "listed": 1, "price": 900, "at": now - 60, "src": "search"}, [], scan)
+    assert not auction._online_price(7613, nothing, house, searched, False, "one online snapshot").never_listed
+    gone = online_auctions.ItemPrice(7613, now - 600, None, last=(now - 86400, online_auctions.Listing(900, 1, 1)))
+    assert not auction._online_price(7613, gone, house, None, False, "one online snapshot").never_listed
+
+
+def test_agents_are_told_to_check_before_flipping(addons):
+    instructions = server.create_server().instructions
+    assert auction.TRADING_GUIDANCE in instructions
+    for said in ("before you recommend buying anything to resell", "can_be_auctioned from get_item_details",
+                 "get_vendor_items", "Never go by what you remember", "red flag", "untapped demand",
+                 "listings that sell", "Say plainly when the evidence for a flip is thin"):
+        assert said in auction.TRADING_GUIDANCE, said
+    # Right after buying versus farming.
+    assert instructions.index(auction.TRADING_GUIDANCE) > instructions.index("weigh buying them against farming")
+    assert "can_be_auctioned" in bridge.SYSTEM_PROMPT
+
+
 def test_auction_tools_live(live_game, tmp_path):
     visit = tmp_path / "visit"
     setup = f"""
@@ -1070,12 +1221,12 @@ def test_auction_tools_live(live_game, tmp_path):
 
         visit.write_text("")
         for _ in range(30):
-            prices = run(auction.get_auction_prices([4232, 4253, 783, 9999]))
+            prices = run(auction.get_auction_prices([4232, 4253, 783, 9999, 7613]))
             if prices.last_full_scan:
                 break
             time.sleep(0.3)
         by_id = {p.item_id: p for p in prices.prices}
-        hides, gloves, light, nothing = by_id[4232], by_id[4253], by_id[783], by_id[9999]
+        hides, gloves, light, nothing, pattern = by_id[4232], by_id[4253], by_id[783], by_id[9999], by_id[7613]
         assert (hides.name, hides.min_price, hides.listed, hides.source, len(hides.cheapest)) == (
             "Medium Hide", 45, 80, "full scan", 3)
         assert (gloves.min_price, gloves.listed, gloves.bid_only, gloves.tracked) == (9500, 3, 1, "watch")
@@ -1085,9 +1236,14 @@ def test_auction_tools_live(live_game, tmp_path):
         assert abs((datetime.now(timezone.utc) - hides.seen_at).total_seconds()) < 600
         assert prices.not_seen == [] and prices.at_auction_house and prices.realm == "Firemaw"
         assert prices.last_full_scan.items == 6 and prices.next_full_scan.startswith("in ")
+        # Never listed: the pattern binds when picked up, and the game doesn't know item 9999.
+        assert [p.item_id for p in prices.prices if p.never_listed] == [9999, 7613]
+        assert (pattern.history_covers, pattern.binds, pattern.can_be_auctioned) == (
+            "one full scan in game", "on pickup", False)
+        assert (nothing.binds, nothing.can_be_auctioned) == (None, None)
 
         everything = run(auction.get_auction_prices())
         listed = [p.item_id for p in everything.prices]
-        assert listed == [4232, 4253, 783, 9999, 9789, 2589, 4865, 159], listed
-        assert everything.priority_list == 8 and everything.ai_tracked == 4, everything
-        assert [p.tracked for p in everything.prices[:5]] == ["watch", "watch", "asked", "asked", "bags"]
+        assert listed == [4232, 4253, 783, 9999, 7613, 9789, 2589, 4865, 159], listed
+        assert everything.priority_list == 9 and everything.ai_tracked == 5, everything
+        assert [p.tracked for p in everything.prices[:6]] == ["watch", "watch", "asked", "asked", "asked", "bags"]

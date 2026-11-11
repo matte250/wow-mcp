@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from wow_mcp import kinds
 from wow_mcp.app import as_list, guidance, request, section, tool
+from wow_mcp.tools.items import BINDS, Binds, binding
 
 guidance(
     "For crafting questions (what the player can make, what a recipe needs, which recipes still give skill-ups), "
@@ -75,6 +76,14 @@ class VendorItem(BaseModel):
     stock: int | None = Field(description="Limited supply left when seen (0: sold out). Null: unlimited.")
     other_cost: str | None = Field(description="What it costs besides money, e.g. '2 Honor Token'.")
     can_buy: bool = Field(description="False if the vendor wouldn't sell it to the player then (e.g. reputation).")
+    binds: Binds | None = Field(
+        description=BINDS + " Null: not known (seen before bindings were recorded, or the game hadn't loaded the "
+        "item): get_item_details has it."
+    )
+    can_be_auctioned: bool | None = Field(
+        description="Whether a bought one could be resold on the auction house: false if it binds on pickup, is a "
+        "quest item or binds to the account or warband. Null: not known."
+    )
 
 
 class Vendor(BaseModel):
@@ -134,6 +143,13 @@ def _learned(raw: dict) -> LearnedRecipe:
     )
 
 
+def _vendor_item(raw: dict) -> VendorItem:
+    binds, auctionable = binding(raw.get("bind"))
+    return VendorItem(name=raw.get("name"), item_id=raw.get("id"), price=raw.get("price") or 0,
+                      stack=raw.get("stack") or 1, stock=raw.get("stock"), other_cost=raw.get("cost"),
+                      can_buy=not raw.get("locked"), binds=binds, can_be_auctioned=auctionable)
+
+
 def _vendor(raw: dict) -> Vendor:
     return Vendor(
         name=raw.get("name") or "unknown",
@@ -144,11 +160,7 @@ def _vendor(raw: dict) -> Vendor:
         y=raw.get("y"),
         map_id=raw.get("mapID"),
         seen_at=_seen_at(raw),
-        items=[
-            VendorItem(name=i.get("name"), item_id=i.get("id"), price=i.get("price") or 0, stack=i.get("stack") or 1,
-                       stock=i.get("stock"), other_cost=i.get("cost"), can_buy=not i.get("locked"))
-            for i in as_list(raw.get("items"))
-        ],
+        items=[_vendor_item(i) for i in as_list(raw.get("items"))],
     )
 
 
@@ -190,8 +202,9 @@ async def get_vendor_items(
                           "for all of them."),
     ] = None,
 ) -> VendorItems:
-    """Get what the vendors the player has visited sell, with prices and where each vendor stands, as seen
-    when the player last opened their window. Use it to find where to buy something nearby, or what it costs."""
+    """Get what the vendors the player has visited sell, with prices, what each item binds to and whether it could
+    be resold on the auction house, and where each vendor stands, as seen when the player last opened their window.
+    Use it to find where to buy something nearby, or what it costs."""
     reply, version = await request(kinds.KNOWLEDGE)
     data = section(reply, "vendors")
     vendors = [_vendor(v) for v in as_list(data.get("vendors"))]

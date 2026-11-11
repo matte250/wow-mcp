@@ -11,6 +11,9 @@ Replies stream at about 1 KB/s, so the game only sends what's asked for: the ite
 When Blizzard's API is set up (online_auctions.py), each item's price is the online one, a snapshot of the player's
 auction house at most about an hour old, with the game's own alongside when that's newer; the game's prices also
 go to online_auctions as the evidence for which auction house is the player's.
+
+An item no snapshot or scan has ever seen listed is flagged: usually it can't be traded at all. For the ones asked
+about, what they bind to is looked up in the game, the way get_item_details does (tools/items.py).
 """
 
 import asyncio
@@ -25,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from wow_mcp import game, kinds, online_auctions
 from wow_mcp.app import addons_dir, as_list, guidance, request, section, tool, transport
+from wow_mcp.tools import items
 from wow_mcp.tools.messages import delivery_note
 from wow_mcp.tools.stats import format_money
 
@@ -44,6 +48,19 @@ guidance(
     "auction house visit (goal and plan items are on it anyway).",
     order=14,
 )
+
+TRADING_GUIDANCE = (
+    "A hard rule for auction house advice: before you recommend buying anything to resell (flipping), or listing "
+    "anything on the auction house, confirm from the game's own data that it can be auctioned: binds and "
+    "can_be_auctioned from get_item_details, or get_vendor_items for what vendors sell. Never go by what you "
+    "remember of the item from another version of WoW: Forever changed many items, e.g. vendor recipes that bind "
+    "when picked up. An item with no listings in the whole price history (never_listed in get_auction_prices) is a "
+    "red flag: check that it can be traded at all, and never present it as untapped demand or a market without "
+    "competition. Real demand shows as listings that sell (counts dropping between snapshots, items selling out "
+    "and being listed again), not as zero listings. Say plainly when the evidence for a flip is thin: little "
+    "history, few listings, nothing seen selling."
+)
+guidance(TRADING_GUIDANCE, order=14)
 
 MAX_WATCH = 100
 MAX_LOOKUP = 100
@@ -140,6 +157,23 @@ class AuctionPrice(BaseModel):
         default=None, description="history=True: online snapshots of the last 24 hours, then a point per day for "
         "14 days, oldest first."
     )
+    never_listed: bool = Field(
+        default=False, description="No listings at any point in the price history (history_covers says how much "
+        "that is). Usually the item can't be traded (e.g. it binds when picked up), or nobody sells it: never an "
+        "empty market to exploit. Check binds and can_be_auctioned."
+    )
+    history_covers: str | None = Field(
+        default=None, description="With never_listed: the history it's from, e.g. 'online snapshots over 6 days, "
+        "12 full scans in game over 4 days'."
+    )
+    binds: items.Binds | None = Field(
+        default=None, description=items.BINDS + " Looked up in the game for never-listed items asked about; null "
+        "otherwise."
+    )
+    can_be_auctioned: bool | None = Field(
+        default=None, description="Whether the auction house takes it at all, looked up like binds (get_item_details "
+        "has the details). Null: not looked up, or not known."
+    )
 
 
 class FullScan(BaseModel):
@@ -174,15 +208,36 @@ class AuctionPrices(BaseModel):
     note: str | None = None
 
 
-def _ago(at: int) -> str:
-    minutes = max(0, int(time.time() - at)) // 60
-    if minutes < 1:
-        return "just now"
+def _duration(seconds: float) -> str:
+    minutes = max(0, int(seconds)) // 60
     if minutes < 120:
-        return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
     if minutes < 48 * 60:
-        return f"{minutes // 60} hours ago"
-    return f"{minutes // 1440} days ago"
+        return f"{minutes // 60} hours"
+    return f"{minutes // 1440} days"
+
+
+def _ago(at: int) -> str:
+    seconds = time.time() - at
+    return "just now" if seconds < 60 else f"{_duration(seconds)} ago"
+
+
+def _game_history(scan: dict | None) -> str:
+    """How much in-game history an item's price is from: the full scans (they see every item), or a search."""
+    if not scan or not isinstance(scan.get("at"), int):
+        return "one search in game"
+    count, first = scan.get("scans"), scan.get("first")
+    if not (isinstance(count, int) and isinstance(first, int)):
+        return "full scans in game"  # an addon from before it said how many
+    if count < 2:
+        return "one full scan in game"
+    return f"{count} full scans in game over {_duration(scan['at'] - first)}"
+
+
+def _online_history(online: online_auctions.Prices) -> str:
+    if online.since and online.at and online.at > online.since:
+        return f"online snapshots over {_duration(online.at - online.since)}"
+    return "one online snapshot"
 
 
 def _when(at: Any) -> tuple[datetime, str]:
@@ -209,7 +264,8 @@ def _cheapest(tiers: Any) -> list[PricePoint]:
             if isinstance(t, list) and len(t) == 2 and all(isinstance(n, int) for n in t)]
 
 
-def _price(raw: dict, places: list) -> AuctionPrice:
+def _price(raw: dict, places: list, scan: dict | None = None) -> AuctionPrice:
+    """The game's price; scan is its last full scan, with how far back they go."""
     seen_at, seen_ago = _when(raw.get("at"))
     last = raw.get("last") if isinstance(raw.get("last"), dict) else None
     last_listed = None
@@ -217,6 +273,8 @@ def _price(raw: dict, places: list) -> AuctionPrice:
         last_at, last_ago = _when(last.get("at"))
         last_listed = LastListed(min_price=last.get("price"), min_price_text=_money(last.get("price")),
                                  listed=int(last.get("listed") or 0), seen_at=last_at, seen_ago=last_ago)
+    # scanned: a full scan saw some, maybe with only bids (last needs a buyout).
+    never = not raw.get("listed") and not last and not raw.get("scanned")
     why = raw.get("why")
     return AuctionPrice(
         item_id=raw["item"],
@@ -234,6 +292,8 @@ def _price(raw: dict, places: list) -> AuctionPrice:
         where=_where(places, raw.get("place")),
         last_listed=last_listed,
         tracked=why if why in ("goal", "plan", "watch", "asked", "bags", "bank") else None,
+        never_listed=never,
+        history_covers=_game_history(scan) if never else None,
     )
 
 
@@ -323,9 +383,11 @@ def _usual(usual: online_auctions.Usual | None, now: int | None) -> UsualPrice |
 
 
 def _online_price(item: int, online: online_auctions.ItemPrice, house: online_auctions.House,
-                  in_game: AuctionPrice | None, with_history: bool) -> AuctionPrice:
-    """An item's online price, with the game's alongside when that's newer."""
+                  in_game: AuctionPrice | None, with_history: bool, covers: str) -> AuctionPrice:
+    """An item's online price, with the game's alongside when that's newer. covers: how much online history
+    there is."""
     listing = online.listing
+    never = listing is None and online.last is None and (in_game is None or in_game.never_listed)
     seen_at, seen_ago = _when(online.at)
     last_listed = None
     if listing is None and online.last:
@@ -348,6 +410,8 @@ def _online_price(item: int, online: online_auctions.ItemPrice, house: online_au
         random_suffixes=(listing.suffixes or None) if listing else None,
         in_game=_in_game(in_game) if in_game and in_game.seen_at > seen_at else None,
         usual=_usual(online.usual, listing.price if listing else None) if with_history else None, history=history,
+        never_listed=never,
+        history_covers=", ".join(c for c in (covers, in_game and in_game.history_covers) if c) if never else None,
     )
 
 
@@ -370,6 +434,34 @@ async def _online(items: list[int], realm: Any, raw: list[dict], places: list,
         return online_auctions.Prices(notes=[f"Online prices failed ({type(e).__name__})."])
 
 
+async def _bindings(prices: list[AuctionPrice]) -> str | None:
+    """Fills in what these items bind to with get_item_details' lookup (one live-update slot, none if the game has
+    these items already); a note if the game couldn't say."""
+    try:
+        found = {d.item_id: d for d in (await items.look_up([p.item_id for p in prices])).items}
+    except ToolError as e:
+        return f"Couldn't look up whether they can be auctioned: {e}"
+    for price in prices:
+        if (details := found.get(price.item_id)) and details.status == "ok":
+            price.binds, price.can_be_auctioned = details.binds, details.can_be_auctioned
+            price.name = price.name or details.name
+    return None
+
+
+def _never_listed_note(never: list[AuctionPrice]) -> str:
+    covers = "; ".join(dict.fromkeys(p.history_covers for p in never if p.history_covers))
+    note = (
+        f"Never listed at any point in the price history ({covers}): item(s) "
+        + ", ".join(str(p.item_id) for p in never) + ". That usually means it can't be traded (e.g. it binds when "
+        "picked up) or nobody sells it; it's not an empty market to exploit."
+    )
+    if unsellable := [str(p.item_id) for p in never if p.can_be_auctioned is False]:
+        note += " The game says these can't be auctioned at all: " + ", ".join(unsellable) + "."
+    if any(p.can_be_auctioned is None for p in never):
+        note += " Check binds and can_be_auctioned (get_item_details) before suggesting to buy it to resell or list it."
+    return note
+
+
 @tool(annotations=ToolAnnotations(title="Auction house prices", read_only_hint=True, open_world_hint=True))
 async def get_auction_prices(
     item_ids: Annotated[
@@ -386,10 +478,12 @@ async def get_auction_prices(
     auctions, the cheapest price points (to work out what buying several costs), where they came from and how old
     they are. Online prices (Blizzard's API, when set up) are a snapshot of the player's auction house at most about
     an hour old; the game's own are as of the player's last auction house visit (its full scan, or a search) and come
-    along when they're newer or there's no online price. An item not listed says when it last was and at what.
-    history=True adds the usual price and price history. The items asked about go on the priority list the game
-    checks at every auction house visit. Without item IDs: the priority list (goal, plan, watched and asked-about
-    items, then what the player could sell from their bags and bank) and when the last full scan was."""
+    along when they're newer or there's no online price. An item not listed says when it last was and at what; one
+    never listed in all the history is flagged (never_listed: usually it can't be traded) and, if asked about, comes
+    with what it binds to. history=True adds the usual price and price history. The items asked about go on the
+    priority list the game checks at every auction house visit. Without item IDs: the priority list (goal, plan,
+    watched and asked-about items, then what the player could sell from their bags and bank) and when the last full
+    scan was."""
     ids = list(dict.fromkeys(item_ids or []))
     # A newer snapshot is fetched meanwhile, if one is due.
     warming = asyncio.create_task(asyncio.to_thread(online_auctions.warm_up, addons_dir()))
@@ -400,22 +494,25 @@ async def get_auction_prices(
         data, version, trouble = {}, _installed_version(), e
     await warming
     places = as_list(data.get("places"))
+    scan = data.get("scan") if isinstance(data.get("scan"), dict) else None
     raw = [p for p in as_list(data.get("prices")) if isinstance(p, dict) and isinstance(p.get("item"), int)]
-    in_game = {p["item"]: _price(p, places) for p in raw}
+    in_game = {p["item"]: _price(p, places, scan) for p in raw}
     asked = ids or list(in_game)
     if trouble and not asked:
         raise trouble
     online = await _online(asked, data.get("realm"), raw, places, history)
     if trouble and not online.items:
         raise ToolError(f"{trouble} {' '.join(online.notes)}".strip()) from None
-    prices = []
+    prices, covers = [], _online_history(online)
     for item in asked:
         if online.house and item in online.items:
-            prices.append(_online_price(item, online.items[item], online.house, in_game.get(item), history))
+            prices.append(_online_price(item, online.items[item], online.house, in_game.get(item), history, covers))
         elif item in in_game:
             prices.append(in_game[item])
     not_seen = [i for i in ids if i not in {p.item_id for p in prices}]
-    scan = data.get("scan") if isinstance(data.get("scan"), dict) else None
+    never = [p for p in prices if p.never_listed]
+    # Only for items asked about: the priority list is the game's own, and the lookup takes a live-update slot.
+    lookup_note = await _bindings(never[:items.MAX_ITEMS]) if never and ids and not trouble else None
     last_full_scan = None
     if scan:
         seen_at, seen_ago = _when(scan.get("at"))
@@ -433,6 +530,10 @@ async def get_auction_prices(
         )
     elif not prices:
         notes.append("No prices yet: the game looks them up when the player opens the auction house.")
+    if never:
+        notes.append(_never_listed_note(never))
+    if lookup_note:
+        notes.append(lookup_note)
     if data.get("reading"):
         notes.append("The game is reading a new full scan right now; ask again in a few seconds for newer prices.")
     if data.get("open") and data.get("waiting"):

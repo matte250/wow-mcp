@@ -16,8 +16,8 @@ SELL_PRICE = "Sell Price"
 -- straight away (icon: a texture file ID; default the question mark, 134400). Gear has a class,
 -- subclass and equip slot, and may have armor, stats (keyed as GetItemStats keys them),
 -- weapon damage { low, high, speed }, a required level and effects (green tooltip lines). bind is the
--- tooltip's binding line; GetItemInfo gives it as a bind type. random: it comes with random suffixes (see
--- client.suffixes); classes: the only classes that can use it.
+-- tooltip's binding line; GetItemInfo gives it as a bind type. conjured: a "Conjured Item" line. random: it comes
+-- with random suffixes (see client.suffixes); classes: the only classes that can use it.
 client.items = {
 	[6948] = { name = "Hearthstone", quality = 1, level = 1, class = 15 },
 	[2589] = { name = "Linen Cloth", quality = 1, level = 5, class = 7, sell = 13 },
@@ -50,6 +50,15 @@ client.items = {
 	[2934] = { name = "Ruined Leather Scraps", quality = 0, level = 5, class = 7, sell = 1, icon = 134254 },
 	[2320] = { name = "Coarse Thread", quality = 1, level = 5, class = 7, sell = 2, icon = 132889 },
 	[4232] = { name = "Medium Hide", quality = 1, level = 20, class = 7, sell = 25, icon = 134255 },
+	-- Vendor recipes that bind when picked up in Forever (Classic's don't), a quest item and a conjured one.
+	[7613] = { name = "Pattern: Green Leather Armor", quality = 2, level = 31, class = 9, subclass = 1, sell = 450,
+		bind = "Binds when picked up" },
+	[7114] = { name = "Pattern: Azure Silk Gloves", quality = 2, level = 29, class = 9, subclass = 2, sell = 375,
+		bind = "Binds when picked up" },
+	[7560] = { name = "Schematic: Gnomish Universal Remote", quality = 2, level = 25, class = 9, subclass = 3,
+		sell = 300, bind = "Binds when picked up" },
+	[5085] = { name = "Bristleback Quilboar Tusk", quality = 1, level = 1, class = 12, bind = "Quest Item" },
+	[5350] = { name = "Conjured Water", quality = 1, level = 5, class = 0, conjured = true },
 }
 
 -- Random suffixes by ID, as in item links.
@@ -93,12 +102,13 @@ for quality, hex in pairs(COLORS) do
 		b = tonumber(hex:sub(5, 6), 16) / 255, hex = "|cff" .. hex }
 end
 local CLASSES = { [0] = "Consumable", [2] = "Weapon", [4] = "Armor", [6] = "Projectile", [7] = "Trade Goods",
-	[12] = "Quest", [13] = "Key", [15] = "Miscellaneous" }
+	[9] = "Recipe", [12] = "Quest", [13] = "Key", [15] = "Miscellaneous" }
 local SUBCLASSES = {
 	[2] = { [0] = "One-Handed Axes", [1] = "Two-Handed Axes", [2] = "Bows", [4] = "One-Handed Maces", [5] = "Two-Handed Maces",
 		[7] = "One-Handed Swords", [10] = "Staves", [15] = "Daggers" },
 	[4] = { [0] = "Miscellaneous", [1] = "Cloth", [2] = "Leather", [3] = "Mail", [4] = "Plate", [6] = "Shields" },
 	[6] = { [2] = "Arrow" },
+	[9] = { [1] = "Leatherworking", [2] = "Tailoring", [3] = "Engineering" },
 }
 
 local function Cached(itemID)
@@ -131,7 +141,8 @@ local function ParseItem(item)
 	return tonumber(itemID), tonumber(rest and rest:match("^:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:(%d+)"))
 end
 
-local BIND_TYPES = { ["Binds when picked up"] = 1, ["Binds when equipped"] = 2, ["Quest Item"] = 4 } -- Enum.ItemBind
+local BIND_TYPES = { ["Binds when picked up"] = 1, ["Binds when equipped"] = 2, ["Binds when used"] = 3,
+	["Quest Item"] = 4 } -- Enum.ItemBind
 local function BindType(item) return BIND_TYPES[item.bind] or 0 end
 
 local function Bag(bag)
@@ -253,6 +264,7 @@ local function TooltipData(itemID, suffix)
 		return { type = Enum.TooltipDataType.Item, id = itemID, lines = lines }
 	end
 	Add(info.name .. (suffix and client.suffixes[suffix].name or ""), QUALITY_COLORS[info.quality], { type = T.ItemName })
+	if info.conjured then Add("Conjured Item") end
 	if info.bind then Add(info.bind, WHITE, { type = T.ItemBinding }) end
 	if SLOT_NAMES[info.slot] then
 		local _, subtypeName = TypeNames(info)

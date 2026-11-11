@@ -182,6 +182,8 @@ def test_vendors_newest_first(live_game):
             { id = 4289, price = 50, stack = 5 },
             { id = 4470, price = 38, stock = 2 },
             { id = 5976, price = 0, locked = true, costs = { { 2, "Honor Token" } } },
+            { id = 7613, price = 2500 },
+            { id = 4253, price = 6000 },
         } }) end)
         C_Timer.After(3, function() client.CloseMerchant() end)
     """
@@ -196,14 +198,20 @@ def test_vendors_newest_first(live_game):
         "name": "Duokna", "npc_id": 3158, "zone": "Durotar", "subzone": "Razor Hill", "x": 52.3, "y": 41.2,
         "map_id": 1411,
     }
-    base = {"stack": 1, "stock": None, "other_cost": None, "can_buy": True}
-    # Salt, Simple Wood and the tabard weren't loaded when the window opened; their names came later.
+    base = {"stack": 1, "stock": None, "other_cost": None, "can_buy": True, "binds": None, "can_be_auctioned": None}
+    # Salt, Simple Wood and the tabard weren't loaded when the window opened; their names came later. Of Mild Spices,
+    # Simple Wood and the tabard the stub knows only the names, so what they bind to isn't known.
     assert [i.model_dump() for i in duokna.items] == [
         {**base, "name": "Mild Spices", "item_id": 2678, "price": 10},
-        {**base, "name": "Salt", "item_id": 4289, "price": 50, "stack": 5},
+        {**base, "name": "Salt", "item_id": 4289, "price": 50, "stack": 5, "binds": "no", "can_be_auctioned": True},
         {**base, "name": "Simple Wood", "item_id": 4470, "price": 38, "stock": 2},
         {**base, "name": "Guild Tabard", "item_id": 5976, "price": 0, "other_cost": "2 Honor Token", "can_buy": False},
+        {**base, "name": "Pattern: Green Leather Armor", "item_id": 7613, "price": 2500, "binds": "on pickup",
+         "can_be_auctioned": False},
+        {**base, "name": "Toughened Leather Gloves", "item_id": 4253, "price": 6000, "binds": "on equip",
+         "can_be_auctioned": True},
     ]
+    # Cached before vendors' items had what they bind to: not known, though the game has the item.
     assert innkeeper.model_dump() == {
         "name": "Innkeeper Gryshka", "npc_id": 6929, "zone": "Orgrimmar", "subzone": "Valley of Strength",
         "x": 54.1, "y": 68.4, "map_id": 1454, "seen_at": EARLIER,

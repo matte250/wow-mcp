@@ -22,7 +22,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from wow_mcp import battlenet, bridge, kinds, online_auctions
 from wow_mcp.online_auctions import Listing, Seen, Store
-from wow_mcp.tools import auction
+from wow_mcp.tools import auction, items
 from wow_mcp.transport import Transport
 
 CLIENT_ID, SECRET, TOKEN = "client-id-123", "s3cret-VALUE-9f2c", "TOKEN-abc-77ab"
@@ -407,6 +407,16 @@ def test_get_auction_prices_merges_online_and_in_game(addons, api, monkeypatch, 
     # The game's full scan is three hours old, but it searched Item 3012 a minute ago and saw it cheaper.
     newer = {"item": 3012, "price": 5, "listed": 1, "n": 1, "at": now - 60, "src": "search"}
     monkeypatch.setattr(auction, "request", reply_for(addons, asked, now - 3 * 3600, newer))
+    # Item 9999, which no snapshot has, binds when picked up: the game says so when asked (get_item_details).
+    looked_up = []
+
+    async def details(kind):
+        lookup = Transport(addons).load_state()["itemLookup"]
+        looked_up.append(lookup["items"])
+        return {"itemDetails": {"lookup": lookup["id"], "items": [
+            {"id": i, "name": f"Item {i}", "bind": 1, "lines": []} for i in lookup["items"]]}}, "WoW"
+
+    monkeypatch.setattr(items, "request", details)
     result = asyncio.run(auction.get_auction_prices(asked, history=True))
     assert result.online.house == "Alliance Auction House 110" and result.online.snapshot_ago == "10 minutes ago"
     assert result.online.chosen.startswith("matched to the in-game prices (")
@@ -426,6 +436,10 @@ def test_get_auction_prices_merges_online_and_in_game(addons, api, monkeypatch, 
     assert gear.random_suffixes == 2 and gear.min_price == 700 and gear.name is None, "the game didn't name it"
     missing = by_id[9999]
     assert (missing.source, missing.listed, missing.min_price, missing.last_listed) == ("online", 0, None, None)
+    assert (missing.never_listed, missing.history_covers, missing.binds, missing.can_be_auctioned, missing.name) == (
+        True, "one online snapshot", "on pickup", False, "Item 9999")
+    assert [i for i, p in by_id.items() if p.never_listed] == [9999] and looked_up == [[9999]]
+    assert "Never listed at any point in the price history (one online snapshot): item(s) 9999." in result.note
 
     # The game isn't there: online prices still are, with the house matched before.
     async def gone(kind):
@@ -435,6 +449,10 @@ def test_get_auction_prices_merges_online_and_in_game(addons, api, monkeypatch, 
     result = asyncio.run(auction.get_auction_prices([3001, 3012]))
     assert [p.source for p in result.prices] == ["online", "online"] and result.prices[0].name is None
     assert "Online prices only: the game didn't answer (World of Warcraft: Forever isn't running.)" in result.note
+    # Nor can it say what an item never listed binds to.
+    result = asyncio.run(auction.get_auction_prices([9999]))
+    assert result.prices[0].never_listed and result.prices[0].binds is None and looked_up == [[9999]]
+    assert "Check binds and can_be_auctioned (get_item_details)" in result.note
     # Without item IDs the priority list comes from the game, so that fails as before.
     with pytest.raises(ToolError, match="isn't running"):
         asyncio.run(auction.get_auction_prices())
