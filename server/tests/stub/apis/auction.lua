@@ -22,6 +22,10 @@
 -- it's for, and the sell views pick their price (or clear the selection) again. Before a view has its
 -- own item's results there's nothing to lose; after, client.ah.disturbed lists each result for another
 -- item that reached it. No part of it uses the full scan (nothing in Blizzard_AuctionHouseUI does).
+--
+-- The addon's status panel under the window needs status bars (SimpleStatusBarAPIDocumentation.lua): only
+-- frames made as "StatusBar" have their methods, which keep the range and the value (clamped to it), as the
+-- client does; and every frame has a strata.
 
 local LATENCY = 0.5 -- seconds for a search's answer
 local THROTTLE = 100 -- searches a minute
@@ -72,6 +76,31 @@ AuctionHouseFrameDisplayMode = {
 	ItemSell = { "ItemSellFrame", "ItemSellList" },
 	Auctions = { "AuctionsFrame" },
 }
+
+local Frame = getmetatable(UIParent)
+function Frame:GetFrameStrata() return self.strata or "MEDIUM" end
+
+local StatusBar = setmetatable({}, { __index = Frame })
+StatusBar.__index = StatusBar
+function StatusBar:SetMinMaxValues(low, high) self.minValue, self.maxValue = low, high end
+function StatusBar:GetMinMaxValues() return self.minValue or 0, self.maxValue or 0 end
+function StatusBar:SetValue(value)
+	local low, high = self:GetMinMaxValues()
+	self.value = math.max(low, math.min(high, value))
+end
+function StatusBar:GetValue() return self.value or 0 end
+function StatusBar:SetStatusBarTexture(asset)
+	self.barTexture = asset
+	return true
+end
+function StatusBar:SetStatusBarColor(r, g, b, a) self.barColor = { r, g, b, a or 1 } end
+
+local createFrame = CreateFrame
+function CreateFrame(frameType, name, parent, template)
+	local frame = createFrame(frameType, name, parent, template)
+	if frameType == "StatusBar" then setmetatable(frame, StatusBar) end
+	return frame
+end
 
 local function Listing(itemID)
 	return client.ah.listings[itemID] or { results = {} }
