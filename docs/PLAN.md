@@ -68,12 +68,16 @@ startup, so after the one restart for this restructure, every feature only needs
   `bridge.MODELS`), `effort` one of its `EFFORTS` (must match `bridge.EFFORTS`, Claude Code's `--effort`
   levels). The bridge passes `--model`/`--effort` only for those, signs answers "Claude <Model>[ · <level>]",
   and replies carry `defaultModel` and `defaultEffort`. The agent
-  contract is `agent(prompt, model, player, effort, progress)` (`progress.saw(step, tool)` on each sign of life, `progress.tick()` about every second, `bridge.Progress`); `player` reaches the wow tools as `WOW_MCP_PLAYER`.
+  contract is `agent(prompt, model, player, effort, progress)` (`progress.saw(step, tool)` on each sign of life, `progress.read(event)` for each of Claude Code's stream-json events (steps and tokens, `bridge.Tokens`), `progress.tick()` about every second, `bridge.Progress`); `player` reaches the wow tools as `WOW_MCP_PLAYER`.
 - **/ai progress**: the bridge acks each question and sends progress with `publish_status(status, text,
   question, quiet)`: `messages` entries `{ id, status = "ack" | "progress", text, session, post, quiet, at }`,
   routed to `ns.AIChat.Status(m)`, never shown as messages; replies carry `session`/`post`, and a question's
   notes are dropped when its newer note or answer is added. `ns.Stream.Post(value)` returns `post, session`.
-  Stub chat windows have `RemoveMessagesByPredicate` and `TransformMessages`.
+  Stub chat windows have `RemoveMessagesByPredicate` and `TransformMessages`. Status entries also carry
+  `tokens` and `rate` when the agent streams Claude Code's events (`Bridge(tokens=agent.streams)`; the ack's
+  `tokens` is 0); between updates the game runs the count on at `rate` for up to 40 s (Chat.lua's
+  `GUESS_FOR` = `bridge.PROGRESS_EVERY`). Answers carry `took` (seconds) and `tokens` (the result's exact
+  count); the AI tab adds a grey "took M:SS · ↓ N tokens" line.
 - **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
   `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
   for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and

@@ -91,8 +91,9 @@ to `wow-mcp-bridge`, a small background service. It runs Claude Code headless wi
 shows the answer in the AI tab, with map markers when useful. Shift-clicked item links work.
 
 The conversation has its own chat tab, so answers don't drown in a city's chat: your question,
-a status line like "Thinking… 1:24 · checking auction prices" (how long it's been and what the AI
-is doing), then the answer. The AI may take as long as it needs while it works. If wow-mcp-bridge
+a status line like "Thinking… 1:24 · ↓ 3.4k tokens · checking auction prices" (how long it's been,
+how many tokens the AI has written so far, and what it is doing), then the answer, with a grey line
+under it: how long it took and how many tokens it wrote. With `--agent` there's no token count. The AI may take as long as it needs while it works. If wow-mcp-bridge
 doesn't confirm a question within 15 seconds, the line says "No answer from wow-mcp-bridge. Is it
 running?"; if it then goes quiet for too long, "The AI seems to have stopped responding." The tab is made the first time you ask and flashes when a new answer
 arrives while you're in another one. In the AI tab, plain lines go to the AI; lines starting with `/`,
