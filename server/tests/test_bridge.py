@@ -15,21 +15,23 @@ import pytest
 from wow_mcp import bridge, item_text, memory, stream
 from wow_mcp.app import transport
 from wow_mcp.bridge import (
-    MAX_WAITING, SYSTEM_PROMPT, AgentError, AgentSilent, AgentTimeout, Bridge, CommandAgent, Progress, chat_lines,
-    claude_command,
+    MAX_WAITING, SYSTEM_PROMPT, AgentError, AgentSilent, AgentTimeout, Bridge, CommandAgent, Progress, Tokens,
+    chat_lines, claude_command,
 )
 from wow_mcp.tools import messages, player
 
 
 def publish_per_contract(text, style="chat", sender="Claude", reply=False, default_model=None, default_effort=None,
-                         question=None):
+                         question=None, took=None, tokens=None):
     """Stands in for tools/messages.py: the `messages` payload as docs/PLAN.md (W7) defines it."""
 
     def change(state, seq):
         message = {"id": seq, "text": text, "style": style, "from": sender, **({"reply": True} if reply else {}),
                    **({"defaultModel": default_model} if reply and default_model is not None else {}),
                    **({"defaultEffort": default_effort} if reply and default_effort is not None else {}),
-                   **({"session": question[0], "post": question[1]} if reply and question else {})}
+                   **({"session": question[0], "post": question[1]} if reply and question else {}),
+                   **({"took": round(took)} if reply and took is not None else {}),
+                   **({"tokens": tokens} if reply and tokens is not None else {})}
         state["messages"] = [*state.get("messages", []), message][-10:]
 
     return transport().publish(change)
@@ -1043,6 +1045,241 @@ def test_the_game_hears_how_its_question_comes_along(addons, caplog):
         b.accept(stream.Post(5, 11 + i, end=0, value={"question": f"q{i}", "player": "Thorgrim"}))
     assert said[-1] == ("I'm still busy with your earlier questions. Please ask again in a minute.", (5, 15))
     assert [question for _, _, question, _ in notes] == [(5, 11), (5, 12), (5, 13), (5, 14)]
+
+
+# Claude Code's stream-json events as a live run has them (2.1.322, --include-partial-messages): every part of a message
+# names the message (api_message_id).
+def part(message, inner):
+    return {"type": "stream_event", "event": inner, "parent_tool_use_id": None, "api_message_id": message}
+
+
+def message_start(message, output_tokens=1):  # its usage so far: not what it will write
+    return part(message, {"type": "message_start", "message": {
+        "id": message, "type": "message", "role": "assistant", "content": [],
+        "usage": {"input_tokens": 2, "output_tokens": output_tokens}}})
+
+
+def block(message, index, kind, **content):
+    return part(message, {"type": "content_block_start", "index": index, "content_block": {"type": kind, **content}})
+
+
+def delta(message, index, kind, **fields):
+    return part(message, {"type": "content_block_delta", "index": index, "delta": {"type": kind, **fields}})
+
+
+def thought(message, tokens):
+    """A piece of thinking: its text left out, an estimate of its tokens instead."""
+    return delta(message, 0, "thinking_delta", thinking="", estimated_tokens=tokens)
+
+
+def message_end(message, output_tokens, thinking=0):  # what the message wrote, exactly
+    return part(message, {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {
+        "input_tokens": 2, "output_tokens": output_tokens, "output_tokens_details": {"thinking_tokens": thinking}}})
+
+
+def finished(text, output_tokens, thinking=0):
+    return {**result(text), "num_turns": 2,
+            "usage": {"input_tokens": 4, "output_tokens": output_tokens,
+                      "output_tokens_details": {"thinking_tokens": thinking}}}
+
+
+# A live run (Sonnet at max): it thinks, writes, calls a tool, then answers in a second message. Its counts and
+# estimates as they came; the text is shorter. Each thinking estimate comes twice, the second time as a system event.
+M1, M2 = "msg_011CgwXhmoCJGfkbZ9WmgfwS", "msg_011CgwXiFz63vxnS2xfY32Z8"
+RUN = [
+    message_start(M1, 5),
+    block(M1, 0, "thinking", thinking="", signature=""),
+    {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 50, "estimated_tokens_delta": 50},
+    thought(M1, 50),
+    {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 200, "estimated_tokens_delta": 150},
+    thought(M1, 150),
+    {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 500, "estimated_tokens_delta": 300},
+    thought(M1, 300),
+    thought(M1, None),
+    delta(M1, 0, "signature_delta", signature="CAQSswwKEAgTGAI4AUII"),
+    {"type": "assistant", "message": {"id": M1, "content": [{"type": "thinking"}], "usage": {"output_tokens": 5}}},
+    block(M1, 1, "text", text=""),
+    delta(M1, 1, "text_delta", text="Since 7, 9 and 11 are pairwise coprime, just one n lies below 693, and working it "
+                                    "out gives 346."),  # 96 characters: 24 tokens
+    block(M1, 2, "tool_use", id="toolu_01FrFU2511nq49Ts6bitM7Ep", name="Bash", input={}),
+    delta(M1, 2, "input_json_delta", partial_json=""),
+    delta(M1, 2, "input_json_delta",
+          partial_json='{"command": "echo 346", "description": "Print the computed answer."}'),  # 68: 17 tokens
+    message_end(M1, 1059, thinking=628),
+    {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "346"}]}},
+    message_start(M2, 53),
+    block(M2, 0, "text", text=""),
+    delta(M2, 0, "text_delta", text="The smallest such positive n is 346."),  # 9 tokens
+    message_end(M2, 53),
+    finished("The smallest such positive n is 346.", 1112, thinking=628),
+]
+
+
+def test_tokens_are_counted_over_the_whole_run():
+    """The tokens the agent writes, over all its turns: while a message streams, its thinking by the estimates that
+    come with it and its text and tool calls by their length; once it's done, its exact count; at the end, the result's,
+    which is what the messages' exact counts add up to. Nothing counts twice."""
+    tokens = Tokens(clock=lambda: 0.0)
+    totals = []
+    for event in RUN:
+        tokens.see(event)
+        if not totals or totals[-1] != tokens.total:
+            totals.append(tokens.total)
+    # The thinking (not 100, 400, 1000: the system events only repeat it), the text, the tool call, the first message's
+    # exact count, the second message, its exact count, and the result's, which is the same.
+    assert totals == [0, 50, 200, 500, 524, 541, 1059, 1068, 1112]
+    assert tokens.final == 1112 == 1059 + 53
+
+    # An older Claude Code that doesn't name each part's message, and thinking it shows: by its length.
+    tokens = Tokens(clock=lambda: 0.0)
+    for event in (message_start("a"), {**message_end("a", 7), "api_message_id": None},
+                  message_start("b"), {**delta("b", 0, "thinking_delta", thinking="x" * 40), "api_message_id": None}):
+        tokens.see(event)
+    assert tokens.total == 17 and tokens.final is None
+    for nothing in (None, [], "x", {"type": "result"}, {"type": "stream_event", "event": "x"}):
+        tokens.see(nothing)
+    assert tokens.total == 17
+
+
+def test_how_fast_the_agent_writes():
+    """The pace sent with each update, for the game to count on with: what was written over the last 10 s, from the
+    estimates as they stream, so a message's exact count coming in isn't a burst; 0 once nothing has come for 5 s (a
+    tool runs), as then the count doesn't grow."""
+    now = [0.0]
+    tokens = Tokens(clock=lambda: now[0])
+    assert tokens.rate() == 0
+    tokens.see(message_start(M1))
+    now[0] = 2
+    tokens.see(delta(M1, 1, "text_delta", text="x" * 80))
+    assert tokens.rate() == 10  # 20 tokens in its first 2 s
+    for _ in range(30):  # thinking: an estimate of 40 tokens every second
+        now[0] += 1
+        tokens.see(thought(M1, 40))
+    assert tokens.rate() == 40 and tokens.total == 1220
+    tokens.see(message_end(M1, 1500))
+    assert tokens.total == 1500 and tokens.rate() == 40
+    now[0] += 3  # a tool runs: 7 s of the last 10 were writing
+    assert tokens.rate() == 28
+    now[0] += 3
+    assert tokens.rate() == 0 and tokens.total == 1500
+
+
+def test_updates_carry_the_token_count():
+    """With Claude Code's events, every update to the game, for a new step or to keep in touch, also carries the tokens
+    written so far and the pace lately, which the game counts on with until the next. They go at the same times as
+    without them: no more slots."""
+    now, sent, plain = [0.0], [], []
+
+    def clock():
+        return now[0]
+
+    counted = Progress(lambda step, **counts: sent.append((now[0], step, counts)), quiet=120, every=40, clock=clock,
+                       tokens=Tokens(clock))
+    uncounted = Progress(lambda step: plain.append((now[0], step)), quiet=120, every=40, clock=clock)
+
+    def second(*events):
+        """A second of the agent's run, as CommandAgent watches it: its events, then a look."""
+        now[0] += 1
+        for progress in (counted, uncounted):
+            for event in events:
+                progress.read(event)
+            progress.tick()
+
+    second(message_start(M1), block(M1, 0, "thinking", thinking=""))
+    for _ in range(29):  # thinking, 40 tokens a second
+        second(thought(M1, 40))
+    second(block(M1, 1, "tool_use", name="mcp__wow__get_auction_prices", input={}),
+           delta(M1, 1, "input_json_delta", partial_json='{"item_ids": [2589, 2592, 4306]}'), message_end(M1, 1300))
+    for _ in range(20):  # the tool runs: no events
+        second()
+    second({"type": "user", "message": {"content": [{"type": "tool_result"}]}}, message_start(M2),
+           block(M2, 0, "thinking", thinking=""))
+    for _ in range(130):  # thinking, 30 a second
+        second(thought(M2, 30))
+    for _ in range(100):  # waiting on the model
+        second()
+    second(block(M2, 1, "text", text=""))
+    second(delta(M2, 1, "text_delta", text="Linen sells for 1s 20c."), message_end(M2, 4900),
+           finished("Linen sells for 1s 20c.", 6200))
+    assert [(t, step) for t, step, _ in sent] == plain == [
+        (40, "checking auction prices"), (80, bridge.THINKING), (200, bridge.THINKING)]
+    # During the tool call: nothing written lately. Then thinking (with the first message's exact count), then the
+    # keepalive after it stopped.
+    assert [counts for _, _, counts in sent] == [
+        {"tokens": 1300, "rate": 0}, {"tokens": 2140, "rate": 30}, {"tokens": 5200, "rate": 0}]
+    assert counted.tokens.total == 6200  # the result's
+
+
+def test_the_game_hears_how_many_tokens_were_written(addons, caplog):
+    """Claude Code's tokens: the ack starts the count at 0, every update carries it on, and the answer has the exact
+    count, with how long it took. An agent of the player's own (--agent) streams nothing to count: none of that, but
+    its answer says how long it took too."""
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    now, notes, said = [0.0], [], []
+
+    def agent(prompt, model, asker, effort, progress):
+        for event in (message_start(M1), block(M1, 0, "thinking", thinking="")):
+            progress.read(event)
+        for _ in range(60):
+            now[0] += 1
+            progress.read(thought(M1, 25))
+            progress.tick()
+        for event in (block(M1, 1, "text", text=""), delta(M1, 1, "text_delta", text="Buy low, sell high."),
+                      message_end(M1, 1650), finished("Buy low, sell high.", 1650)):
+            progress.read(event)
+        return "Buy low, sell high."
+
+    def publish(text, style, sender, reply, question=None, default_model=None, default_effort=None, **extra):
+        said.append((text, question, extra))
+
+    for counting in (True, False):
+        b = Bridge(addons, agent, publish=publish, history=bridge.History(None), clock=lambda: now[0], tokens=counting,
+                   notify=lambda status, text, question, quiet, **counts: notes.append((status, text, counts)))
+        b.accept(stream.Post(5, 7, end=0, value={"question": "any flips?", "player": "Thorgrim"}))
+        b.answer(b.questions.get_nowait())
+    assert notes == [("ack", "", {"tokens": 0, "rate": 0}), ("progress", bridge.THINKING, {"tokens": 1000, "rate": 25}),
+                     ("ack", "", {}), ("progress", bridge.THINKING, {})]
+    assert said == [("Buy low, sell high.", (5, 7), {"took": 60, "tokens": 1650}),
+                    ("Buy low, sell high.", (5, 7), {"took": 60})]
+    assert "took 1:00; tools used: none; tokens written: 1650" in caplog.messages
+    assert "took 1:00; tools used: none" in caplog.messages
+
+    # Other replies aren't answers: no time, no count.
+    said.clear()
+    b.accept(stream.Post(5, 8, end=0, error="post 8 arrived damaged"))
+    assert said == [("Your question arrived garbled. Please ask again.", (5, 8), {})]
+
+
+def test_claude_codes_count_reaches_the_answer(streaming, addons):
+    """As the bridge runs Claude Code: its events read as they come, and the answer carries the result's count."""
+    said = []
+    agent = streaming([[0.01, event] for event in [INIT, *RUN]])
+    b = Bridge(addons, agent, notify=lambda *a, **k: 0, tokens=agent.streams,
+               publish=lambda text, style, sender, reply, **extra: said.append((text, extra.get("tokens"))))
+    b.answer(bridge.Question("Puzzle?", "Thorgrim"))
+    assert said == [("The smallest such positive n is 346.", 1112)]
+
+
+def test_only_streaming_agents_have_their_tokens_counted(addons, monkeypatch):
+    """Claude Code, as the bridge runs it, streams what it writes; an agent of the player's own (--agent) only prints
+    its answer, so the game is told of no tokens for it."""
+    made = []
+
+    class Started:
+        def __init__(self, *args, **kwargs):
+            made.append(kwargs)
+            self.stop = threading.Event()
+
+        def serve(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(bridge, "Bridge", Started)
+    monkeypatch.setattr(bridge.shutil, "which", lambda program: program)  # Claude Code needn't be installed
+    monkeypatch.setattr(bridge.signal, "signal", lambda *_: None)
+    for agent in ([], ["--agent", f"{sys.executable} -c pass"]):
+        monkeypatch.setattr(sys, "argv", ["wow-mcp-bridge", "--addons-dir", str(addons), *agent])
+        bridge.main()
+    assert [kwargs["tokens"] for kwargs in made] == [True, False]
 
 
 def test_bridge_time_limit_options(addons, monkeypatch, capsys):
