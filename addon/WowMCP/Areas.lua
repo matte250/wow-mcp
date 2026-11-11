@@ -58,6 +58,13 @@ end
 -- Mixed into MapCanvasPinMixin once the world map code is loaded (see AttachToWorldMap).
 local Pin = {}
 
+-- MapCanvasPinMixin's version calls SetPassThroughButtons each time the map hands out a pin, which
+-- the game blocks for addons in combat ("Interface action failed because of an AddOn" when the map
+-- opens in a fight). Blizzard's version, only outside combat.
+function Pin:CheckMouseButtonPassthrough(...)
+	if not InCombatLockdown() then pcall(MapCanvasPinMixin.CheckMouseButtonPassthrough, self, ...) end
+end
+
 function Pin:OnLoad()
 	self:UseFrameLevelType("PIN_FRAME_LEVEL_MAP_HIGHLIGHT")
 	-- Sized in canvas units, so the circle covers the same ground at any zoom.

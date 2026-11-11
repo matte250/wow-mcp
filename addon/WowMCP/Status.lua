@@ -101,16 +101,18 @@ do
 	local tex = UIParent:CreateTexture(nil, "ARTWORK")
 	tex:SetAlpha(0)
 
-	-- The font's glyph widths: which version was loaded, and how finely the game measures.
+	-- The font's glyph widths: which version was loaded, and how finely the game measures. Whatever
+	-- SetFont says, and the font the string ends up with, are part of the result.
 	local function Widths(path)
-		local ok, loaded = pcall(text.SetFont, text, path, 64, "")
-		if not (ok and loaded) then return "didn't load" end
+		local ok, loaded = pcall(text.SetFont, text, path, 32, "")
+		local okGet, file = pcall(text.GetFont, text)
 		local widths = {}
 		for _, glyph in ipairs(GLYPHS) do
 			text:SetText(glyph)
 			widths[#widths + 1] = string.format("%s=%.3f", glyph, text:GetUnboundedStringWidth())
 		end
-		return table.concat(widths, " ")
+		return string.format("%s; font %s; %s", ok and ("SetFont " .. tostring(loaded)) or ("error " .. tostring(loaded)),
+			okGet and tostring(file) or "?", table.concat(widths, " "))
 	end
 
 	local function Texture(path)
@@ -127,6 +129,7 @@ do
 		local results = Keep("files", { sounds = {}, fonts = {}, textures = {} })
 		ns.Print("Probe files: playing and loading the probe files…")
 		local first = { s1 = Play(DIR .. "s1.wav"), s2 = Play(DIR .. "s2.wav") }
+		results.fontControl = Widths("Fonts\\FRIZQT__.TTF") -- one of the game's own: does SetFont work at all?
 		results.fontBefore = Widths(DIR .. "f.ttf")
 		results.textureBefore = Texture(DIR .. "t.tga")
 		C_Timer.After(0.6, Safely(function()
@@ -145,6 +148,7 @@ do
 						results.sounds[i] = { s[1], Playing(handles[i].s1), Playing(handles[i].s2) }
 						ns.Print(string.format("%s: s1 (emptied) %s, s2 %s", s[1], results.sounds[i][2], results.sounds[i][3]))
 					end
+					ns.Print("Font control (the game's own): " .. results.fontControl)
 					ns.Print("Font before: " .. results.fontBefore)
 					for _, f in ipairs(results.fonts) do ns.Print("Font " .. f[1] .. ": " .. f[2]) end
 					ns.Print("Texture before: " .. results.textureBefore)

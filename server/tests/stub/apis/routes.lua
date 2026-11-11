@@ -63,6 +63,8 @@ function WorldMapFrame:AcquirePin(template, ...)
 	pin.pinTemplate, pin.owningMap, pin.shown = template, self, true
 	pin:OnLoad()
 	pin:OnAcquired(...)
+	-- As the game's canvas does with every pin it hands out (MapCanvasMixin:AcquirePin).
+	pin:CheckMouseButtonPassthrough("RightButton")
 	table.insert(self.pins, pin)
 	return pin
 end

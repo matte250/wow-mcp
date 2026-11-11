@@ -383,3 +383,21 @@ def test_choosing_the_last_stop_while_standing_there_finishes(run_route):
         client.Tick()
         assert(nav:IsShown() and nav.Title.text == "Turn-ins  1/3")
     """)
+
+
+def test_route_pins_in_combat_block_nothing(run_route):
+    # The map canvas sets each pin's mouse pass-through as it hands it out, which the game blocks for
+    # addons in combat ("Interface action failed because of an AddOn"): opening the map in a fight is
+    # fine, and outside combat the pins let right-clicks through as usual.
+    run_route(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish(TURN_INS)
+        client.Wait()
+        assert(not client.blocked, "nothing blocked outside combat")
+        local pin = WorldMapFrame.pins[1]
+        assert(pin and pin.passThrough and pin.passThrough[1] == "RightButton", "right-clicks fall through to the map")
+        client.combat = true
+        WorldMapFrame:SetMapID(WorldMapFrame:GetMapID())
+        assert(#WorldMapFrame.pins > 0 and not client.blocked, "blocked in combat: " .. tostring(client.blocked))
+    """)

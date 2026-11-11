@@ -119,6 +119,14 @@ end
 -- Mixed into MapCanvasPinMixin once the world map code is loaded (see AttachToWorldMap).
 local StopPin, LinePin = {}, {}
 
+-- MapCanvasPinMixin's version calls SetPassThroughButtons each time the map hands out a pin, which
+-- the game blocks for addons in combat ("Interface action failed because of an AddOn" when the map
+-- opens in a fight). Blizzard's version, only outside combat.
+function StopPin:CheckMouseButtonPassthrough(...)
+	if not InCombatLockdown() then pcall(MapCanvasPinMixin.CheckMouseButtonPassthrough, self, ...) end
+end
+LinePin.CheckMouseButtonPassthrough = StopPin.CheckMouseButtonPassthrough
+
 local function StopColor(stop)
 	local saved = stop.track.Saved()
 	if stop.n == saved.index and not saved.done then return COLOR.current end

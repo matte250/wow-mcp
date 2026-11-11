@@ -219,7 +219,7 @@ def wow_stream() -> tuple[str | None, str]:
         if props.get("media.class") != "Stream/Output/Audio":
             continue
         who = " ".join(str(props.get(k, "")) for k in ("application.name", "application.process.binary", "node.name"))
-        if "wow" in who.lower():
+        if "warcraft" in who.lower() or "wow" in who.lower():
             return str(props.get("object.serial")), who.strip()
     return None, ""
 

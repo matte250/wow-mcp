@@ -168,3 +168,21 @@ def test_highlight_areas_payload(addons):
 def test_template_is_valid_xml():
     root = ET.parse(ADDON / "Areas.xml").getroot()
     assert [frame.get("name") for frame in root] == ["WowMCPAreaPinTemplate"]
+
+
+def test_area_pins_in_combat_block_nothing(run_areas):
+    # The map canvas sets each pin's mouse pass-through as it hands it out, which the game blocks for
+    # addons in combat ("Interface action failed because of an AddOn"): opening the map in a fight is
+    # fine, and outside combat the pins let right-clicks through as usual.
+    run_areas(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish(BOARS)
+        client.Wait()
+        assert(not client.blocked, "nothing blocked outside combat")
+        local pin = WorldMapFrame.pins[1]
+        assert(pin and pin.passThrough and pin.passThrough[1] == "RightButton", "right-clicks fall through to the map")
+        client.combat = true
+        WorldMapFrame:SetMapID(WorldMapFrame:GetMapID())
+        assert(#WorldMapFrame.pins > 0 and not client.blocked, "blocked in combat: " .. tostring(client.blocked))
+    """)
