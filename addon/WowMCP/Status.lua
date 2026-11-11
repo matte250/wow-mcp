@@ -96,10 +96,16 @@ do
 		{ "one capital", function(p) return (p:gsub("\\(%l)([^\\]*)$", function(a, b) return "\\" .. a:upper() .. b end)) end },
 	}
 
-	local text = UIParent:CreateFontString(nil, "ARTWORK")
-	text:SetAlpha(0)
-	local tex = UIParent:CreateTexture(nil, "ARTWORK")
-	tex:SetAlpha(0)
+	-- Made when a probe first runs: nothing of the probes exists otherwise.
+	local text, tex
+	local function Measuring()
+		if not text then
+			text = UIParent:CreateFontString(nil, "ARTWORK")
+			text:SetAlpha(0)
+			tex = UIParent:CreateTexture(nil, "ARTWORK")
+			tex:SetAlpha(0)
+		end
+	end
 
 	-- The font's glyph widths: which version was loaded, and how finely the game measures. Whatever
 	-- SetFont says, and the font the string ends up with, are part of the result.
@@ -126,6 +132,7 @@ do
 	end
 
 	local function Files()
+		Measuring()
 		local results = Keep("files", { sounds = {}, fonts = {}, textures = {} })
 		ns.Print("Probe files: playing and loading the probe files…")
 		local first = { s1 = Play(DIR .. "s1.wav"), s2 = Play(DIR .. "s2.wav") }
@@ -164,7 +171,7 @@ do
 	-- stepped one. Gamepad support is on only for the probe.
 
 	local PAD_SECONDS = 15
-	local watcher = CreateFrame("Frame")
+	local watcher
 
 	local function Pad()
 		if not (C_GamePad and C_GamePad.GetAllDeviceIDs and C_CVar) then
@@ -177,6 +184,7 @@ do
 		ns.Print(string.format("Probe pad: gamepad support on for %d seconds (was %s). Stand still somewhere safe…",
 			PAD_SECONDS, tostring(was)))
 		local seen, stop = {}, GetTime() + PAD_SECONDS
+		watcher = watcher or CreateFrame("Frame")
 		watcher:SetScript("OnUpdate", Safely(function()
 			for _, id in ipairs(C_GamePad.GetAllDeviceIDs() or {}) do
 				local ok, raw = pcall(C_GamePad.GetDeviceRawState, id)
