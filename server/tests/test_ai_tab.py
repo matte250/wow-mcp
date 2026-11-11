@@ -1,6 +1,6 @@
 """The AI conversation's own chat tab (Chat.lua, Messages.lua): made once, when first needed; the
-question, "Thinking…" and the answer there, per /mcp aitab; typing there asks the AI. The model
-picker on the tab and /ai model pick which model answers."""
+question, "Thinking…" and the answer there, per /mcp aitab; typing there asks the AI. The picker on
+the tab, /ai model and /ai thinking pick which model answers and how hard it thinks."""
 
 import sys
 
@@ -12,7 +12,8 @@ import json, sys
 from wow_mcp.tools import messages
 args = json.loads(sys.argv[1])
 messages.publish_message(args["text"], args.get("style", "chat"), args.get("sender", "Claude"),
-                         reply=args.get("reply", False), default_model=args.get("defaultModel"))
+                         reply=args.get("reply", False), default_model=args.get("defaultModel"),
+                         default_effort=args.get("defaultEffort"))
 """
 
 HELPERS = """
@@ -62,18 +63,33 @@ local function Answer(text)
     client.Wait()
 end
 
--- An answer as the bridge sends it: signed with the model, and saying which one it uses by default.
-local function AnswerFrom(sender, text, defaultModel)
-    client.Publish('{"text":"' .. text .. '","reply":true,"sender":"' .. sender .. '","defaultModel":"' .. defaultModel .. '"}')
+-- An answer as the bridge sends it: signed with the model, and saying which one it uses by default (and
+-- how hard it thinks, if given).
+local function AnswerFrom(sender, text, defaultModel, defaultEffort)
+    client.Publish('{"text":"' .. text .. '","reply":true,"sender":"' .. sender .. '","defaultModel":"' .. defaultModel .. '"'
+        .. (defaultEffort and ',"defaultEffort":"' .. defaultEffort .. '"' or "") .. '}')
     client.Wait()
 end
 
--- The texts of the picker's menu, with the picked one marked "*".
+-- The texts of the picker's menu, with the picked ones marked "*", titles as "# Title" and dividers "--".
 local function Menu(picker)
     local texts = {}
-    for _, radio in ipairs(client.OpenMenu(picker)) do texts[#texts + 1] = (radio:IsSelected() and "*" or "") .. radio.text end
+    for _, element in ipairs(client.OpenMenu(picker)) do
+        texts[#texts + 1] = element.kind == "title" and "# " .. element.text or element.kind == "divider" and "--"
+            or (element:IsSelected() and "*" or "") .. element.text
+    end
     picker:CloseMenu()
     return texts
+end
+
+-- What a tooltip function says, line by line.
+local function TooltipLines(tooltipFunc)
+    local said = {}
+    local tooltip = setmetatable({}, { __index = function(_, name)
+        return function(_, text) if name == "SetText" or name == "AddLine" then said[#said + 1] = text end end
+    end })
+    tooltipFunc(tooltip)
+    return said
 end
 
 -- The "AI:" label over the chat box's header.
@@ -226,13 +242,15 @@ def test_bridge_answers_are_replies(addons):
 
     messages.publish_message("An answer.", reply=True)
     messages.publish_message("A heads-up.")
-    # The bridge's answers also say what model it answers with by default.
+    # The bridge's answers also say what model it answers with by default, and how hard it thinks.
     messages.publish_message("Signed.", sender="Claude Sonnet", reply=True, default_model="opus")
+    messages.publish_message("Thought.", sender="Claude Sonnet · max", reply=True, default_model="", default_effort="high")
     sent = transport().load_state()["messages"]
-    assert [(m["text"], m.get("reply"), m.get("defaultModel")) for m in sent] == [
-        ("An answer.", True, None), ("A heads-up.", None, None), ("Signed.", True, "opus"),
+    assert [(m["text"], m.get("reply"), m.get("defaultModel"), m.get("defaultEffort")) for m in sent] == [
+        ("An answer.", True, None, None), ("A heads-up.", None, None, None), ("Signed.", True, "opus", None),
+        ("Thought.", True, "", "high"),
     ]
-    assert sent[-1]["from"] == "Claude Sonnet"
+    assert sent[2]["from"] == "Claude Sonnet" and sent[3]["from"] == "Claude Sonnet · max"
 
 
 @pytest.mark.parametrize("style", ["classic", "im"])
@@ -462,14 +480,23 @@ def test_picking_a_model(game):
         local picker = WowMCPModelPicker
         assert(posted[1].model == nil and picker:IsShown())
 
-        -- The menu: every model with what it's good for; Default picked.
+        -- The menu: every model with what it's good for, then how hard it thinks; Default picked in each.
         local menu = table.concat(Menu(picker), "\n")
         assert(menu == table.concat({
+            "# Model",
             "*Default  |cffaaaaaawhat the bridge was started with|r",
             "Fable  |cffaaaaaathe most capable, slowest|r",
             "Opus  |cffaaaaaavery capable|r",
             "Sonnet  |cffaaaaaafast and strong|r",
             "Haiku  |cffaaaaaafastest, for simple lookups|r",
+            "--",
+            "# Thinking",
+            "*Default  |cffaaaaaawhat the bridge was started with, or Claude Code's own|r",
+            "Low  |cffaaaaaafastest|r",
+            "Medium  |cffaaaaaabalanced|r",
+            "High  |cffaaaaaathorough|r",
+            "Extra high  |cffaaaaaavery thorough, slower|r",
+            "Max  |cffaaaaaaslowest, deepest|r",
         }, "\n"), menu)
 
         -- Picking one: kept for this character, said in the conversation, sent with the next questions.
@@ -486,8 +513,8 @@ def test_picking_a_model(game):
         lines = client.Lines(tab)
         assert(lines[#lines - 1] == "|cff33ff99[Claude Sonnet]|r Over there.", lines[#lines - 1])
         assert(WowMCPDB.aiTab.bridgeModel == "opus")
-        assert(Menu(picker)[1] == "Default (Opus)  |cffaaaaaawhat the bridge was started with|r")
-        assert(Menu(picker)[4]:sub(1, 1) == "*")
+        assert(Menu(picker)[2] == "Default (Opus)  |cffaaaaaawhat the bridge was started with|r")
+        assert(Menu(picker)[5]:sub(1, 1) == "*")
 
         -- Kept over a /reload; the picker shows it again (General is selected after one).
         ns = Reload()
@@ -519,12 +546,9 @@ def test_picking_a_model(game):
         assert(posted[3].model == nil and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku")
 
         -- The tooltip says what it is.
-        local said = {}
-        local tooltip = setmetatable({}, { __index = function(_, name)
-            return function(_, text) if name == "SetText" or name == "AddLine" then said[#said + 1] = text end end
-        end })
-        picker.tooltipFunc(tooltip)
-        assert(said[1] == "AI model: Default" and said[2]:find("Which Claude model answers your /ai questions", 1, true))
+        local said = TooltipLines(picker.tooltipFunc)
+        assert(said[1] == "AI model: Default" and said[2] == "Thinking: Default")
+        assert(said[3]:find("Which Claude model answers your /ai questions", 1, true))
     """)
 
 
@@ -600,8 +624,10 @@ def test_model_picker_without_blizzard_dropdowns(game):
             return function(_, text) if name == "SetText" or name == "AddLine" then lines[#lines + 1] = text end end
         end })
         button.OnEnter(button)
-        assert(lines[1] == "AI model: Default" and Has(lines, "> Default: what the bridge was started with"))
-        assert(Has(lines, "   Haiku: fastest, for simple lookups") and Has(lines, "Click: the next one."))
+        assert(lines[1] == "AI model: Default" and lines[2] == "Thinking: Default")
+        assert(Has(lines, "> Default: what the bridge was started with") and Has(lines, "   Haiku: fastest, for simple lookups"))
+        assert(Has(lines, "> Default: what the bridge was started with, or Claude Code's own") and Has(lines, "   Max: slowest, deepest"))
+        assert(Has(lines, "Click: the next model.") and Has(lines, "With Shift: the thinking level."))
 
         -- A click: the next one; a right-click: the one before, round the list.
         button.OnClick(button, "LeftButton")
@@ -615,7 +641,197 @@ def test_model_picker_without_blizzard_dropdowns(game):
         client.Type("/ai model sonnet")
         assert(button.text == "Sonnet")
 
+        -- With Shift: the thinking level, the same way; the button shows both.
+        IsShiftKeyDown = function() return true end
+        button.OnClick(button, "LeftButton")
+        assert(button.text == "Sonnet · low" and WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "low")
+        button.OnClick(button, "RightButton")
+        button.OnClick(button, "RightButton")
+        assert(button.text == "Sonnet · max" and Has(client.Lines(tab), "The AI now thinks: Max."))
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "sonnet")
+        IsShiftKeyDown = nil
+        client.Type("/ai deep one")
+        assert(posted[2].model == "sonnet" and posted[2].effort == "max")
+        client.Type("/ai thinking medium")
+        assert(button.text == "Sonnet · medium")
+
         client.ClickTab(ChatFrame1)
         client.Tick()
         assert(not button:IsShown())
+    """)
+
+
+def test_thinking_is_picked_on_the_model_picker(game):
+    """One dropdown picks both, where the model picker always was and as wide: two side by side would run
+    into the chat tabs. Nothing else of the addon's sits by the chat windows or their tabs."""
+    game(r"""
+        local ns = client.LoadAddon()
+        Posts(ns)
+        Settle()
+        SlashCmdList.WOWMCP("aitab")
+        local tab = Tab()
+        client.Tick()
+        local picker = WowMCPModelPicker
+        assert(#client.dropdowns == 1 and picker == client.dropdowns[1] and picker:IsShown())
+        local point, to, relative, x, y = picker:GetPoint()
+        assert(point == "BOTTOMRIGHT" and to == tab and relative == "TOPRIGHT" and x == 0 and y == 4 and picker.width == 140)
+        local chat = {}
+        for i = 1, 10 do chat[_G["ChatFrame" .. i]], chat[_G["ChatFrame" .. i .. "Tab"]] = true, true end
+        for _, frame in ipairs(client.frames) do
+            for _, anchor in ipairs(frame.points) do
+                assert(frame == picker or not chat[anchor[2]], "another frame by the chat tabs")
+            end
+        end
+
+        -- Both picks on its button, in short; the menu has both groups, each under its title.
+        local menu = Menu(picker)
+        assert(menu[1] == "# Model" and menu[7] == "--" and menu[8] == "# Thinking" and #menu == 14, table.concat(menu, "\n"))
+        client.PickMenu(picker, "Extra high", "Thinking")
+        assert(picker.Text.text == "Default · xhigh")
+        client.PickMenu(picker, "Haiku", "Model")
+        assert(picker.Text.text == "Haiku · xhigh")
+        -- Default in either group is that group's.
+        client.PickMenu(picker, "Default", "Thinking")
+        assert(picker.Text.text == "Haiku" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku")
+        client.PickMenu(picker, "Max", "Thinking")
+        client.PickMenu(picker, "Default", "Model")
+        assert(picker.Text.text == "Default · max" and WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "max")
+
+        -- Shown and hidden with the AI tab, as before.
+        client.ClickTab(ChatFrame1)
+        client.Tick()
+        assert(not picker:IsShown())
+        client.ClickTab(tab)
+        client.Tick()
+        assert(picker:IsShown() and picker.Text.text == "Default · max")
+        SlashCmdList.WOWMCP("aitab off")
+        client.Tick()
+        assert(not picker:IsShown())
+    """)
+
+
+def test_picking_a_thinking_level(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        Settle()
+        client.Type("/ai first")
+        local tab = Tab()
+        client.Tick()
+        local picker = WowMCPModelPicker
+        assert(posted[1].effort == nil and picker.Text.text == "Default")
+
+        -- Picking one: kept for this character, said in the conversation, sent with the next questions.
+        -- The model stays as it was.
+        client.PickMenu(picker, "High", "Thinking")
+        assert(WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "high" and picker.Text.text == "Default · high")
+        local lines = client.Lines(tab)
+        assert(lines[#lines] == "|cffaaaaaaThe AI now thinks: High.|r", lines[#lines])
+        assert(not Has(client.chat, "now thinks") and (WowMCPDB.aiTab.models or {})["Thorgrim-Firemaw"] == nil)
+        client.Type("/ai where?")
+        assert(posted[2].question == "where?" and posted[2].effort == "high" and posted[2].model == nil)
+        client.PickMenu(picker, "Sonnet", "Model")
+        client.Type("/ai and?")
+        assert(posted[3].model == "sonnet" and posted[3].effort == "high" and picker.Text.text == "Sonnet · high")
+
+        -- The answer names both; the bridge says how hard it thinks by default, so Default can say it too.
+        AnswerFrom("Claude Sonnet · high", "Over there.", "opus", "max")
+        assert(Has(client.Lines(tab), "|cff33ff99[Claude Sonnet · high]|r Over there."))
+        assert(WowMCPDB.aiTab.bridgeEffort == "max" and WowMCPDB.aiTab.bridgeModel == "opus")
+        local menu = Menu(picker)
+        assert(menu[9] == "Default (Max)  |cffaaaaaawhat the bridge was started with, or Claude Code's own|r", menu[9])
+        assert(menu[12] == "*High  |cffaaaaaathorough|r" and menu[5]:sub(1, 1) == "*")
+        local said = TooltipLines(picker.tooltipFunc)
+        assert(said[1] == "AI model: Sonnet" and said[2] == "Thinking: High")
+
+        -- Kept over a /reload; the picker shows it again (General is selected after one).
+        ns = Reload()
+        posted = Posts(ns)
+        Settle()
+        picker = WowMCPModelPicker
+        client.ClickTab(tab)
+        client.Tick()
+        assert(picker:IsShown() and picker.Text.text == "Sonnet · high")
+        client.Type("/ai still?")
+        assert(posted[1].model == "sonnet" and posted[1].effort == "high")
+
+        -- Back to Default: no level sent, and the bridge's own is named.
+        client.PickMenu(picker, "Default", "Thinking")
+        lines = client.Lines(tab)
+        assert(lines[#lines] == "|cffaaaaaaThe AI now thinks at the level the bridge was started with (Max).|r", lines[#lines])
+        assert(WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == nil and picker.Text.text == "Sonnet")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "sonnet")
+        assert(TooltipLines(picker.tooltipFunc)[2] == "Thinking: Default (Max)")
+        client.Type("/ai and now?")
+        assert(posted[2].effort == nil and posted[2].model == "sonnet")
+        -- An answer that doesn't say leaves it; a bridge started without --effort doesn't know: plain Default.
+        AnswerFrom("Claude Sonnet", "Hm.", "opus")
+        assert(WowMCPDB.aiTab.bridgeEffort == "max")
+        AnswerFrom("Claude Sonnet", "Hm.", "opus", "")
+        assert(WowMCPDB.aiTab.bridgeEffort == nil and TooltipLines(picker.tooltipFunc)[2] == "Thinking: Default")
+
+        -- Per character: another one has its own pick.
+        client.PickMenu(picker, "Max", "Thinking")
+        UnitName = function() return "Grunta", nil end
+        client.Type("/ai mine?")
+        assert(posted[3].effort == nil and posted[3].model == nil and WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "max")
+    """)
+
+
+def test_thinking_command(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        Settle()
+        SlashCmdList.WOWMCP("aitab")
+        local tab = Tab()
+        client.Tick()
+        local function Shows(text) return Has(client.Lines(tab), text) end
+        client.Type("/ai")
+        assert(Shows("/ai thinking [level] - how hard the AI thinks (default, low, medium, high, xhigh, max); also on the AI tab's picker"))
+
+        -- "thinking" (or "effort"): how hard it thinks. With a level, in any case: picks it, and the picker follows.
+        client.Type("/ai thinking")
+        assert(Shows("The AI thinks: Default. /ai thinking <level> picks another: default, low, medium, high, xhigh, max."))
+        client.Type("/ai thinking HIGH")
+        assert(WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "high" and Shows("The AI now thinks: High."))
+        assert(WowMCPModelPicker.Text.text == "Default · high")
+        client.Type("/ask  Effort   xHigh ")
+        assert(WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "xhigh" and Shows("The AI now thinks: Extra high."))
+        assert(WowMCPModelPicker.Text.text == "Default · xhigh")
+        client.Type("/ai effort")
+        assert(Shows("The AI thinks: Extra high. /ai thinking <level> picks another"))
+
+        -- Another single word: the options, and nothing changes.
+        client.Type("/ai thinking turbo")
+        assert(Shows("/ai thinking <level> - how hard the AI thinks before answering (also picked on the AI tab): default "
+            .. "(what the bridge was started with, or Claude Code's own); low (Low, fastest); medium (Medium, balanced); "
+            .. "high (High, thorough); xhigh (Extra high, very thorough, slower); max (Max, slowest, deepest)"))
+        assert(WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "xhigh")
+        -- Default names the bridge's own level once the bridge has said it.
+        AnswerFrom("Claude · xhigh", "Ok.", "", "medium")
+        client.Type("/ai effort extra")
+        assert(Shows("default (what the bridge was started with, or Claude Code's own, Medium); low (Low, fastest)"))
+
+        client.Type("/ai thinking Default")
+        assert(WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == nil)
+        assert(Shows("The AI now thinks at the level the bridge was started with (Medium)."))
+        assert(WowMCPModelPicker.Text.text == "Default")
+        -- None of that went to the AI.
+        assert(#posted == 0)
+
+        -- Questions that only start with "thinking" or "effort" are questions.
+        for _, question in ipairs({ "thinking of rolling a druid, any tips?", "thinking?", "thinkings", "Thinking high please",
+                                    "effort.", "efforts to farm silk?", "is it worth the effort" }) do
+            client.Type("/ai " .. question)
+            assert(posted[#posted].question == question, question)
+        end
+        assert(#posted == 7 and WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == nil)
+
+        -- Typed in the AI tab, as /ai thinking.
+        client.ClickTab(tab)
+        client.EnterLine("thinking max")
+        assert(#posted == 7 and #client.sent == 0 and WowMCPDB.aiTab.efforts["Thorgrim-Firemaw"] == "max")
+        client.EnterLine("thinking about professions")
+        assert(posted[8].question == "thinking about professions" and posted[8].effort == "max")
     """)

@@ -135,10 +135,11 @@ local function Sent(m)
 end
 
 -- m.reply marks the bridge's answers to the player's questions: they belong to the AI conversation,
--- which has its own chat tab (Chat.lua). They also say which model the bridge uses by default.
+-- which has its own chat tab (Chat.lua). They also say which model the bridge uses by default, and
+-- how hard it thinks.
 local function Show(m, text, style)
 	if m.reply == true and ns.AIChat then
-		ns.AIChat.Answer(text, style, m.from, m.defaultModel)
+		ns.AIChat.Answer(text, style, m.from, m.defaultModel, m.defaultEffort)
 	else
 		ns.ShowMessage(text, style, m.from)
 	end

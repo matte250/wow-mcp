@@ -17,6 +17,10 @@ gets the prompt on stdin and prints the answer.
 The player picks which Claude model answers in game (Chat.lua), and each question says which.
 Only the models in MODELS reach Claude Code's command line (--model); without a pick, the
 bridge's own --model answers. Answers are signed with the model, e.g. "Claude Sonnet".
+How hard it thinks is picked the same way: only the levels in EFFORTS reach --effort; without a
+pick, the bridge's own --effort, else Claude Code's default. A level shows in the signature too,
+e.g. "Claude Sonnet · high". Claude Code (2.1.322, checked live) takes every level with every
+model in MODELS, and ignores a level it doesn't know with a warning, so no pick fails an answer.
 
 Being long-lived, it also fetches each new online snapshot of the player's auction house (about
 hourly) when Blizzard API credentials are set up, so price history builds up even when nobody asks
@@ -39,7 +43,7 @@ import tempfile
 import textwrap
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -64,6 +68,8 @@ HISTORY_FILE = "bridge-history.json"  # in the addon's folder, next to server-st
 # The models the player can pick in game (MODELS in Chat.lua), by Claude Code's alias for each, with
 # the name answers are signed with. Nothing else from the game reaches the command line.
 MODELS = {"fable": "Fable", "opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku"}
+# How hard it thinks, as the player can pick it in game (EFFORTS in Chat.lua): Claude Code's --effort levels.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 SYSTEM_PROMPT = """\
 The player typed this question into World of Warcraft's chat (with /ai, or in its AI chat tab) \
@@ -102,8 +108,9 @@ class AgentTimeout(AgentError):
     pass
 
 
-# (prompt, model, player) -> answer; model None: its own; player: who asks, for its tools; raises AgentError
-Agent = Callable[[str, str | None, str | None], str]
+# (prompt, model, player, effort) -> answer; model, effort None: its own; player: who asks, for its tools;
+# raises AgentError
+Agent = Callable[[str, str | None, str | None, str | None], str]
 
 
 def _player(post: dict) -> str | None:
@@ -111,13 +118,21 @@ def _player(post: dict) -> str | None:
     return player if isinstance(player, str) and player else None
 
 
-def _model(post: dict) -> str | None:
-    """The model the player picked, if it's one of MODELS; anything else is left out."""
-    model = post.get("model")
-    if model is None or (isinstance(model, str) and model in MODELS):
-        return model
-    log.warning("ignoring the model picked in game, %.40r: not one of %s", model, ", ".join(MODELS))
+def _picked(post: dict, key: str, allowed: Collection[str], what: str) -> str | None:
+    """What the player picked in game, if it's one of `allowed`; anything else is left out."""
+    value = post.get(key)
+    if value is None or (isinstance(value, str) and value in allowed):
+        return value
+    log.warning("ignoring the %s picked in game, %.40r: not one of %s", what, value, ", ".join(allowed))
     return None
+
+
+def _model(post: dict) -> str | None:
+    return _picked(post, "model", MODELS, "model")
+
+
+def _effort(post: dict) -> str | None:
+    return _picked(post, "effort", EFFORTS, "thinking level")
 
 
 @dataclass(frozen=True)
@@ -137,14 +152,15 @@ class Question:
     text: str
     player: str | None = None
     model: str | None = None  # one of MODELS, picked in game; None: the bridge's own
+    effort: str | None = None  # one of EFFORTS, likewise
 
     @classmethod
     def from_post(cls, value: object) -> "Question | None":
-        """The question in a post from Chat.lua ({question, player, model}), if it is one."""
+        """The question in a post from Chat.lua ({question, player, model, effort}), if it is one."""
         if not isinstance(value, dict) or not isinstance(value.get("question"), str):
             return None
         text = " ".join(value["question"].split())[:MAX_QUESTION]
-        return cls(text, _player(value), _model(value)) if text else None
+        return cls(text, _player(value), _model(value), _effort(value)) if text else None
 
     def prompt(self, earlier: Sequence[Exchange] = (), now: float | None = None,
                notes: Sequence[memory.Note] = ()) -> str:
@@ -317,12 +333,13 @@ def chat_lines(text: str, width: int = LINE_WIDTH, limit: int = MAX_LINES) -> li
 
 
 def publish_message(text: str, style: str = "chat", sender: str = SENDER, reply: bool = False,
-                    default_model: str | None = None) -> int:
+                    default_model: str | None = None, default_effort: str | None = None) -> int:
     """Show text in game, through the messages feature (tools/messages.py)."""
     # Imported on first use: importing the tools package loads every feature.
     from wow_mcp.tools.messages import publish_message as publish
 
-    return publish(text, style=style, sender=sender, reply=reply, default_model=default_model)
+    return publish(text, style=style, sender=sender, reply=reply, default_model=default_model,
+                   default_effort=default_effort)
 
 
 # Agents -----------------------------------------------------------------------------------
@@ -336,7 +353,7 @@ def mcp_config(addons_dir: Path, player: str | None = None) -> dict:
     return {"mcpServers": {"wow": server}}
 
 
-def claude_command(model: str | None = None) -> list[str]:
+def claude_command(model: str | None = None, effort: str | None = None) -> list[str]:
     """Headless Claude Code with only the wow tools and web lookups, apart from the user's own
     settings, MCP servers and sessions."""
     command = [
@@ -351,7 +368,11 @@ def claude_command(model: str | None = None) -> list[str]:
         "--no-session-persistence",
         "--append-system-prompt", "{system_prompt}",
     ]
-    return command + ["--model", model] if model else command
+    if model:
+        command += ["--model", model]
+    if effort:
+        command += ["--effort", effort]
+    return command
 
 
 WINDOWS = sys.platform == "win32"
@@ -405,14 +426,25 @@ def launcher_problem(command: list[str], windows: bool = WINDOWS) -> str | None:
             "environment, as WOW_MCP_SYSTEM_PROMPT and WOW_MCP_MCP_CONFIG.")
 
 
+def _with_option(command: list[str], option: str, value: str) -> list[str]:
+    if option in command:
+        i = command.index(option)
+        command = command[:i] + command[i + 2 :]
+    return command + [option, value]
+
+
 def with_model(command: list[str], model: str) -> list[str]:
     """Claude Code's command with --model set to one of MODELS, in place of its own."""
     if model not in MODELS:  # never anything else from the game on the command line
         raise ValueError(f"not a model the player can pick: {model!r}")
-    if "--model" in command:
-        i = command.index("--model")
-        command = command[:i] + command[i + 2 :]
-    return command + ["--model", model]
+    return _with_option(command, "--model", model)
+
+
+def with_effort(command: list[str], effort: str) -> list[str]:
+    """Claude Code's command with --effort set to one of EFFORTS, in place of its own."""
+    if effort not in EFFORTS:  # likewise
+        raise ValueError(f"not a thinking level the player can pick: {effort!r}")
+    return _with_option(command, "--effort", effort)
 
 
 def agent_answer(out: str, err: str, returncode: int) -> str:
@@ -435,8 +467,9 @@ class CommandAgent:
 
     In the command, {system_prompt} and {mcp_config} (JSON) are filled in; both are also in its
     environment, as WOW_MCP_SYSTEM_PROMPT and WOW_MCP_MCP_CONFIG. A model (one of MODELS) is
-    given to Claude Code's command as --model. Who asks goes to the wow tools, in the MCP config
-    and the environment (memory.PLAYER_ENV), so their memory is that player's.
+    given to Claude Code's command as --model, a thinking level (one of EFFORTS) as --effort. Who
+    asks goes to the wow tools, in the MCP config and the environment (memory.PLAYER_ENV), so
+    their memory is that player's.
     """
 
     def __init__(self, command: list[str], addons_dir: Path, timeout: float = TIMEOUT):
@@ -457,10 +490,13 @@ class CommandAgent:
         env.pop(memory.PLAYER_ENV, None)
         return command, {**env, memory.PLAYER_ENV: player} if player else env
 
-    def __call__(self, prompt: str, model: str | None = None, player: str | None = None) -> str:
+    def __call__(self, prompt: str, model: str | None = None, player: str | None = None,
+                 effort: str | None = None) -> str:
         command, env = self._for(player) if player else (self.command, self.env)
         if model is not None:
             command = with_model(command, model)
+        if effort is not None:
+            command = with_effort(command, effort)
         try:
             # Its own process group, so a timeout also stops whatever it started (MCP servers).
             # On Windows its output is read as UTF-8, not in the system's code page.
@@ -512,13 +548,14 @@ class Bridge:
     def __init__(self, addons_dir: Path, agent: Agent, publish: Callable[..., int] = publish_message,
                  sender: str = SENDER, history: History | None = None,
                  background: Sequence[Callable[[threading.Event], None]] = (),
-                 models: bool = False, model: str | None = None):
+                 models: bool = False, model: str | None = None, effort: str | None = None):
         self.out_dir = addons_dir / ADDON / "out"
         self.agent = agent
         self.publish = publish
         self.sender = sender
-        self.models = models  # the agent is Claude Code, so the player can pick its model
+        self.models = models  # the agent is Claude Code, so the player can pick its model and thinking level
         self.model = model  # the one it answers with otherwise (--model), if known
+        self.effort = effort  # how hard it thinks otherwise (--effort); None: Claude Code's default
         self.history = History(addons_dir / ADDON / HISTORY_FILE) if history is None else history
         # Long-term memory, apart from the game's folder: every exchange, and the agent's notes.
         self.archive = memory.Archive()
@@ -557,6 +594,8 @@ class Bridge:
         elif item:
             # memory.read_log reads this line and the answer's back (import-logs): keep their wording.
             log.info("%s asks%s: %s", item.player or "the player", f" ({item.model})" if item.model else "", item.text)
+            if item.effort:  # a line of its own, so the one above keeps its wording
+                log.info("thinking picked in game: %s", item.effort)
         else:
             log.warning("ignoring a post that isn't a question: %r", post.value)
             return
@@ -580,16 +619,19 @@ class Bridge:
                 self.answer(item)
 
     def answer(self, question: Question) -> None:
-        model = question.model
+        model, effort = question.model, question.effort
         if model and not self.models:
             log.info("ignoring the model picked in game (%s): --agent answers with its own", model)
             model = None
+        if effort and not self.models:
+            log.info("ignoring the thinking level picked in game (%s): --agent thinks its own way", effort)
+            effort = None
         answer = ""  # stays empty if the agent fails: failures don't become part of the conversation
         try:
-            # The conversation is the same whichever model answers.
+            # The conversation is the same whichever model answers, however hard it thinks.
             prompt = question.prompt(self.history.recent(question.player), self.history.clock(),
                                      self.notes.about(question.player) if question.player else ())
-            answer = self.agent(prompt, model, question.player)
+            answer = self.agent(prompt, model, question.player, effort)
             text = answer or "I have no answer to that."
         except AgentTimeout as e:
             log.error("agent timed out: %s", e)
@@ -611,19 +653,26 @@ class Bridge:
                 log.warning("couldn't archive this exchange: %s", e)
         log.info("answer: %s", text)
         # One message (the game prints it one chat line per line), so an answer costs one slot.
-        self.say("\n".join(chat_lines(text)), self.signed(model))
+        self.say("\n".join(chat_lines(text)), self.signed(model, effort))
 
-    def signed(self, model: str | None) -> str:
-        """Who an answer is from: e.g. "Claude Sonnet" when the sonnet model answered it."""
-        name = MODELS.get(model or self.model or "") if self.models else None
-        return f"{self.sender} {name}" if name else self.sender
+    def signed(self, model: str | None, effort: str | None = None) -> str:
+        """Who an answer is from: e.g. "Claude Sonnet" when the sonnet model answered it, "Claude Sonnet · high"
+        when it also thought at the high level (Claude Code's default level isn't named)."""
+        if not self.models:
+            return self.sender
+        name = MODELS.get(model or self.model or "")
+        level = effort or (self.effort if self.effort in EFFORTS else None)
+        signed = f"{self.sender} {name}" if name else self.sender
+        return f"{signed} · {level}" if level else signed
 
     def say(self, text: str, sender: str | None = None) -> None:
         try:
             # A reply: the game shows it in the conversation, in its AI chat tab. It also tells the
-            # game's model picker what answers when the player picks none.
+            # game's picker what answers, and how hard it thinks, when the player picks none.
             default = self.model if self.models and self.model in MODELS else ""
-            self.publish(text, style="chat", sender=sender or self.sender, reply=True, default_model=default)
+            effort = self.effort if self.models and self.effort in EFFORTS else ""
+            self.publish(text, style="chat", sender=sender or self.sender, reply=True, default_model=default,
+                         default_effort=effort)
         except Exception:
             log.exception("couldn't show this in game: %s", text)
 
@@ -670,6 +719,9 @@ def main() -> None:
                         f"(default: ${AGENT_ENV})")
     parser.add_argument("--model", help="model for the Claude Code agent when the player hasn't picked one in game, "
                         "e.g. sonnet")
+    parser.add_argument("--effort", choices=EFFORTS,
+                        help="how hard the Claude Code agent thinks when the player hasn't picked a level in game "
+                        "(default: Claude Code's own)")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help="seconds an answer may take (default: %(default)s)")
     parser.add_argument("--history", type=int, default=HISTORY, metavar="N",
@@ -685,6 +737,8 @@ def main() -> None:
         parser.error(f"pass --addons-dir or set {ADDONS_DIR_ENV}")
     if args.agent and args.model:
         parser.error("--model only applies to the default agent")
+    if args.agent and args.effort:
+        parser.error("--effort only applies to the default agent")
     if args.history < 0 or args.history_minutes < 0:
         parser.error("--history and --history-minutes can't be negative")
     addons_dir = Path(args.addons_dir).expanduser()
@@ -692,7 +746,7 @@ def main() -> None:
         sys.exit(f"{ADDON} isn't installed in {addons_dir}. Run wow-mcp-install first.")
     lock = claim(addons_dir / ADDON)  # noqa: F841 (held until exit)
     os.environ[ADDONS_DIR_ENV] = str(addons_dir)  # where publish_message sends answers
-    asked = split_command(args.agent) if args.agent else claude_command(args.model)
+    asked = split_command(args.agent) if args.agent else claude_command(args.model, args.effort)
     command = resolve_command(asked)
     if not command:
         sys.exit(f"Agent command not found: {args.agent or asked[0]}")
@@ -708,13 +762,15 @@ def main() -> None:
     logging.getLogger("httpx2").setLevel(logging.WARNING)  # a line per request otherwise
     history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
     background = auction_refresh(addons_dir, args.no_auction_refresh)
-    bridge = Bridge(addons_dir, agent, history=history, background=background, models=not args.agent, model=args.model)
+    bridge = Bridge(addons_dir, agent, history=history, background=background, models=not args.agent, model=args.model,
+                    effort=args.effort)
     signal.signal(signal.SIGTERM, lambda *_: bridge.stop.set())
     if args.agent:
         log.info("Answering /ai questions from %s with %s", addons_dir, command[0])
     else:
-        log.info("Answering /ai questions from %s with Claude Code: %s, or the model the player picks (%s)",
-                 addons_dir, args.model or "its default model", ", ".join(MODELS))
+        log.info("Answering /ai questions from %s with Claude Code: %s, or the model the player picks (%s); thinking: "
+                 "%s, or the level the player picks (%s)", addons_dir, args.model or "its default model",
+                 ", ".join(MODELS), args.effort or "its default level", ", ".join(EFFORTS))
     try:
         bridge.serve()
     except KeyboardInterrupt:
