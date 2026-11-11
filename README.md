@@ -116,9 +116,13 @@ make a Task Scheduler task that runs `uv` with the arguments
 `run --directory <checkout>\server wow-mcp-bridge --addons-dir "<AddOns folder>"`.
 
 It remembers your recent questions (by default the last 8 from the past hour), so follow-ups
-like "and the next one?" work. `/ai new` starts a fresh conversation. `--history` and
-`--history-minutes` change how much it remembers (`--history 0` turns it off). Only one bridge
-can answer for a game at a time; a second one refuses to start.
+like "and the next one?" work, and it keeps every exchange for good in
+`~/.local/share/wow-mcp/conversations.jsonl`, which it searches when you refer to an earlier
+conversation. It also keeps notes about each character (preferences, projects, plans) in `notes.json`
+there, and every question comes with them. `/ai new` starts a fresh conversation; the archive and notes
+stay. `--history` and `--history-minutes` change the short-term part (`--history 0` turns it off).
+`cd server && uv run wow-mcp-memory import-logs <logs>` adds exchanges from old bridge logs. Only one
+bridge can answer for a game at a time; a second one refuses to start. Its log lines start with the time.
 
 ## Tools
 
@@ -140,6 +144,7 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress, and rewards: the XP this character gets, money and items, read from the game) |
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
+| Memory | `search_conversations` (every earlier /ai conversation, kept for good: all words in any case, items by name or ID, by days or date; newest first, with how long ago), `remember` / `forget_note` / `list_notes` (lasting notes about each character, in every /ai prompt) |
 | Diagnostics | `get_status` (is the addon up to date, live updates, slots left; says when to /reload or reinstall) |
 
 At the auction house the addon takes a full scan whenever the game allows one (every 15 minutes),
@@ -233,7 +238,7 @@ Layout: one file per feature on each side, plugged into small registries.
   can ask for), `Stream.lua` (sending to the server), then one file per feature (`Map.lua`,
   `Player.lua`, `Quests.lua`, ...).
 - `server/wow_mcp/`: `app.py` (shared helpers), `item_text.py` (the item markup, shared by the tools and the bridge), `tools/` (one module per feature, picked up
-  automatically), `transport.py` / `stream.py` (the two directions; `opens_windows.py` is how Windows sees file opens, `locking.py` the file locks of both systems), `battlenet.py` (Blizzard's API), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
+  automatically), `transport.py` / `stream.py` (the two directions; `opens_windows.py` is how Windows sees file opens, `locking.py` the file locks of both systems), `battlenet.py` (Blizzard's API), `memory.py` (the /ai conversation archive and notes, `wow-mcp-memory`), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
 - `server/tests/`: `stub/client.lua` runs the addon in Lua, with game APIs in `stub/apis/` (one file
   per area). There's one `test_<feature>.py` per feature, and `conftest.py` has the fixtures
   (`run_client` for scripted sessions, `live_game` for end-to-end runs against the real tools).
