@@ -91,7 +91,10 @@ to `wow-mcp-bridge`, a small background service. It runs Claude Code headless wi
 shows the answer in the AI tab, with map markers when useful. Shift-clicked item links work.
 
 The conversation has its own chat tab, so answers don't drown in a city's chat: your question,
-"Thinking…", then the answer. The tab is made the first time you ask and flashes when a new answer
+a status line like "Thinking… 1:24 · checking auction prices" (how long it's been and what the AI
+is doing), then the answer. The AI may take as long as it needs while it works. If wow-mcp-bridge
+doesn't confirm a question within 15 seconds, the line says "No answer from wow-mcp-bridge. Is it
+running?"; if it then goes quiet for too long, "The AI seems to have stopped responding." The tab is made the first time you ask and flashes when a new answer
 arrives while you're in another one. In the AI tab, plain lines go to the AI; lines starting with `/`,
 and replies with R, work as usual. `/mcp aitab both` also shows the conversation in your main chat
 window, `/mcp aitab off` only there. If you close or rename the tab, the AI talks in the main window,
@@ -115,7 +118,7 @@ cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_for
 
 To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
-`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--effort` (low, medium, high, xhigh or max) how hard it thinks when you haven't picked a level; `--timeout` and `--agent` change how it answers (with `--agent`, picks are ignored).
+`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--effort` (low, medium, high, xhigh or max) how hard it thinks when you haven't picked a level; `--timeout` (default 120) stops an answer after that many seconds without any sign of life from Claude Code (thinking, tool calls, writing); `--max-time` (default 1800) stops any answer, as a guard against runaways, and is the only limit for `--agent`, whose output isn't watched; `--agent` changes how it answers (with `--agent`, picks are ignored). Each `/ai` question costs a live-update slot for its acknowledgement, usually 0–2 for progress, and one for the answer.
 
 On Windows, run the same command in a terminal you leave open while you play. To start it at logon instead,
 make a Task Scheduler task that runs `uv` with the arguments

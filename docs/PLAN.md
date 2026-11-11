@@ -67,7 +67,12 @@ startup, so after the one restart for this restructure, every feature only needs
   `bridge.MODELS`), `effort` one of its `EFFORTS` (must match `bridge.EFFORTS`, Claude Code's `--effort`
   levels). The bridge passes `--model`/`--effort` only for those, signs answers "Claude <Model>[ · <level>]",
   and replies carry `defaultModel` and `defaultEffort`. The agent
-  contract is `agent(prompt, model, player, effort)`; `player` reaches the wow tools as `WOW_MCP_PLAYER`.
+  contract is `agent(prompt, model, player, effort, progress)` (`progress.saw(step, tool)` on each sign of life, `progress.tick()` about every second, `bridge.Progress`); `player` reaches the wow tools as `WOW_MCP_PLAYER`.
+- **/ai progress**: the bridge acks each question and sends progress with `publish_status(status, text,
+  question, quiet)`: `messages` entries `{ id, status = "ack" | "progress", text, session, post, quiet, at }`,
+  routed to `ns.AIChat.Status(m)`, never shown as messages; replies carry `session`/`post`, and a question's
+  notes are dropped when its newer note or answer is added. `ns.Stream.Post(value)` returns `post, session`.
+  Stub chat windows have `RemoveMessagesByPredicate` and `TransformMessages`.
 - **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
   `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
   for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and
