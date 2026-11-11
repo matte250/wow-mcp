@@ -1737,6 +1737,38 @@ WHO = plan(
 )
 
 
+def test_npc_names_stand_out_in_the_steps(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + WHO + r"""]])
+        client.Wait()
+        local BLUE = "|cff8fd3ff"
+        -- Named in the text: coloured, so the player can tell hovering shows them.
+        assert(row(1).Text.text:find(BLUE .. "Marshal McBride|r", 1, true), row(1).Text.text)
+        assert(row(2).Text.text:find(BLUE .. "Kobold Vermin|r", 1, true), row(2).Text.text)
+        -- Not named as such ("Workers"): left alone.
+        assert(not row(2).Text.text:find(BLUE .. "Kobold Worker", 1, true) and select(2, row(2).Text.text:gsub(BLUE, "")) == 1)
+        -- A step without NPCs has nothing coloured.
+        assert(not row(4).Text.text:find(BLUE, 1, true))
+        -- A done step stays plain grey.
+        row(1).OnMouseUp(row(1), "RightButton")
+        client.Wait()
+        assert(not row(1).Text.text:find(BLUE, 1, true), row(1).Text.text)
+
+        -- Never inside an item token: the next mention outside one, in any case.
+        WowMCP_Receive({ seq = 1000, plan = { id = 1000, title = "Tokens", steps = {
+            { text = "Bring {item:2318:Light Leather} to light leather Larry",
+              npcs = { { id = 5, name = "Light Leather" } } },
+        } } })
+        client.Wait()
+        local text = row(1).Text.text
+        assert(text:find("|T134252:0|t", 1, true), "the item token still shows as the item: " .. text)
+        assert(select(2, text:gsub(BLUE, "")) == 1 and text:find(BLUE .. "light leather|r Larry", 1, true), text)
+        noErrors()
+    """)
+
+
 def test_npcs_beside_a_tooltip_near_the_screen_edge(game):
     game(r"""
         client.LoadAddon()

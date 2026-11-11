@@ -387,6 +387,34 @@ local function StepText(n)
 	return ns.Escape(steps[n].text)
 end
 
+-- The step's NPCs (step.npcs) named in its text stand out, so the player can tell that hovering it
+-- shows them. Only the first mention of each, never inside an item token, where it would break it.
+local NPC_COLOR = "|cff8fd3ff"
+
+local function InToken(text, at)
+	local before = text:sub(1, at)
+	return select(2, before:gsub("{", "")) > select(2, before:gsub("}", ""))
+end
+
+local function MarkNpcs(text, npcs)
+	local lower, marks = text:lower(), {}
+	for _, npc in ipairs(npcs or {}) do
+		local name = npc.name and ns.Escape(npc.name):lower()
+		local from = name and name ~= "" and lower:find(name, 1, true)
+		while from and InToken(text, from) do from = lower:find(name, from + 1, true) end
+		if from then marks[#marks + 1] = { from, from + #name - 1 } end
+	end
+	table.sort(marks, function(a, b) return a[1] > b[1] end) -- from the end, so earlier places stay put
+	local stop
+	for _, m in ipairs(marks) do
+		if not stop or m[2] < stop then -- one name inside another: the first one found wins
+			text = text:sub(1, m[1] - 1) .. NPC_COLOR .. text:sub(m[1], m[2]) .. "|r" .. text:sub(m[2] + 1)
+			stop = m[1]
+		end
+	end
+	return text
+end
+
 -- After the current step is done: the next step not done after it, else the first one not done;
 -- nil when all are done.
 local function FixCurrent()
@@ -1169,7 +1197,8 @@ local function FillRow(row, step, current, done)
 	row.Check:SetShown(done)
 	row.Current:SetShown(current)
 	local color = done and GREY or current and WHITE or LIGHT
-	row.Text:SetText(ns.RenderItems(string.format("%s%d.|r %s%s|r", current and GOLD or color, step.n, color, StepText(step.n))))
+	local text = done and StepText(step.n) or MarkNpcs(StepText(step.n), step.npcs)
+	row.Text:SetText(ns.RenderItems(string.format("%s%d.|r %s%s|r", current and GOLD or color, step.n, color, text)))
 	local progress = current and not done and ProgressText(step)
 	row.Progress:SetText(progress or "")
 	row.Progress:SetShown(progress and true or false)
