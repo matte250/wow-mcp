@@ -25,13 +25,15 @@ MAX_TEXT = 4000
 MAX_SENDER = 40
 
 
-def publish_message(text: str, style: str = "chat", sender: str = "Claude", reply: bool = False) -> int:
+def publish_message(text: str, style: str = "chat", sender: str = "Claude", reply: bool = False,
+                    default_model: str | None = None) -> int:
     """Show text in the player's game and return the message's id (other features use this too).
 
     style: "chat" (printed with the sender's name), "center" (big text in the middle of the
     screen) or "both". reply: it answers what the player asked in game (/ai, the bridge), so it
-    shows in the game's AI chat tab with their question. Messages sent while the game is closed
-    show at the next login.
+    shows in the game's AI chat tab with their question. default_model (with reply): the model
+    the bridge answers with when the player hasn't picked one, "" if it doesn't know, for the
+    game's model picker. Messages sent while the game is closed show at the next login.
     """
     if style not in STYLES:
         raise ValueError(f"style must be one of {', '.join(STYLES)}, not {style!r}")
@@ -46,6 +48,8 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude", repl
         message = {"id": seq, "text": text, "style": style, "from": sender, "at": int(time.time())}
         if reply:
             message["reply"] = True
+            if default_model is not None:
+                message["defaultModel"] = default_model
         kept.append(message)
         state["messages"] = kept
 

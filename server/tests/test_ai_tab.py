@@ -1,5 +1,6 @@
 """The AI conversation's own chat tab (Chat.lua, Messages.lua): made once, when first needed; the
-question, "Thinking…" and the answer there, per /mcp aitab; typing there asks the AI."""
+question, "Thinking…" and the answer there, per /mcp aitab; typing there asks the AI. The model
+picker on the tab and /ai model pick which model answers."""
 
 import sys
 
@@ -11,7 +12,7 @@ import json, sys
 from wow_mcp.tools import messages
 args = json.loads(sys.argv[1])
 messages.publish_message(args["text"], args.get("style", "chat"), args.get("sender", "Claude"),
-                         reply=args.get("reply", False))
+                         reply=args.get("reply", False), default_model=args.get("defaultModel"))
 """
 
 HELPERS = """
@@ -59,6 +60,20 @@ end
 local function Answer(text)
     client.Publish('{"text":"' .. text .. '","reply":true}')
     client.Wait()
+end
+
+-- An answer as the bridge sends it: signed with the model, and saying which one it uses by default.
+local function AnswerFrom(sender, text, defaultModel)
+    client.Publish('{"text":"' .. text .. '","reply":true,"sender":"' .. sender .. '","defaultModel":"' .. defaultModel .. '"}')
+    client.Wait()
+end
+
+-- The texts of the picker's menu, with the picked one marked "*".
+local function Menu(picker)
+    local texts = {}
+    for _, radio in ipairs(client.OpenMenu(picker)) do texts[#texts + 1] = (radio:IsSelected() and "*" or "") .. radio.text end
+    picker:CloseMenu()
+    return texts
 end
 
 -- The "AI:" label over the chat box's header.
@@ -211,8 +226,13 @@ def test_bridge_answers_are_replies(addons):
 
     messages.publish_message("An answer.", reply=True)
     messages.publish_message("A heads-up.")
+    # The bridge's answers also say what model it answers with by default.
+    messages.publish_message("Signed.", sender="Claude Sonnet", reply=True, default_model="opus")
     sent = transport().load_state()["messages"]
-    assert [(m["text"], m.get("reply")) for m in sent] == [("An answer.", True), ("A heads-up.", None)]
+    assert [(m["text"], m.get("reply"), m.get("defaultModel")) for m in sent] == [
+        ("An answer.", True, None), ("A heads-up.", None, None), ("Signed.", True, "opus"),
+    ]
+    assert sent[-1]["from"] == "Claude Sonnet"
 
 
 @pytest.mark.parametrize("style", ["classic", "im"])
@@ -365,4 +385,237 @@ def test_no_room_for_a_tab(game):
         client.Type("/ai and?")
         assert(client.windowsMade == 0 and Has(client.chat, "Asking… where?") and Has(client.chat, "Asking… and?"))
         assert(Count(client.chat, "all 10 chat windows are in use") == 1)
+    """)
+
+
+def test_model_picker_shows_only_on_the_ai_tab(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        Posts(ns)
+        Settle()
+        -- Blizzard's dropdown, made at login, but there's no AI tab to show it on yet.
+        local picker = WowMCPModelPicker
+        assert(picker == client.dropdowns[#client.dropdowns] and picker.template == "WowStyle1DropdownTemplate")
+        assert(not picker:IsShown() and picker.parent ~= ChatFrame1 and picker.parent.strata == "LOW")
+
+        -- At the AI tab's top right while it's selected; not on the other tabs.
+        SlashCmdList.WOWMCP("aitab")
+        local tab = Tab()
+        client.Tick()
+        assert(picker:IsShown() and picker.Text.text == "Default")
+        local point, to, relative = picker:GetPoint()
+        assert(point == "BOTTOMRIGHT" and to == tab and relative == "TOPRIGHT")
+        client.ClickTab(ChatFrame1)
+        client.Tick()
+        assert(not picker:IsShown())
+        client.ClickTab(tab)
+        client.Tick()
+        assert(picker:IsShown())
+
+        -- Faded like the AI tab's own chat tab, unless the mouse is on it or its menu is open.
+        _G[tab:GetName() .. "Tab"]:SetAlpha(0.4)
+        client.Tick()
+        assert(picker:GetAlpha() == 0.4)
+        picker.mouseOver = true
+        client.Tick()
+        assert(picker:GetAlpha() == 1)
+        picker.mouseOver = false
+        client.OpenMenu(picker)
+        client.Tick()
+        assert(picker:GetAlpha() == 1)
+        picker:CloseMenu()
+        client.Tick()
+        assert(picker:GetAlpha() == 0.4)
+
+        -- Not while the AI talks in the main window only, nor once the tab is closed or renamed.
+        SlashCmdList.WOWMCP("aitab off")
+        client.Tick()
+        assert(not picker:IsShown())
+        SlashCmdList.WOWMCP("aitab on")
+        client.Tick()
+        assert(picker:IsShown())
+        FCF_Close(tab)
+        client.Tick()
+        assert(not picker:IsShown())
+        SlashCmdList.WOWMCP("aitab")
+        client.Tick()
+        assert(Tab() == tab and picker:IsShown())
+        FCF_SetWindowName(tab, "Claude")
+        client.Tick()
+        assert(not picker:IsShown())
+        -- A new AI tab next to the renamed one: the picker moves there.
+        SlashCmdList.WOWMCP("aitab")
+        local again = Tab()
+        client.Tick()
+        assert(again ~= tab and picker:IsShown() and select(2, picker:GetPoint()) == again)
+    """)
+
+
+def test_picking_a_model(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        Settle()
+        client.Type("/ai first")
+        local tab = Tab()
+        client.Tick()
+        local picker = WowMCPModelPicker
+        assert(posted[1].model == nil and picker:IsShown())
+
+        -- The menu: every model with what it's good for; Default picked.
+        local menu = table.concat(Menu(picker), "\n")
+        assert(menu == table.concat({
+            "*Default  |cffaaaaaawhat the bridge was started with|r",
+            "Fable  |cffaaaaaathe most capable, slowest|r",
+            "Opus  |cffaaaaaavery capable|r",
+            "Sonnet  |cffaaaaaafast and strong|r",
+            "Haiku  |cffaaaaaafastest, for simple lookups|r",
+        }, "\n"), menu)
+
+        -- Picking one: kept for this character, said in the conversation, sent with the next questions.
+        client.PickMenu(picker, "Sonnet")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "sonnet" and picker.Text.text == "Sonnet")
+        local lines = client.Lines(tab)
+        assert(lines[#lines] == "|cffaaaaaaAnswers now come from Sonnet.|r", lines[#lines])
+        assert(#posted == 1 and not Has(client.chat, "Answers now"))
+        client.Type("/ai where?")
+        assert(posted[2].question == "where?" and posted[2].model == "sonnet")
+
+        -- The answer names the model; the bridge says what it uses by default, so Default can say it too.
+        AnswerFrom("Claude Sonnet", "Over there.", "opus")
+        lines = client.Lines(tab)
+        assert(lines[#lines - 1] == "|cff33ff99[Claude Sonnet]|r Over there.", lines[#lines - 1])
+        assert(WowMCPDB.aiTab.bridgeModel == "opus")
+        assert(Menu(picker)[1] == "Default (Opus)  |cffaaaaaawhat the bridge was started with|r")
+        assert(Menu(picker)[4]:sub(1, 1) == "*")
+
+        -- Kept over a /reload; the picker shows it again (General is selected after one).
+        ns = Reload()
+        posted = Posts(ns)
+        Settle()
+        picker = WowMCPModelPicker
+        assert(not picker:IsShown())
+        client.ClickTab(tab)
+        client.Tick()
+        assert(picker:IsShown() and picker.Text.text == "Sonnet")
+        client.Type("/ai still sonnet?")
+        assert(posted[1].model == "sonnet")
+
+        -- Back to Default: no model sent, and the bridge's own is named.
+        client.PickMenu(picker, "Default")
+        lines = client.Lines(tab)
+        assert(lines[#lines] == "|cffaaaaaaAnswers now come from the model the bridge was started with (Opus).|r", lines[#lines])
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == nil and picker.Text.text == "Default (Opus)")
+        client.Type("/ai and now?")
+        assert(posted[2].question == "and now?" and posted[2].model == nil)
+        -- A bridge started without --model doesn't know: plain Default again.
+        AnswerFrom("Claude", "Hm.", "")
+        assert(WowMCPDB.aiTab.bridgeModel == nil and picker.Text.text == "Default")
+
+        -- Per character: another one has its own pick.
+        client.PickMenu(picker, "Haiku")
+        UnitName = function() return "Grunta", nil end
+        client.Type("/ai mine?")
+        assert(posted[3].model == nil and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku")
+
+        -- The tooltip says what it is.
+        local said = {}
+        local tooltip = setmetatable({}, { __index = function(_, name)
+            return function(_, text) if name == "SetText" or name == "AddLine" then said[#said + 1] = text end end
+        end })
+        picker.tooltipFunc(tooltip)
+        assert(said[1] == "AI model: Default" and said[2]:find("Which Claude model answers your /ai questions", 1, true))
+    """)
+
+
+def test_model_command(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        Settle()
+        SlashCmdList.WOWMCP("aitab")
+        local tab = Tab()
+        client.Tick()
+        local function Said(text) return Has(client.Lines(tab), text) end
+        client.Type("/ai")
+        assert(Said("/ai model [name] - which Claude model answers (default, fable, opus, sonnet, haiku); the AI tab has a picker too"))
+
+        -- "model": which one answers. With a name, in any case: picks it, and the picker follows.
+        client.Type("/ai model")
+        assert(Said("Answers come from Default. /ai model <name> picks another: default, fable, opus, sonnet, haiku."))
+        client.Type("/ai model HAIKU")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku" and Said("Answers now come from Haiku."))
+        assert(WowMCPModelPicker.Text.text == "Haiku")
+        client.Type("/ask  Model   fable ")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable" and WowMCPModelPicker.Text.text == "Fable")
+        client.Type("/ai model")
+        assert(Said("Answers come from Fable."))
+
+        -- Another single word: the options, and nothing changes.
+        client.Type("/ai model gpt-5")
+        assert(Said("/ai model <name> - which Claude model answers you (also picked on the AI tab): default (what the "
+            .. "bridge was started with); fable (Fable, the most capable, slowest); opus (Opus, very capable); "
+            .. "sonnet (Sonnet, fast and strong); haiku (Haiku, fastest, for simple lookups)"))
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable")
+
+        client.Type("/ai model default")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == nil and Said("Answers now come from the model the bridge was started with."))
+        assert(WowMCPModelPicker.Text.text == "Default")
+        -- None of that went to the AI.
+        assert(#posted == 0 and not Said("[You]"))
+
+        -- Questions that only start with "model" are questions.
+        for _, question in ipairs({ "model of the Deeprun Tram?", "model?", "models", "Model sonnet please", "modeling clay vendor" }) do
+            client.Type("/ai " .. question)
+            assert(posted[#posted].question == question, question)
+        end
+        assert(#posted == 5 and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == nil)
+
+        -- Typed in the AI tab, as /ai model.
+        client.ClickTab(tab)
+        client.EnterLine("model opus")
+        assert(#posted == 5 and #client.sent == 0 and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "opus")
+        client.EnterLine("what's a good model for pets?")
+        assert(posted[6].question == "what's a good model for pets?" and posted[6].model == "opus")
+    """)
+
+
+def test_model_picker_without_blizzard_dropdowns(game):
+    """A client without Blizzard_Menu's dropdowns: a button that picks the next model on a click."""
+    game(r"""
+        client.noDropdowns = true
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        Settle()
+        SlashCmdList.WOWMCP("aitab")
+        local tab = Tab()
+        client.Tick()
+        local button = WowMCPModelPicker
+        assert(#client.dropdowns == 0 and button and button:IsShown() and button.text == "Default")
+        assert(select(2, button:GetPoint()) == tab)
+
+        -- The tooltip lists the models, the picked one marked.
+        local lines = {}
+        GameTooltip = setmetatable({}, { __index = function(_, name)
+            return function(_, text) if name == "SetText" or name == "AddLine" then lines[#lines + 1] = text end end
+        end })
+        button.OnEnter(button)
+        assert(lines[1] == "AI model: Default" and Has(lines, "> Default: what the bridge was started with"))
+        assert(Has(lines, "   Haiku: fastest, for simple lookups") and Has(lines, "Click: the next one."))
+
+        -- A click: the next one; a right-click: the one before, round the list.
+        button.OnClick(button, "LeftButton")
+        assert(button.text == "Fable" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable")
+        assert(Has(client.Lines(tab), "Answers now come from Fable."))
+        button.OnClick(button, "RightButton")
+        button.OnClick(button, "RightButton")
+        assert(button.text == "Haiku" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku")
+        client.Type("/ai quick one")
+        assert(posted[1].model == "haiku")
+        client.Type("/ai model sonnet")
+        assert(button.text == "Sonnet")
+
+        client.ClickTab(ChatFrame1)
+        client.Tick()
+        assert(not button:IsShown())
     """)

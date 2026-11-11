@@ -97,13 +97,19 @@ and replies with R, work as usual. `/mcp aitab both` also shows the conversation
 window, `/mcp aitab off` only there. If you close or rename the tab, the AI talks in the main window,
 and `/mcp aitab` brings the tab back.
 
+**Which model answers:** the AI tab has a picker at its top right: Default (what the bridge was started
+with), Fable (the most capable, slowest), Opus, Sonnet (fast and strong) or Haiku (fastest, for simple
+lookups). `/ai model` says which one answers; `/ai model sonnet` (or fable, opus, haiku, default) picks
+one. The pick is kept per character and goes with each question. Answers are signed with the model,
+e.g. [Claude Sonnet], and the conversation carries over when you switch.
+
 ```sh
 cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_forever_/Interface/AddOns"
 ```
 
 To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
-`journalctl --user -u wow-mcp-bridge -f`. `--model`, `--timeout` and `--agent` change how it answers.
+`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--timeout` and `--agent` change how it answers (with `--agent`, picks are ignored).
 
 On Windows, run the same command in a terminal you leave open while you play. To start it at logon instead,
 make a Task Scheduler task that runs `uv` with the arguments
@@ -142,6 +148,12 @@ A priority list of up to 100 items (what your goals, plan and AI track, then wha
 your bags and bank) also gets the cheapest price points. When the last full scan is over 10 minutes
 old, those items are searched one at a time, at most 80 auction house messages a minute counting
 yours, and only on the Browse view, so it never changes what you see.
+
+While the auction house is open, a small panel under its window shows what's going on: the full scan
+(waiting for the game, reading it, how many items), the searches (e.g. `watched 5/8 · bags 7/32`, the
+item being checked, about how long is left), why they're paused (you're looking at an item or selling),
+and the upgrade finder's progress. Hover it for what's still to check, in order. It says "Prices up to
+date" for a moment, then fades out.
 
 The full scan also keeps, for gear with random suffixes ("of the Bear"), the cheapest price of each
 suffix. Upgrades are searched in game, a little per frame: the slot and armor or weapon type of every
@@ -192,6 +204,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | Command | Does |
 |---|---|
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
+| `/ai model [default, fable, opus, sonnet, haiku]` | Which Claude model answers your `/ai` questions (kept per character); the AI tab has a picker for it too |
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |
@@ -201,7 +214,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/mcp plan [archive, archived, restore <n or name>]` | Put the plan showing away with its progress, list the archived ones, bring one back. The x on a tab asks: archive or remove; the box at the end of the tabs lists the archive (click one to bring it back, right-click to remove it) |
 | `/mcp plan size <width> [steps]`, `/mcp plan size reset` | The plan window's width and how many steps it shows at once; or drag its bottom right corner |
 | `/mcp goals [show, hide, mute <n>, unmute <n>, clear [<n>, all]]` | The goals list (docks under the plan window): right-click a goal to mute it; − collapses; `clear` removes the done ones |
-| `/mcp prices` | Auction prices your AI has: the last full scan, the priority list, searches left; at the auction house, look the list up again |
+| `/mcp prices [panel on, off]` | Auction prices your AI has: the last full scan, the priority list, searches left; at the auction house, look the list up again. `panel off` hides the status panel under the auction house window (on by default) |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
 | `/mcp areas [show, clear]` | The highlighted areas |
 | `/mcp messages` | Repeat the last messages from your AI |

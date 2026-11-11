@@ -29,8 +29,23 @@ def test_up_to_date(live_game):
         "game": FOREVER, "ok": True, "advice": [], "game_answered": True, "game_problem": None,
         "repo_build": build, "installed_build": build, "loaded_build": build,
         "live_updates": True, "live_problem": None, "slots_left": 300, "slot_count": 300,
-        "last_update_sent": 0, "last_update_in_game": 0,
+        "last_update_sent": 0, "last_update_in_game": 0, "blocked_actions": [],
     }
+
+
+def test_blocked_actions_are_reported(live_game):
+    # The game raises the event inside the blocked call: the addon keeps it with the code path.
+    setup = """
+        C_Timer.After(1, function()
+            local function Culprit() client.Fire("ADDON_ACTION_BLOCKED", "WowMCP", "CastSpellByName()") end
+            Culprit()
+        end)
+    """
+    with live_game(setup):
+        result = get_status()
+    [blocked] = result.blocked_actions
+    assert (blocked.kind, blocked.addon, blocked.function) == ("ADDON_ACTION_BLOCKED", "WowMCP", "CastSpellByName()")
+    assert blocked.at is not None and "Culprit" in blocked.stack, blocked.stack
 
 
 def test_needs_reload(addons, live_game):

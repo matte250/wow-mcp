@@ -73,6 +73,11 @@ function client.itemRef(link)
 	EventRegistry:TriggerEvent("SetItemRef", link)
 end
 
+-- The call stack as text, from the given level up (WoW's debugstack(start, count1, count2)).
+function debugstack(start)
+	return debug.traceback("", (start or 1) + 1)
+end
+
 -- A post-hook: the hook runs after the original, with the same arguments; the original's results stand.
 function hooksecurefunc(t, name, hook)
 	if type(t) == "string" then t, name, hook = _G, t, name end

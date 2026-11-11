@@ -8,6 +8,9 @@
 -- "AI", so answers don't drown in a city's chat. It's made the first time it's needed, and the game
 -- keeps it like any chat window. /mcp aitab picks the tab, the tab and the main chat window, or only
 -- the main window.
+--
+-- Which Claude model answers is picked per character, with the picker at the AI tab's top right or
+-- /ai model. Each question carries it to the bridge, which only takes the models listed here.
 
 local _, ns = ...
 
@@ -35,8 +38,9 @@ end
 -- The AI tab
 ---------------------------------------------------------------------------
 
--- WowMCPDB.aiTab: { mode = "on" (default) | "both" | "off", made = { ["Name-Realm"] = true } }. The
--- game keeps chat windows per character, so whether we made the tab is kept per character too.
+-- WowMCPDB.aiTab: { mode = "on" (default) | "both" | "off", made = { ["Name-Realm"] = true },
+-- models = { ["Name-Realm"] = "sonnet" }, bridgeModel = "sonnet" }. The game keeps chat windows per
+-- character, so whether we made the tab is kept per character too, like the model picked.
 local function Store()
 	WowMCPDB.aiTab = WowMCPDB.aiTab or {}
 	return WowMCPDB.aiTab
@@ -53,6 +57,7 @@ end
 local settled = false -- TAB_DELAY has passed since login
 local told = {}       -- said once per session: the tab is gone, or can't be made
 local waiting = 0     -- questions without an answer yet
+local picker          -- the model picker on the AI tab, once made: { frame, Update }
 
 -- The open chat window named TAB_NAME. Looked up every time, by name: the player can close, rename
 -- or undock it, and the game restores chat windows at login.
@@ -142,7 +147,13 @@ local function Say(text)
 end
 
 -- An answer from the bridge (Messages.lua). "Thinking…" moves below it while more are due.
-function AIChat.Answer(text, style, sender)
+-- bridgeModel: what the bridge answers with when no model is picked ("" if it doesn't know), for the
+-- picker's Default.
+function AIChat.Answer(text, style, sender, bridgeModel)
+	if type(bridgeModel) == "string" then
+		Store().bridgeModel = bridgeModel ~= "" and bridgeModel or nil
+		if picker then picker.Update() end
+	end
 	local tab, main = Where()
 	local frames = {}
 	if tab then frames[1] = tab end
@@ -157,6 +168,79 @@ function AIChat.Answer(text, style, sender)
 end
 
 ---------------------------------------------------------------------------
+-- Which model answers
+---------------------------------------------------------------------------
+
+-- The models that can answer, by Claude Code's name for each: the bridge only takes these (MODELS in
+-- bridge.py). Default sends none, so the bridge answers with what it was started with.
+local MODELS = {
+	{ id = "default", name = "Default", note = "what the bridge was started with" },
+	{ id = "fable", name = "Fable", note = "the most capable, slowest" },
+	{ id = "opus", name = "Opus", note = "very capable" },
+	{ id = "sonnet", name = "Sonnet", note = "fast and strong" },
+	{ id = "haiku", name = "Haiku", note = "fastest, for simple lookups" },
+}
+
+local function Choice(id)
+	for i, choice in ipairs(MODELS) do
+		if choice.id == id then return choice, i end
+	end
+end
+
+-- The model picked for this character's questions, Default if none.
+local function Picked()
+	return Choice((Store().models or {})[Character()]) or MODELS[1]
+end
+
+-- What the bridge answers with when none is picked, as its last answer said; nil if not known.
+local function BridgeModel()
+	local own = Choice(Store().bridgeModel)
+	return own ~= MODELS[1] and own or nil
+end
+
+-- Default says what it is, once the bridge has said so.
+local function Name(choice)
+	local own = choice == MODELS[1] and BridgeModel()
+	return own and choice.name .. " (" .. own.name .. ")" or choice.name
+end
+
+-- Picks the model for this character's next questions, and says so in the conversation.
+local function SetModel(choice)
+	local store = Store()
+	store.models = store.models or {}
+	store.models[Character()] = choice ~= MODELS[1] and choice.id or nil
+	local own = BridgeModel()
+	Say("Answers now come from " .. (choice ~= MODELS[1] and choice.name
+		or "the model the bridge was started with" .. (own and " (" .. own.name .. ")" or "")) .. ".")
+end
+
+local function ModelIds()
+	local ids = {}
+	for _, choice in ipairs(MODELS) do ids[#ids + 1] = choice.id end
+	return table.concat(ids, ", ")
+end
+
+-- /ai model [name]: which model answers, or pick one (any case).
+local function ModelCommand(id)
+	local choice = id and Choice(id:lower())
+	if choice then
+		SetModel(choice)
+		if picker then picker.Update() end
+	elseif id then
+		local options = {}
+		for _, choice in ipairs(MODELS) do
+			local own = choice == MODELS[1] and BridgeModel()
+			local about = choice == MODELS[1] and choice.note .. (own and ", " .. own.name or "")
+				or choice.name .. ", " .. choice.note
+			options[#options + 1] = choice.id .. " (" .. about .. ")"
+		end
+		Say("/ai model <name> - which Claude model answers you (also picked on the AI tab): " .. table.concat(options, "; "))
+	else
+		Say("Answers come from " .. Name(Picked()) .. ". /ai model <name> picks another: " .. ModelIds() .. ".")
+	end
+end
+
+---------------------------------------------------------------------------
 -- Asking
 ---------------------------------------------------------------------------
 
@@ -165,9 +249,17 @@ local function Ask(input)
 	if typed == "" then
 		Say("/ai <question> - ask the AI (or type in its chat tab), e.g. /ai where can I learn leatherworking?")
 		Say("/ai new - start a fresh conversation (it remembers your recent questions for follow-ups)")
+		Say("/ai model [name] - which Claude model answers (" .. ModelIds() .. "); the AI tab has a picker too")
 		return
 	end
-	if typed:lower() == "new" then
+	local lower = typed:lower()
+	-- "model", or "model" and one word, is about the model; anything longer is a question.
+	local word = lower:match("^model%s+([%w%.%-]+)$")
+	if word or lower == "model" then
+		ModelCommand(word)
+		return
+	end
+	if lower == "new" then
 		-- Nothing comes back for this, so it costs no live-update slot.
 		ns.Stream.Post({ reset = true, player = UnitName("player") })
 		Say("Starting a fresh conversation.")
@@ -177,7 +269,8 @@ local function Ask(input)
 	if #question > MAX_QUESTION then -- drop the (UTF-8) character that crosses the limit
 		question = question:sub(1, MAX_QUESTION + 1):gsub("[\1-\127\192-\255][\128-\191]*$", "")
 	end
-	ns.Stream.Post({ question = question, player = UnitName("player") })
+	local model = Picked().id
+	ns.Stream.Post({ question = question, player = UnitName("player"), model = model ~= "default" and model or nil })
 	local tab, main = Where()
 	if tab then TabLine(tab, YOU .. typed) end
 	if main then ns.Print("Asking… " .. typed) end
@@ -325,6 +418,126 @@ if ChatFrameMenuButtonMixin and ChatFrameMenuButtonMixin.SetChatTypeAttribute th
 end
 
 ---------------------------------------------------------------------------
+-- The model picker: a dropdown at the right end of the AI tab's row of chat tabs, shown while the tab
+-- is on screen (selected in the dock, or a window of its own), and faded like its chat tab while the
+-- mouse is elsewhere.
+--
+-- Like typing in the tab, it leaves Blizzard's chat frames alone: it's a frame of the addon's own,
+-- only anchored to the tab, and only reads the chat windows (which one is the tab, whether it shows,
+-- its tab's alpha). The dropdown is Blizzard_Menu's, made for addons: the menu code calls the
+-- addon's functions through securecallfunction, so they can't taint the menus Blizzard's own UI
+-- opens. Without it (an older client), a button picks the next model on a click instead.
+---------------------------------------------------------------------------
+
+local PICKER_WIDTH = 140
+local PICKER_X, PICKER_Y = 0, 4 -- its bottom right, from the tab's top right: level with the chat tabs
+local FOLLOW_EVERY = 0.5         -- seconds between looking for the tab again: it can be closed or renamed
+
+local followTab   -- the AI tab the picker is anchored to
+local followWait = 0
+
+-- The picker's tooltip, with the whole name in case it's cut short on the picker. cycling: the
+-- button's, which lists the models too (the dropdown's menu does that).
+local function Tooltip(tooltip, cycling)
+	local picked = Picked()
+	tooltip:SetText("AI model: " .. Name(picked), 1, 1, 1)
+	tooltip:AddLine("Which Claude model answers your /ai questions on this character. Also /ai model <name>.",
+		0.8, 0.8, 0.8, true)
+	if not cycling then return end
+	for _, choice in ipairs(MODELS) do
+		local text = Name(choice) .. ": " .. choice.note
+		if choice == picked then
+			tooltip:AddLine("> " .. text, 1, 0.82, 0)
+		else
+			tooltip:AddLine("   " .. text, 0.7, 0.7, 0.7)
+		end
+	end
+	tooltip:AddLine("Click: the next one. Right-click: the one before.", 0.4, 0.8, 1)
+end
+
+-- Blizzard_Menu's dropdown: the models as radios, each with what it's good for; just the name on the
+-- button. Made hidden: it makes its menu when it shows.
+local function MakeDropdown(parent)
+	local dropdown = CreateFrame("DropdownButton", "WowMCPModelPicker", parent, "WowStyle1DropdownTemplate")
+	dropdown:Hide()
+	dropdown:SetWidth(PICKER_WIDTH)
+	dropdown:SetSelectionTranslator(function(selection) return Name(Choice(selection.data) or MODELS[1]) end)
+	dropdown:SetupMenu(function(_, root)
+		for _, choice in ipairs(MODELS) do
+			root:CreateRadio(Name(choice) .. "  " .. NOTE .. choice.note .. "|r",
+				function(id) return Picked().id == id end,
+				function(id) SetModel(Choice(id)) end,
+				choice.id)
+		end
+	end)
+	dropdown:SetTooltip(function(tooltip) Tooltip(tooltip) end)
+	-- While its menu is open, the menu updates it itself.
+	return dropdown, function()
+		if not dropdown:IsMenuOpen() then dropdown:GenerateMenu() end
+	end
+end
+
+-- The fallback: a button with the model's name. A click picks the next one, a right-click the one before.
+local function MakeButton(parent)
+	local ok, button = pcall(CreateFrame, "Button", "WowMCPModelPicker", parent, "UIPanelButtonTemplate")
+	if not ok then
+		button = CreateFrame("Button", "WowMCPModelPicker", parent)
+		button:SetNormalFontObject("GameFontHighlightSmall")
+		local background = button:CreateTexture(nil, "BACKGROUND")
+		background:SetAllPoints()
+		background:SetColorTexture(0, 0, 0, 0.5)
+	end
+	button:Hide()
+	button:SetSize(PICKER_WIDTH, 22)
+	button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	local function Update() button:SetText(Name(Picked())) end
+	local function ShowTooltip(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		Tooltip(GameTooltip, true)
+		GameTooltip:Show()
+	end
+	button:SetScript("OnClick", function(self, mouse)
+		local _, i = Choice(Picked().id)
+		SetModel(MODELS[(i - 1 + (mouse == "RightButton" and -1 or 1)) % #MODELS + 1])
+		Update()
+		ShowTooltip(self)
+	end)
+	button:SetScript("OnEnter", ShowTooltip)
+	button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Update()
+	return button, Update
+end
+
+-- Every frame: shown while the AI tab is on screen, at its alpha unless the mouse is on the picker.
+local function Follow(_, elapsed)
+	local frame = picker.frame
+	followWait = followWait - elapsed
+	if followWait <= 0 then
+		followWait = FOLLOW_EVERY
+		local tab = Mode() ~= "off" and FindTab() or nil
+		if tab ~= followTab then
+			followTab = tab
+			frame:ClearAllPoints()
+			if tab then frame:SetPoint("BOTTOMRIGHT", tab, "TOPRIGHT", PICKER_X, PICKER_Y) end
+		end
+	end
+	frame:SetShown(followTab and followTab:IsVisible() or false)
+	if not frame:IsShown() then return end
+	local chatTab = _G[followTab:GetName() .. "Tab"]
+	local open = frame.IsMenuOpen and frame:IsMenuOpen()
+	frame:SetAlpha((open or frame:IsMouseOver() or not chatTab) and 1 or chatTab:GetAlpha())
+end
+
+local function MakePicker()
+	local holder = CreateFrame("Frame", nil, UIParent)
+	holder:SetFrameStrata("LOW") -- under the chat tabs (MEDIUM): if there are so many they reach it, they win
+	local ok, frame, update = pcall(MakeDropdown, holder)
+	if not ok then frame, update = MakeButton(holder) end
+	picker = { frame = frame, Update = update }
+	holder:SetScript("OnUpdate", Follow)
+end
+
+---------------------------------------------------------------------------
 -- /mcp aitab
 ---------------------------------------------------------------------------
 
@@ -356,4 +569,5 @@ ns.RegisterCommand("aitab", USAGE, AIChat.Command)
 
 ns.OnLogin(function()
 	C_Timer.After(TAB_DELAY, function() settled = true end)
+	MakePicker()
 end)

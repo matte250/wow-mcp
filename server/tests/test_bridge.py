@@ -3,6 +3,7 @@ here: a Python function, or a small Python script standing in for the agent comm
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import threading
@@ -19,11 +20,12 @@ from wow_mcp.bridge import (
 from wow_mcp.tools import messages, player
 
 
-def publish_per_contract(text, style="chat", sender="Claude", reply=False):
+def publish_per_contract(text, style="chat", sender="Claude", reply=False, default_model=None):
     """Stands in for tools/messages.py: the `messages` payload as docs/PLAN.md (W7) defines it."""
 
     def change(state, seq):
-        message = {"id": seq, "text": text, "style": style, "from": sender, **({"reply": True} if reply else {})}
+        message = {"id": seq, "text": text, "style": style, "from": sender, **({"reply": True} if reply else {}),
+                   **({"defaultModel": default_model} if reply and default_model is not None else {})}
         state["messages"] = [*state.get("messages", []), message][-10:]
 
     return transport().publish(change)
@@ -127,7 +129,7 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     prompts, busy = [], []
 
-    def agent(prompt):
+    def agent(prompt, model):
         busy.append(prompt)
         assert len(busy) == 1, "one question at a time"
         prompts.append(prompt)
@@ -168,7 +170,7 @@ def test_new_conversation_in_game_end_to_end(live_game, addons, tmp_path, monkey
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     prompts = []
 
-    def agent(prompt):
+    def agent(prompt, model):
         prompts.append(prompt)
         return f"Answer {len(prompts)}."
 
@@ -201,12 +203,12 @@ def test_follow_ups_see_the_conversation(addons):
     now = [1_000_000.0]
     prompts = []
 
-    def agent(prompt):
+    def agent(prompt, model):
         prompts.append(prompt)
         return f"Answer {len(prompts)}:\n\n- **Karolek**   is in The Drag."
 
     history = bridge.History(addons / "WowMCP" / "bridge-history.json", clock=lambda: now[0])
-    b = Bridge(addons, agent, publish=lambda text, style, sender, reply: None, history=history)
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: None, history=history)
     b.answer(bridge.Question("where can I learn leatherworking?", "Thorgrim"))
     now[0] += 150
     b.answer(bridge.Question("and skinning?", "Thorgrim"))
@@ -267,14 +269,14 @@ def test_failed_answers_are_not_remembered(addons):
     outcomes = [AgentError("not logged in"), AgentTimeout("it took over 180 seconds"), KeyError("broken"), "",
                 "It's in Orgrimmar.", "Go west."]
 
-    def agent(prompt):
+    def agent(prompt, model):
         prompts.append(prompt)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
-    b = Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append(text))
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: said.append(text))
     for q in ("q1", "q2", "q3", "q4", "where is it?", "and then?"):
         b.answer(bridge.Question(q, "Thorgrim"))
     assert said[3] == "I have no answer to that."
@@ -282,7 +284,7 @@ def test_failed_answers_are_not_remembered(addons):
     assert prompts[5] == earlier(("where is it?", 0, "It's in Orgrimmar.")) + "Thorgrim asks, in game: and then?"
 
     # Nor is an answer the player never sees because the bridge is stopping.
-    b.agent = lambda prompt: "Too late."
+    b.agent = lambda prompt, model: "Too late."
     b.stop.set()
     b.answer(bridge.Question("one more?", "Thorgrim"))
     assert [e.answer for e in b.history.recent("Thorgrim")] == ["It's in Orgrimmar.", "Go west."]
@@ -291,11 +293,11 @@ def test_failed_answers_are_not_remembered(addons):
 def test_history_survives_a_restart(addons):
     prompts = []
 
-    def agent(prompt):
+    def agent(prompt, model):
         prompts.append(prompt)
         return "Karolek, in The Drag."
 
-    quiet = lambda text, style, sender, reply: None  # noqa: E731
+    quiet = lambda text, style, sender, reply, default_model: None  # noqa: E731
     Bridge(addons, agent, publish=quiet).answer(bridge.Question("where's the leatherworking trainer?", "Thorgrim"))
     Bridge(addons, agent, publish=quiet).answer(bridge.Question("and skinning?", "Thorgrim"))
     assert prompts[1] == (
@@ -313,14 +315,14 @@ def test_new_conversation(addons, running):
     """A reset waits its turn behind the questions asked before it."""
     prompts, started, release = [], threading.Event(), threading.Event()
 
-    def agent(prompt):
+    def agent(prompt, model):
         prompts.append(prompt)
         started.set()
         release.wait(5)
         return "An answer."
 
     said = []
-    b = running(Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append(text)))
+    b = running(Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: said.append(text)))
     b.history.add("Grunta", "where am I?", "Durotar.")
     b.accept(question(1, "where am I?"))
     assert started.wait(5)
@@ -412,7 +414,7 @@ def test_chat_command(run_client):
 def test_questions_wait_their_turn(addons, running):
     said, busy, started, release = [], [], threading.Event(), threading.Event()
 
-    def agent(prompt):
+    def agent(prompt, model):
         busy.append(prompt)
         assert len(busy) == 1, "one question at a time"
         started.set()
@@ -420,7 +422,7 @@ def test_questions_wait_their_turn(addons, running):
         busy.remove(prompt)
         return "Answer: " + prompt.rsplit(": ", 1)[1]
 
-    b = running(Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append(text)))
+    b = running(Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: said.append(text)))
     b.accept(question(1, "q1"))
     assert started.wait(5)
     for i in range(2, MAX_WAITING + 3):  # one too many
@@ -434,14 +436,14 @@ def test_questions_wait_their_turn(addons, running):
 def test_problems_are_reported_in_game(addons, tmp_path):
     said = []
 
-    def agent(prompt):
+    def agent(prompt, model):
         raise AgentError("the agent exited with status 1: not logged in")
 
-    b = Bridge(addons, agent, publish=lambda text, style, sender, reply: said.append((sender, text)))
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: said.append((sender, text)))
     b.answer(bridge.Question("where am I?"))
     b.accept(stream.Post(1, 1, end=0, error="post 1 arrived damaged"))
     b.accept(stream.Post(1, 2, end=0, value={"not": "a question"}))
-    b.agent = lambda prompt: {}["broken"]
+    b.agent = lambda prompt, model: {}["broken"]
     b.answer(bridge.Question("where am I?"))
     assert said == [
         ("Claude", "Sorry, I couldn't answer that: the agent exited with status 1: not logged in"),
@@ -505,6 +507,131 @@ def test_default_agent_is_claude_code_with_the_wow_tools(addons):
     assert option("--model") == "sonnet"
     assert "--model" not in claude_command()
     assert isinstance(AgentTimeout("x"), AgentError)
+
+
+def test_models_picked_in_game_are_checked(caplog):
+    """Only the models in MODELS get through; anything else the game sends is dropped, with a log line."""
+    post = {"question": "where am I?", "player": "Thorgrim"}
+    assert bridge.Question.from_post({**post, "model": "sonnet"}) == bridge.Question("where am I?", "Thorgrim", "sonnet")
+    assert bridge.Question.from_post(post).model is None
+    for bad in ("gpt-5", "Sonnet", "sonnet --dangerously-skip-permissions", "--dangerously-skip-permissions", "", 5,
+                ["sonnet"], {"sonnet": True}, True):
+        caplog.clear()
+        question = bridge.Question.from_post({**post, "model": bad})
+        assert question == bridge.Question("where am I?", "Thorgrim"), bad
+        assert "ignoring the model picked in game" in caplog.text, bad
+    assert set(bridge.MODELS) == {"fable", "opus", "sonnet", "haiku"}
+
+
+def test_answers_come_from_the_picked_model(addons, caplog):
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    asked, said = [], []
+
+    def agent(prompt, model):
+        asked.append((prompt.rsplit(": ", 1)[1], model))
+        return f"Answer {len(asked)}."
+
+    def publish(text, style, sender, reply, default_model):
+        said.append((sender, text, default_model))
+
+    # Claude Code started with --model opus: a pick goes to the agent and signs the answer; without one,
+    # the agent uses its own, which signs it. Every reply tells the game what that is.
+    b = Bridge(addons, agent, publish=publish, history=bridge.History(None), models=True, model="opus")
+    b.answer(bridge.Question("where am I?", "Thorgrim", "sonnet"))
+    b.answer(bridge.Question("and now?", "Thorgrim"))
+    b.answer(bridge.Question("quick one", "Thorgrim", "haiku"))
+    assert asked == [("where am I?", "sonnet"), ("and now?", None), ("quick one", "haiku")]
+    assert said == [("Claude Sonnet", "Answer 1.", "opus"), ("Claude Opus", "Answer 2.", "opus"),
+                    ("Claude Haiku", "Answer 3.", "opus")]
+    # The conversation carries over from one model to the next.
+    assert [(e.question, e.answer) for e in b.history.recent("Thorgrim")] == [
+        ("where am I?", "Answer 1."), ("and now?", "Answer 2."), ("quick one", "Answer 3."),
+    ]
+
+    # Started without --model (or with a full model name): only picks are named, and the game isn't told one.
+    for own in (None, "claude-sonnet-5"):
+        said.clear()
+        b = Bridge(addons, agent, publish=publish, history=bridge.History(None), models=True, model=own)
+        b.answer(bridge.Question("q", "Thorgrim"))
+        b.answer(bridge.Question("q", "Thorgrim", "fable"))
+        assert said == [("Claude", "Answer 4." if own is None else "Answer 6.", ""),
+                        ("Claude Fable", "Answer 5." if own is None else "Answer 7.", "")]
+
+    # Another agent (--agent) answers with its own model, whatever was picked.
+    said.clear()
+    b = Bridge(addons, agent, publish=publish, history=bridge.History(None))
+    b.answer(bridge.Question("q", "Thorgrim", "sonnet"))
+    assert asked[-1] == ("q", None) and said == [("Claude", "Answer 8.", "")]
+    assert "ignoring the model picked in game (sonnet): --agent answers with its own" in caplog.text
+
+
+# Stands in for Claude Code: answers with the arguments it was run with.
+ARGS_AGENT = """
+import json, sys
+sys.stdin.read()
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(sys.argv[1:])}))
+"""
+
+
+def test_claude_code_runs_the_picked_model(addons, tmp_path):
+    """--model on the command line is the picked model, else the bridge's own; never anything else from the game."""
+    command = [sys.executable, "-c", ARGS_AGENT, *claude_command("opus")[1:]]
+    agent = CommandAgent(command, addons, timeout=20)
+
+    def models(*args):
+        argv = json.loads(agent("Where?", *args))
+        return [argv[i + 1] for i, arg in enumerate(argv) if arg == "--model"]
+
+    assert models() == ["opus"] and models(None) == ["opus"]
+    assert models("haiku") == ["haiku"] and models("fable") == ["fable"]
+    assert models() == ["opus"]  # a pick lasts one question
+    assert CommandAgent([sys.executable, "-c", ARGS_AGENT, *claude_command()[1:]], addons, timeout=20)("Where?", "sonnet")
+    with pytest.raises(ValueError, match="not a model the player can pick"):
+        agent("Where?", "sonnet --dangerously-skip-permissions")
+    assert bridge.with_model(["claude", "-p"], "sonnet") == ["claude", "-p", "--model", "sonnet"]
+
+    # From a post to the command line: an unknown model is dropped on the way, so the bridge's own runs.
+    ran = []
+    b = Bridge(addons, lambda prompt, model: ran.append(json.loads(agent(prompt, model))) or "ok",
+               publish=lambda text, style, sender, reply, default_model: None, history=bridge.History(None),
+               models=True, model="opus")
+    for model in ("haiku", "--dangerously-skip-permissions", "rm -rf ~"):
+        b.accept(stream.Post(1, len(ran) + 1, end=0, value={"question": "q", "player": "Thorgrim", "model": model}))
+        b.answer(b.questions.get_nowait())
+    assert [argv[argv.index("--model") + 1] for argv in ran] == ["haiku", "opus", "opus"]
+    assert not any("dangerously" in arg or "rm -rf" in arg for argv in ran for arg in argv)
+
+
+def test_model_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running):
+    """/ai model sonnet in game: the next questions carry it, the bridge answers with it and the answer
+    names it; /ai model default goes back to the bridge's own, which the game learns from the answers."""
+    log, typed = tmp_path / "game.log", tmp_path / "typed.txt"
+    monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
+    asked = []
+
+    def agent(prompt, model):
+        asked.append((prompt, model))
+        return f"Answer {len(asked)}."
+
+    def seen(text):
+        return lambda: log.exists() and text in log.read_text(encoding="utf-8")
+
+    with live_game(GAME.replace("LOG", log.as_posix()).replace("TYPED", typed.as_posix()), seconds=30):
+        running(Bridge(addons, agent, models=True, model="opus"))
+        type_in(typed, "/ai model Sonnet", "/ai where am I?")
+        wait_for(seen("Answer 1."), seconds=15)
+        type_in(typed, "/ai model default", "/ai and now?")
+        wait_for(seen("Answer 2."), seconds=15)
+        type_in(typed, "/ai model")
+        wait_for(seen("Answers come from Default (Opus)."), seconds=5)
+
+    assert [model for _, model in asked] == ["sonnet", None]
+    assert asked[1][0] == earlier(("where am I?", 0, "Answer 1.")) + "Thorgrim asks, in game: and now?"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert "chat: |cff33ff99WowMCP|r Answers now come from Sonnet." in lines
+    assert "chat: |cff33ff99[Claude Sonnet]|r Answer 1." in lines and "chat: |cff33ff99[Claude Opus]|r Answer 2." in lines
+    # The first answer told the game what the bridge's own model is.
+    assert "chat: |cff33ff99WowMCP|r Answers now come from the model the bridge was started with (Opus)." in lines
 
 
 def test_chat_lines():
