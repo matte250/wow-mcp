@@ -169,14 +169,14 @@ def test_game_details_in_advice():
 
 
 def test_probe_runs(run_client):
-    # The research probes (/mcp probe files, pad, audio) run to the end without their server halves,
+    # The research probes (/mcp probe files, audio) run to the end without their server halves,
     # and keep what they saw.
     run_client(r"""
         client.LoadAddon()
         client.Wait()
         local function chat() return table.concat(client.chat, "\n") end
         SlashCmdList.WOWMCP("probe")
-        assert(chat():find("/mcp probe files, /mcp probe pad or /mcp probe audio", 1, true), chat())
+        assert(chat():find("/mcp probe files or /mcp probe audio", 1, true), chat())
         SlashCmdList.WOWMCP("probe files")
         client.Wait(8)  -- ticks of 0.5 s: the probe takes about 3 s
         assert(chat():find("Probe done.", 1, true) and not chat():find("Probe failed", 1, true), chat())
@@ -185,32 +185,4 @@ def test_probe_runs(run_client):
         SlashCmdList.WOWMCP("probe audio")
         client.Wait(8)
         assert(#WowMCPDB.probes.audio.played == 8 and not chat():find("Probe failed", 1, true), chat())
-        -- A client without the gamepad functions says so.
-        local pad = C_GamePad
-        C_GamePad = nil
-        SlashCmdList.WOWMCP("probe pad")
-        assert(chat():find("this client has no gamepad functions", 1, true), chat())
-        C_GamePad = pad
-
-        -- With a controller whose spare axis steps through values: each device and the values it saw;
-        -- gamepad support goes back to how it was.
-        local cvars = { GamePadEnable = "0" }
-        C_CVar.GetCVar = function(name) return cvars[name] end
-        C_CVar.SetCVar = function(name, value) cvars[name] = value end
-        local step = 0
-        C_GamePad = {
-            GetAllDeviceIDs = function() return { 3 } end,
-            GetActiveDeviceID = function() return 3 end,
-            GetDeviceRawState = function()
-                step = step + 1
-                return { name = "WowMCP Probe Pad", vendorID = 4617, productID = 32343, rawAxes = { 0, step % 3 / 10 } }
-            end,
-        }
-        SlashCmdList.WOWMCP("probe pad")
-        assert(cvars.GamePadEnable == "1", "on for the probe")
-        client.Wait(32)
-        assert(cvars.GamePadEnable == "0", "back off after the probe")
-        assert(chat():find("Device 3: WowMCP Probe Pad (vendor 4617, product 32343), 2 axes", 1, true), chat())
-        assert(chat():find("axis 2: 3 values (0.00000, 0.10000, 0.20000)", 1, true), chat())
-        assert(WowMCPDB.probes.pad.active == 3 and not chat():find("Probe failed", 1, true), chat())
     """)

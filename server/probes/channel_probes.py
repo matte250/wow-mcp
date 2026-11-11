@@ -6,7 +6,7 @@ opening files from a pool of 4096. The probes test other channels: less discover
 per-launch limits, or both. Run them with WoW at the character screen or in a quiet spot, one at a
 time; each has a server half (here) and a game half (/mcp probe <name>).
 
-    uv run --with fonttools --with numpy --with evdev python probes/channel_probes.py <command>
+    uv run --with fonttools --with numpy python probes/channel_probes.py <command>
 
 prepare  With WoW closed (new files are only seen at startup): writes probe/ in the installed WowMCP
          folder: two valid silent sounds, a trigger, a font, a texture and three short tones.
@@ -14,9 +14,6 @@ files    Server to game, few files: does the game remember a file per path as wr
          probe/; when the game opens go.wav, empties s1.wav and gives the font other glyph widths
          and the texture other proportions, and logs every probe file the game reads from disk.
          Game: /mcp probe files
-pad      Server to game, no files at all: a virtual gamepad whose spare axes carry numbers. Creates
-         it, then steps an axis WoW doesn't use for movement through values. Game: /mcp probe pad
-         (turns gamepad support on for the probe, and back off).
 listen   Game to server, no file opens: the addon plays short, very high, quiet tones; this records
          WoW's own audio stream (PipeWire, only WoW's) and reports which tones it heard, and when.
          Game: /mcp probe audio
@@ -169,46 +166,6 @@ def files(addons: Path, _args) -> None:
                       f"{TEXTURE[2][0]}x{TEXTURE[2][1]}", flush=True)
 
 
-# --- pad --------------------------------------------------------------------------------------------
-
-def pad(_addons: Path, args) -> None:
-    """A virtual gamepad. Its sticks and triggers stay at rest; spare axes (throttle, rudder) step
-    through values the probe in game reads back from GetDeviceRawState. --xbox makes it look like an
-    Xbox 360 pad, which games recognise more readily but may drop spare axes for."""
-    from evdev import AbsInfo, UInput, ecodes as e
-
-    stick = AbsInfo(value=0, min=-32768, max=32767, fuzz=0, flat=0, resolution=0)
-    trigger = AbsInfo(value=0, min=0, max=255, fuzz=0, flat=0, resolution=0)
-    spare = AbsInfo(value=0, min=0, max=65535, fuzz=0, flat=0, resolution=0)
-    axes = [(e.ABS_X, stick), (e.ABS_Y, stick), (e.ABS_RX, stick), (e.ABS_RY, stick),
-            (e.ABS_Z, trigger), (e.ABS_RZ, trigger), (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0))]
-    if not args.xbox:
-        axes += [(e.ABS_THROTTLE, spare), (e.ABS_RUDDER, spare)]
-    buttons = [e.BTN_SOUTH, e.BTN_EAST, e.BTN_NORTH, e.BTN_WEST, e.BTN_TL, e.BTN_TR, e.BTN_SELECT,
-               e.BTN_START, e.BTN_MODE, e.BTN_THUMBL, e.BTN_THUMBR]
-    ids = dict(vendor=0x045E, product=0x028E, version=0x110) if args.xbox else dict(vendor=0x1209, product=0x7E57)
-    name = "Xbox 360 Controller" if args.xbox else "WowMCP Probe Pad"
-    device = UInput({e.EV_KEY: buttons, e.EV_ABS: axes}, name=name, bustype=e.BUS_USB, **ids)
-    # On an Xbox pad the right trigger carries the numbers, kept below where the game counts it
-    # as pressed; otherwise the spare throttle axis.
-    axis, values = (e.ABS_RZ, [0, 8, 16, 24, 32, 40, 48]) if args.xbox else \
-        (e.ABS_THROTTLE, [0, 1, 2, 1000, 1001, 30000, 65535])
-    print(f"Virtual pad '{name}' created. Run /mcp probe pad in game now (it reads for 15 seconds).", flush=True)
-    time.sleep(3)
-    start = time.monotonic()
-    try:
-        while time.monotonic() - start < args.seconds:
-            for value in values:
-                device.write(e.EV_ABS, axis, value)
-                device.syn()
-                print(f"{time.monotonic() - start:6.2f}s  axis {e.ABS[axis]} = {value}", flush=True)
-                time.sleep(0.5)
-    finally:
-        device.close()
-        print("Virtual pad removed.")
-
-
 # --- listen -----------------------------------------------------------------------------------------
 
 def wow_stream() -> tuple[str | None, str]:
@@ -282,15 +239,14 @@ def chatlog(addons: Path, args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["prepare", "files", "pad", "listen", "chatlog"])
+    parser.add_argument("command", choices=["prepare", "files", "listen", "chatlog"])
     parser.add_argument("--addons-dir", type=Path, default=os.environ.get(install.ADDONS_DIR_ENV))
     parser.add_argument("--seconds", type=float, default=120)
-    parser.add_argument("--xbox", action="store_true", help="pad: look like an Xbox 360 controller")
     parser.add_argument("--snr", type=float, default=8.0, help="listen: how far above the noise counts as a tone")
     args = parser.parse_args()
     if not args.addons_dir:
         sys.exit(f"Pass --addons-dir or set {install.ADDONS_DIR_ENV}.")
-    {"prepare": prepare, "files": files, "pad": pad, "listen": listen, "chatlog": chatlog}[args.command](
+    {"prepare": prepare, "files": files, "listen": listen, "chatlog": chatlog}[args.command](
         Path(args.addons_dir), args)
 
 

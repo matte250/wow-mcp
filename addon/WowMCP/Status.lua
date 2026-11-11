@@ -46,7 +46,6 @@ ns.RegisterSection(ns.Kinds.STATUS, "status", Status)
 -- a server half in server/probes/channel_probes.py (see there); results print in chat and are kept
 -- in WowMCPDB.probes[name] (a /reload writes them to disk).
 --   files  does the game remember a file per path as written? (fewer files, no per-launch limit)
---   pad    a virtual gamepad's spare axes as numbers (no files at all)
 --   audio  short quiet tones the server hears in WoW's own audio stream (no file opens)
 ---------------------------------------------------------------------------
 
@@ -166,72 +165,6 @@ do
 		end))
 	end
 
-	-- pad -------------------------------------------------------------------------------------------
-	-- Every controller the game sees, and the distinct values each raw axis took while the server half
-	-- stepped one. Gamepad support is on only for the probe.
-
-	local PAD_SECONDS = 15
-	local watcher
-
-	local function Pad()
-		if not (C_GamePad and C_GamePad.GetAllDeviceIDs and C_CVar) then
-			ns.Print("Probe pad: this client has no gamepad functions.")
-			return
-		end
-		local results = Keep("pad", { devices = {} })
-		local was = C_CVar.GetCVar("GamePadEnable")
-		if was ~= "1" then C_CVar.SetCVar("GamePadEnable", "1") end
-		ns.Print(string.format("Probe pad: gamepad support on for %d seconds (was %s). Stand still somewhere safe…",
-			PAD_SECONDS, tostring(was)))
-		local seen, stop = {}, GetTime() + PAD_SECONDS
-		watcher = watcher or CreateFrame("Frame")
-		watcher:SetScript("OnUpdate", Safely(function()
-			for _, id in ipairs(C_GamePad.GetAllDeviceIDs() or {}) do
-				local ok, raw = pcall(C_GamePad.GetDeviceRawState, id)
-				if ok and raw then
-					local d = seen[id] or { id = id, name = raw.name, vendor = raw.vendorID, product = raw.productID, axes = {} }
-					seen[id] = d
-					for i, v in ipairs(raw.rawAxes or {}) do
-						local a = d.axes[i] or { values = {}, n = 0 }
-						d.axes[i] = a
-						local key = string.format("%.6f", v)
-						if not a.values[key] then a.values[key], a.n = true, a.n + 1 end
-					end
-				end
-			end
-			if GetTime() < stop then return end
-			watcher:SetScript("OnUpdate", nil)
-			if was ~= "1" then C_CVar.SetCVar("GamePadEnable", was or "0") end
-			local okActive, active = pcall(C_GamePad.GetActiveDeviceID)
-			results.active = okActive and active or nil
-			local any = false
-			for _, d in pairs(seen) do
-				any = true
-				local moving = {}
-				for i, a in pairs(d.axes) do
-					if a.n > 1 then
-						local values = {}
-						for v in pairs(a.values) do values[#values + 1] = tonumber(v) end
-						table.sort(values)
-						a.list = values
-						local shown = {}
-						for k = 1, math.min(#values, 8) do shown[k] = string.format("%.5f", values[k]) end
-						moving[#moving + 1] = string.format("axis %d: %d values (%s%s)", i, #values, table.concat(shown, ", "),
-							#values > 8 and ", …" or "")
-					end
-					a.values = nil
-				end
-				table.insert(results.devices, d)
-				ns.Print(string.format("Device %s: %s (vendor %s, product %s), %d axes", tostring(d.id), tostring(d.name),
-					tostring(d.vendor), tostring(d.product), #d.axes))
-				for _, line in ipairs(moving) do ns.Print("  " .. line) end
-				if #moving == 0 then ns.Print("  no axis moved") end
-			end
-			if not any then ns.Print("No controllers seen.") end
-			ns.Print(string.format("Active device: %s. Gamepad support back to %s. Probe done.", tostring(results.active), tostring(was)))
-		end))
-	end
-
 	-- audio -----------------------------------------------------------------------------------------
 	-- A known sequence of short tones; the server half says which it heard, and when.
 
@@ -254,12 +187,12 @@ do
 		end
 	end
 
-	local PROBES = { files = Files, pad = Pad, audio = Audio }
-	ns.RegisterCommand("probe", "/mcp probe [files, pad, audio] - research into other channels (needs the server's probe helper)",
+	local PROBES = { files = Files, audio = Audio }
+	ns.RegisterCommand("probe", "/mcp probe [files, audio] - research into other channels (needs the server's probe helper)",
 		function(rest)
 			local probe = PROBES[strtrim(tostring(rest or "")):lower()]
 			if not probe then
-				ns.Print("/mcp probe files, /mcp probe pad or /mcp probe audio (each needs its server half running)")
+				ns.Print("/mcp probe files or /mcp probe audio (each needs its server half running)")
 				return
 			end
 			Safely(probe)()
