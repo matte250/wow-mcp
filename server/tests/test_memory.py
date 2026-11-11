@@ -21,7 +21,7 @@ from wow_mcp.tools import memory as memory_tools
 from wow_mcp.tools.memory import forget_note, list_notes, remember, search_conversations
 
 
-def quiet(text, style, sender, reply, default_model):
+def quiet(text, style, sender, reply, default_model, default_effort):
     pass
 
 
@@ -44,7 +44,7 @@ def test_every_exchange_is_archived_for_good(addons, tmp_path):
     long = "First line.\n\n" + "word " * 400 + "end."
     outcomes = ["Karolek, in The Drag.\n", bridge.AgentError("overloaded"), long]
 
-    def agent(prompt, model, player):
+    def agent(prompt, model, player, effort):
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -82,11 +82,11 @@ def test_a_new_conversation_keeps_the_archive(addons):
     """/ai new: the next prompt starts afresh, but nothing leaves the archive."""
     prompts, said = [], []
 
-    def agent(prompt, model, player):
+    def agent(prompt, model, player, effort):
         prompts.append(prompt)
         return f"Answer {len(prompts)}."
 
-    b = Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: said.append(text))
+    b = Bridge(addons, agent, publish=lambda text, style, sender, reply, **_: said.append(text))
     worker = threading.Thread(target=b._work, daemon=True)
     worker.start()
     try:
@@ -311,7 +311,7 @@ def test_notes_come_with_every_prompt(addons):
     notes.add("Thorgrim", FLIPPING, datetime(2026, 11, 10, 21, 0).timestamp())
     prompts, players = [], []
 
-    def agent(prompt, model, player):
+    def agent(prompt, model, player, effort):
         prompts.append(prompt)
         players.append(player)
         return "OK."

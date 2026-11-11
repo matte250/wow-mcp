@@ -9,8 +9,9 @@
 -- keeps it like any chat window. /mcp aitab picks the tab, the tab and the main chat window, or only
 -- the main window.
 --
--- Which Claude model answers is picked per character, with the picker at the AI tab's top right or
--- /ai model. Each question carries it to the bridge, which only takes the models listed here.
+-- Which Claude model answers, and how hard it thinks, is picked per character, with the picker at the
+-- AI tab's top right or /ai model and /ai thinking. Each question carries both to the bridge, which
+-- only takes the models and levels listed here.
 
 local _, ns = ...
 
@@ -39,8 +40,9 @@ end
 ---------------------------------------------------------------------------
 
 -- WowMCPDB.aiTab: { mode = "on" (default) | "both" | "off", made = { ["Name-Realm"] = true },
--- models = { ["Name-Realm"] = "sonnet" }, bridgeModel = "sonnet" }. The game keeps chat windows per
--- character, so whether we made the tab is kept per character too, like the model picked.
+-- models = { ["Name-Realm"] = "sonnet" }, bridgeModel = "sonnet", efforts = { ["Name-Realm"] = "high" },
+-- bridgeEffort = "high" }. The game keeps chat windows per character, so whether we made the tab is
+-- kept per character too, like the model and thinking level picked.
 local function Store()
 	WowMCPDB.aiTab = WowMCPDB.aiTab or {}
 	return WowMCPDB.aiTab
@@ -57,7 +59,7 @@ end
 local settled = false -- TAB_DELAY has passed since login
 local told = {}       -- said once per session: the tab is gone, or can't be made
 local waiting = 0     -- questions without an answer yet
-local picker          -- the model picker on the AI tab, once made: { frame, Update }
+local picker          -- the model and thinking picker on the AI tab, once made: { frame, Update }
 
 -- The open chat window named TAB_NAME. Looked up every time, by name: the player can close, rename
 -- or undock it, and the game restores chat windows at login.
@@ -147,13 +149,13 @@ local function Say(text)
 end
 
 -- An answer from the bridge (Messages.lua). "Thinking…" moves below it while more are due.
--- bridgeModel: what the bridge answers with when no model is picked ("" if it doesn't know), for the
--- picker's Default.
-function AIChat.Answer(text, style, sender, bridgeModel)
-	if type(bridgeModel) == "string" then
-		Store().bridgeModel = bridgeModel ~= "" and bridgeModel or nil
-		if picker then picker.Update() end
-	end
+-- bridgeModel, bridgeEffort: what the bridge answers with, and how hard it thinks, when none is picked
+-- ("" if it doesn't know), for the picker's Defaults.
+function AIChat.Answer(text, style, sender, bridgeModel, bridgeEffort)
+	local store = Store()
+	if type(bridgeModel) == "string" then store.bridgeModel = bridgeModel ~= "" and bridgeModel or nil end
+	if type(bridgeEffort) == "string" then store.bridgeEffort = bridgeEffort ~= "" and bridgeEffort or nil end
+	if picker then picker.Update() end
 	local tab, main = Where()
 	local frames = {}
 	if tab then frames[1] = tab end
@@ -168,7 +170,7 @@ function AIChat.Answer(text, style, sender, bridgeModel)
 end
 
 ---------------------------------------------------------------------------
--- Which model answers
+-- Which model answers, and how hard it thinks
 ---------------------------------------------------------------------------
 
 -- The models that can answer, by Claude Code's name for each: the bridge only takes these (MODELS in
@@ -181,64 +183,113 @@ local MODELS = {
 	{ id = "haiku", name = "Haiku", note = "fastest, for simple lookups" },
 }
 
-local function Choice(id)
-	for i, choice in ipairs(MODELS) do
+-- How hard the model thinks, by Claude Code's --effort levels: the bridge only takes these (EFFORTS in
+-- bridge.py). Default sends none, so the bridge's own level applies, else Claude Code's.
+local EFFORTS = {
+	{ id = "default", name = "Default", note = "what the bridge was started with, or Claude Code's own" },
+	{ id = "low", name = "Low", note = "fastest" },
+	{ id = "medium", name = "Medium", note = "balanced" },
+	{ id = "high", name = "High", note = "thorough" },
+	{ id = "xhigh", name = "Extra high", note = "very thorough, slower" },
+	{ id = "max", name = "Max", note = "slowest, deepest" },
+}
+
+-- Each kind of pick: its choices, where the picks are kept (per character) and where the bridge's own
+-- is, and its /ai command.
+local MODEL = {
+	title = "Model", list = MODELS, saved = "models", bridge = "bridgeModel",
+	usage = "/ai model <name>", about = "which Claude model answers you", now = "Answers come from ",
+}
+local EFFORT = {
+	title = "Thinking", list = EFFORTS, saved = "efforts", bridge = "bridgeEffort",
+	usage = "/ai thinking <level>", about = "how hard the AI thinks before answering", now = "The AI thinks: ",
+}
+local KINDS = { MODEL, EFFORT } -- in the picker's order
+
+local function Choice(kind, id)
+	for i, choice in ipairs(kind.list) do
 		if choice.id == id then return choice, i end
 	end
 end
 
--- The model picked for this character's questions, Default if none.
-local function Picked()
-	return Choice((Store().models or {})[Character()]) or MODELS[1]
+-- What's picked for this character's questions, Default if nothing.
+local function Picked(kind)
+	return Choice(kind, (Store()[kind.saved] or {})[Character()]) or kind.list[1]
 end
 
--- What the bridge answers with when none is picked, as its last answer said; nil if not known.
-local function BridgeModel()
-	local own = Choice(Store().bridgeModel)
-	return own ~= MODELS[1] and own or nil
+-- What the bridge uses when nothing is picked, as its last answer said; nil if not known.
+local function Own(kind)
+	local own = Choice(kind, Store()[kind.bridge])
+	return own ~= kind.list[1] and own or nil
 end
 
 -- Default says what it is, once the bridge has said so.
-local function Name(choice)
-	local own = choice == MODELS[1] and BridgeModel()
+local function Name(kind, choice)
+	local own = choice == kind.list[1] and Own(kind)
 	return own and choice.name .. " (" .. own.name .. ")" or choice.name
 end
 
--- Picks the model for this character's next questions, and says so in the conversation.
-local function SetModel(choice)
+-- The picks in short, as on the picker: the model, and the level unless it's Default ("Sonnet · high",
+-- like the bridge signs its answers).
+local function Shown()
+	local effort = Picked(EFFORT)
+	return Name(MODEL, Picked(MODEL)) .. (effort ~= EFFORTS[1] and " · " .. effort.id or "")
+end
+
+local function Save(kind, choice)
 	local store = Store()
-	store.models = store.models or {}
-	store.models[Character()] = choice ~= MODELS[1] and choice.id or nil
-	local own = BridgeModel()
+	store[kind.saved] = store[kind.saved] or {}
+	store[kind.saved][Character()] = choice ~= kind.list[1] and choice.id or nil
+end
+
+-- Picks the model for this character's next questions, and says so in the conversation.
+function MODEL.Set(choice)
+	Save(MODEL, choice)
+	local own = Own(MODEL)
 	Say("Answers now come from " .. (choice ~= MODELS[1] and choice.name
 		or "the model the bridge was started with" .. (own and " (" .. own.name .. ")" or "")) .. ".")
 end
 
-local function ModelIds()
+-- Likewise how hard it thinks.
+function EFFORT.Set(choice)
+	Save(EFFORT, choice)
+	local own = Own(EFFORT)
+	Say("The AI now thinks" .. (choice ~= EFFORTS[1] and ": " .. choice.name
+		or " at the level the bridge was started with" .. (own and " (" .. own.name .. ")" or "")) .. ".")
+end
+
+local function Ids(kind)
 	local ids = {}
-	for _, choice in ipairs(MODELS) do ids[#ids + 1] = choice.id end
+	for _, choice in ipairs(kind.list) do ids[#ids + 1] = choice.id end
 	return table.concat(ids, ", ")
 end
 
--- /ai model [name]: which model answers, or pick one (any case).
-local function ModelCommand(id)
-	local choice = id and Choice(id:lower())
+-- /ai model [name], /ai thinking [level]: what's picked, or pick one (any case).
+local function PickCommand(kind, id)
+	local choice = id and Choice(kind, id:lower())
 	if choice then
-		SetModel(choice)
+		kind.Set(choice)
 		if picker then picker.Update() end
 	elseif id then
 		local options = {}
-		for _, choice in ipairs(MODELS) do
-			local own = choice == MODELS[1] and BridgeModel()
-			local about = choice == MODELS[1] and choice.note .. (own and ", " .. own.name or "")
+		for _, choice in ipairs(kind.list) do
+			local own = choice == kind.list[1] and Own(kind)
+			local about = choice == kind.list[1] and choice.note .. (own and ", " .. own.name or "")
 				or choice.name .. ", " .. choice.note
 			options[#options + 1] = choice.id .. " (" .. about .. ")"
 		end
-		Say("/ai model <name> - which Claude model answers you (also picked on the AI tab): " .. table.concat(options, "; "))
+		Say(kind.usage .. " - " .. kind.about .. " (also picked on the AI tab): " .. table.concat(options, "; "))
 	else
-		Say("Answers come from " .. Name(Picked()) .. ". /ai model <name> picks another: " .. ModelIds() .. ".")
+		Say(kind.now .. Name(kind, Picked(kind)) .. ". " .. kind.usage .. " picks another: " .. Ids(kind) .. ".")
 	end
 end
+
+-- The words after /ai that are commands, alone or with one word after them; /ai effort as Claude Code says it.
+local COMMANDS = {
+	model = function(id) PickCommand(MODEL, id) end,
+	thinking = function(id) PickCommand(EFFORT, id) end,
+}
+COMMANDS.effort = COMMANDS.thinking
 
 ---------------------------------------------------------------------------
 -- Asking
@@ -249,14 +300,17 @@ local function Ask(input)
 	if typed == "" then
 		Say("/ai <question> - ask the AI (or type in its chat tab), e.g. /ai where can I learn leatherworking?")
 		Say("/ai new - start a fresh conversation (it remembers your recent questions for follow-ups)")
-		Say("/ai model [name] - which Claude model answers (" .. ModelIds() .. "); the AI tab has a picker too")
+		Say("/ai model [name] - which Claude model answers (" .. Ids(MODEL) .. "); the AI tab has a picker too")
+		Say("/ai thinking [level] - how hard the AI thinks (" .. Ids(EFFORT) .. "); also on the AI tab's picker")
 		return
 	end
 	local lower = typed:lower()
-	-- "model", or "model" and one word, is about the model; anything longer is a question.
-	local word = lower:match("^model%s+([%w%.%-]+)$")
-	if word or lower == "model" then
-		ModelCommand(word)
+	-- "model", or "model" and one word, is about the model (likewise "thinking", "effort"); anything longer is
+	-- a question.
+	local first, word = lower:match("^(%a+)%s+([%w%.%-]+)$")
+	local command = COMMANDS[first or lower]
+	if command then
+		command(word)
 		return
 	end
 	if lower == "new" then
@@ -269,8 +323,9 @@ local function Ask(input)
 	if #question > MAX_QUESTION then -- drop the (UTF-8) character that crosses the limit
 		question = question:sub(1, MAX_QUESTION + 1):gsub("[\1-\127\192-\255][\128-\191]*$", "")
 	end
-	local model = Picked().id
-	ns.Stream.Post({ question = question, player = UnitName("player"), model = model ~= "default" and model or nil })
+	local model, effort = Picked(MODEL).id, Picked(EFFORT).id
+	ns.Stream.Post({ question = question, player = UnitName("player"), model = model ~= "default" and model or nil,
+		effort = effort ~= "default" and effort or nil })
 	local tab, main = Where()
 	if tab then TabLine(tab, YOU .. typed) end
 	if main then ns.Print("Asking… " .. typed) end
@@ -418,15 +473,18 @@ if ChatFrameMenuButtonMixin and ChatFrameMenuButtonMixin.SetChatTypeAttribute th
 end
 
 ---------------------------------------------------------------------------
--- The model picker: a dropdown at the right end of the AI tab's row of chat tabs, shown while the tab
--- is on screen (selected in the dock, or a window of its own), and faded like its chat tab while the
--- mouse is elsewhere.
+-- The picker: a dropdown at the right end of the AI tab's row of chat tabs, shown while the tab is on
+-- screen (selected in the dock, or a window of its own), and faded like its chat tab while the mouse
+-- is elsewhere. Its one menu picks the model and how hard it thinks, as two groups: two dropdowns side
+-- by side would run into the chat tabs of a chat window of the default width (430 px, with docked tabs
+-- up to 90 px each).
 --
 -- Like typing in the tab, it leaves Blizzard's chat frames alone: it's a frame of the addon's own,
 -- only anchored to the tab, and only reads the chat windows (which one is the tab, whether it shows,
 -- its tab's alpha). The dropdown is Blizzard_Menu's, made for addons: the menu code calls the
 -- addon's functions through securecallfunction, so they can't taint the menus Blizzard's own UI
--- opens. Without it (an older client), a button picks the next model on a click instead.
+-- opens. Without it (an older client), a button picks the next model on a click instead, and the
+-- next thinking level on a shift-click.
 ---------------------------------------------------------------------------
 
 local PICKER_WIDTH = 140
@@ -436,38 +494,46 @@ local FOLLOW_EVERY = 0.5         -- seconds between looking for the tab again: i
 local followTab   -- the AI tab the picker is anchored to
 local followWait = 0
 
--- The picker's tooltip, with the whole name in case it's cut short on the picker. cycling: the
--- button's, which lists the models too (the dropdown's menu does that).
+-- The picker's tooltip, with the whole names in case they're cut short on the picker. cycling: the
+-- button's, which lists the choices too (the dropdown's menu does that).
 local function Tooltip(tooltip, cycling)
-	local picked = Picked()
-	tooltip:SetText("AI model: " .. Name(picked), 1, 1, 1)
-	tooltip:AddLine("Which Claude model answers your /ai questions on this character. Also /ai model <name>.",
-		0.8, 0.8, 0.8, true)
+	tooltip:SetText("AI model: " .. Name(MODEL, Picked(MODEL)), 1, 1, 1)
+	tooltip:AddLine("Thinking: " .. Name(EFFORT, Picked(EFFORT)), 1, 1, 1)
+	tooltip:AddLine("Which Claude model answers your /ai questions on this character, and how hard it thinks. "
+		.. "Also /ai model <name> and /ai thinking <level>.", 0.8, 0.8, 0.8, true)
 	if not cycling then return end
-	for _, choice in ipairs(MODELS) do
-		local text = Name(choice) .. ": " .. choice.note
-		if choice == picked then
-			tooltip:AddLine("> " .. text, 1, 0.82, 0)
-		else
-			tooltip:AddLine("   " .. text, 0.7, 0.7, 0.7)
+	for _, kind in ipairs(KINDS) do
+		local picked = Picked(kind)
+		tooltip:AddLine(kind.title .. ":", 1, 1, 1)
+		for _, choice in ipairs(kind.list) do
+			local text = Name(kind, choice) .. ": " .. choice.note
+			if choice == picked then
+				tooltip:AddLine("> " .. text, 1, 0.82, 0)
+			else
+				tooltip:AddLine("   " .. text, 0.7, 0.7, 0.7)
+			end
 		end
 	end
-	tooltip:AddLine("Click: the next one. Right-click: the one before.", 0.4, 0.8, 1)
+	tooltip:AddLine("Click: the next model. Right-click: the one before. With Shift: the thinking level.", 0.4, 0.8, 1)
 end
 
--- Blizzard_Menu's dropdown: the models as radios, each with what it's good for; just the name on the
--- button. Made hidden: it makes its menu when it shows.
+-- Blizzard_Menu's dropdown: the models and the thinking levels, a group of radios each under its title,
+-- each with what it's for; the picks in short on the button. Made hidden: it makes its menu when it shows.
 local function MakeDropdown(parent)
 	local dropdown = CreateFrame("DropdownButton", "WowMCPModelPicker", parent, "WowStyle1DropdownTemplate")
 	dropdown:Hide()
 	dropdown:SetWidth(PICKER_WIDTH)
-	dropdown:SetSelectionTranslator(function(selection) return Name(Choice(selection.data) or MODELS[1]) end)
+	dropdown:SetSelectionText(Shown) -- one text for both groups, not each selected radio's joined
 	dropdown:SetupMenu(function(_, root)
-		for _, choice in ipairs(MODELS) do
-			root:CreateRadio(Name(choice) .. "  " .. NOTE .. choice.note .. "|r",
-				function(id) return Picked().id == id end,
-				function(id) SetModel(Choice(id)) end,
-				choice.id)
+		for i, kind in ipairs(KINDS) do
+			if i > 1 then root:CreateDivider() end
+			root:CreateTitle(kind.title)
+			for _, choice in ipairs(kind.list) do
+				root:CreateRadio(Name(kind, choice) .. "  " .. NOTE .. choice.note .. "|r",
+					function(id) return Picked(kind).id == id end,
+					function(id) kind.Set(Choice(kind, id)) end,
+					choice.id)
+			end
 		end
 	end)
 	dropdown:SetTooltip(function(tooltip) Tooltip(tooltip) end)
@@ -477,7 +543,8 @@ local function MakeDropdown(parent)
 	end
 end
 
--- The fallback: a button with the model's name. A click picks the next one, a right-click the one before.
+-- The fallback: a button with the picks in short. A click picks the next model, a right-click the one
+-- before; with Shift, the thinking level.
 local function MakeButton(parent)
 	local ok, button = pcall(CreateFrame, "Button", "WowMCPModelPicker", parent, "UIPanelButtonTemplate")
 	if not ok then
@@ -490,15 +557,16 @@ local function MakeButton(parent)
 	button:Hide()
 	button:SetSize(PICKER_WIDTH, 22)
 	button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-	local function Update() button:SetText(Name(Picked())) end
+	local function Update() button:SetText(Shown()) end
 	local function ShowTooltip(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOP")
 		Tooltip(GameTooltip, true)
 		GameTooltip:Show()
 	end
 	button:SetScript("OnClick", function(self, mouse)
-		local _, i = Choice(Picked().id)
-		SetModel(MODELS[(i - 1 + (mouse == "RightButton" and -1 or 1)) % #MODELS + 1])
+		local kind = IsShiftKeyDown and IsShiftKeyDown() and EFFORT or MODEL
+		local _, i = Choice(kind, Picked(kind).id)
+		kind.Set(kind.list[(i - 1 + (mouse == "RightButton" and -1 or 1)) % #kind.list + 1])
 		Update()
 		ShowTooltip(self)
 	end)
