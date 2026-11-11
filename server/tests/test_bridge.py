@@ -129,7 +129,7 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     prompts, busy = [], []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         busy.append(prompt)
         assert len(busy) == 1, "one question at a time"
         prompts.append(prompt)
@@ -170,7 +170,7 @@ def test_new_conversation_in_game_end_to_end(live_game, addons, tmp_path, monkey
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     prompts = []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         prompts.append(prompt)
         return f"Answer {len(prompts)}."
 
@@ -203,7 +203,7 @@ def test_follow_ups_see_the_conversation(addons):
     now = [1_000_000.0]
     prompts = []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         prompts.append(prompt)
         return f"Answer {len(prompts)}:\n\n- **Karolek**   is in The Drag."
 
@@ -269,7 +269,7 @@ def test_failed_answers_are_not_remembered(addons):
     outcomes = [AgentError("not logged in"), AgentTimeout("it took over 180 seconds"), KeyError("broken"), "",
                 "It's in Orgrimmar.", "Go west."]
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         prompts.append(prompt)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -284,7 +284,7 @@ def test_failed_answers_are_not_remembered(addons):
     assert prompts[5] == earlier(("where is it?", 0, "It's in Orgrimmar.")) + "Thorgrim asks, in game: and then?"
 
     # Nor is an answer the player never sees because the bridge is stopping.
-    b.agent = lambda prompt, model: "Too late."
+    b.agent = lambda prompt, model, asker: "Too late."
     b.stop.set()
     b.answer(bridge.Question("one more?", "Thorgrim"))
     assert [e.answer for e in b.history.recent("Thorgrim")] == ["It's in Orgrimmar.", "Go west."]
@@ -293,7 +293,7 @@ def test_failed_answers_are_not_remembered(addons):
 def test_history_survives_a_restart(addons):
     prompts = []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         prompts.append(prompt)
         return "Karolek, in The Drag."
 
@@ -315,7 +315,7 @@ def test_new_conversation(addons, running):
     """A reset waits its turn behind the questions asked before it."""
     prompts, started, release = [], threading.Event(), threading.Event()
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         prompts.append(prompt)
         started.set()
         release.wait(5)
@@ -414,7 +414,7 @@ def test_chat_command(run_client):
 def test_questions_wait_their_turn(addons, running):
     said, busy, started, release = [], [], threading.Event(), threading.Event()
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         busy.append(prompt)
         assert len(busy) == 1, "one question at a time"
         started.set()
@@ -436,14 +436,14 @@ def test_questions_wait_their_turn(addons, running):
 def test_problems_are_reported_in_game(addons, tmp_path):
     said = []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         raise AgentError("the agent exited with status 1: not logged in")
 
     b = Bridge(addons, agent, publish=lambda text, style, sender, reply, default_model: said.append((sender, text)))
     b.answer(bridge.Question("where am I?"))
     b.accept(stream.Post(1, 1, end=0, error="post 1 arrived damaged"))
     b.accept(stream.Post(1, 2, end=0, value={"not": "a question"}))
-    b.agent = lambda prompt, model: {}["broken"]
+    b.agent = lambda prompt, model, asker: {}["broken"]
     b.answer(bridge.Question("where am I?"))
     assert said == [
         ("Claude", "Sorry, I couldn't answer that: the agent exited with status 1: not logged in"),
@@ -527,7 +527,7 @@ def test_answers_come_from_the_picked_model(addons, caplog):
     caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
     asked, said = [], []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         asked.append((prompt.rsplit(": ", 1)[1], model))
         return f"Answer {len(asked)}."
 
@@ -592,7 +592,7 @@ def test_claude_code_runs_the_picked_model(addons, tmp_path):
 
     # From a post to the command line: an unknown model is dropped on the way, so the bridge's own runs.
     ran = []
-    b = Bridge(addons, lambda prompt, model: ran.append(json.loads(agent(prompt, model))) or "ok",
+    b = Bridge(addons, lambda prompt, model, asker: ran.append(json.loads(agent(prompt, model))) or "ok",
                publish=lambda text, style, sender, reply, default_model: None, history=bridge.History(None),
                models=True, model="opus")
     for model in ("haiku", "--dangerously-skip-permissions", "rm -rf ~"):
@@ -609,7 +609,7 @@ def test_model_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeypatc
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     asked = []
 
-    def agent(prompt, model):
+    def agent(prompt, model, asker):
         asked.append((prompt, model))
         return f"Answer {len(asked)}."
 

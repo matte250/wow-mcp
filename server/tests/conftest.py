@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from wow_mcp import app, battlenet, game, online_auctions
+from wow_mcp import app, battlenet, game, memory, online_auctions
 from wow_mcp.install import install
 
 HERE = Path(__file__).parent
@@ -58,6 +58,14 @@ def no_online_prices(tmp_path, monkeypatch):
         raise AssertionError("a test reached for Blizzard's real API")
 
     monkeypatch.setattr(online_auctions, "make_client", offline)
+
+
+@pytest.fixture(autouse=True)
+def no_real_memory(tmp_path, monkeypatch):
+    """Keep every test away from the player's conversation archive and notes (memory.py): a data
+    folder of its own, and no player named by a bridge."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv(memory.PLAYER_ENV, raising=False)
 
 
 @pytest.fixture

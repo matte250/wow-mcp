@@ -10,6 +10,7 @@ wow-mcp = "wow_mcp.server:main"
 wow-mcp-install = "wow_mcp.install:main"
 wow-mcp-bridge = "wow_mcp.bridge:main"
 wow-mcp-auctions = "wow_mcp.online_auctions:main"
+wow-mcp-memory = "wow_mcp.memory:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
