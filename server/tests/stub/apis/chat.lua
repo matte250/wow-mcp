@@ -78,7 +78,9 @@ for i = 1, MAX_WINDOWS do
 	local frame = CreateFrame("Frame", "ChatFrame" .. i)
 	for name, fn in pairs(ChatWindow) do frame[name] = fn end
 	frame.id, frame.lines = i, i == 1 and client.chat or {}
-	-- Not font strings of the addon's (client.fontStrings), so it gets plain regions.
+	-- Not font strings of the addon's (client.fontStrings), so it gets plain regions. The tab fades
+	-- with its window (FCF_FadeInChatFrame): a test sets its alpha.
+	_G["ChatFrame" .. i .. "Tab"] = client.NewRegion("Tab", frame)
 	local flash = client.NewRegion("Flash", frame)
 	flash.FlashAnim = {
 		IsPlaying = function(anim) return anim.playing == true end,
