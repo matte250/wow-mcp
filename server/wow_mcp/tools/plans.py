@@ -263,7 +263,8 @@ class Step(BaseModel):
         list[Npc],
         Field(max_length=4, description="The characters and mobs this step is about: the quest giver, vendor or "
               "trainer to find, the mobs to kill. The player sees what they look like (their models) when they "
-              "hover the step in the checklist."),
+              "hover the step in the checklist. Give them on every step that names a character or mob: a step "
+              "without them shows no model. Look the NPC IDs up (Wowhead's NPC pages) rather than leaving them out."),
     ] = []
 
 
@@ -506,7 +507,8 @@ async def show_plan(
     Use it for anything that takes several steps: crafting (bank, vendors, farming, trainer, crafting), quest
     chains and leveling routes, gathering. The current step's places drive the navigator arrow and the game's
     waypoint (a looping route for farming spots) and its areas are shaded on the map. Hovering a step shows
-    the models of the NPCs it names (npcs), so the player knows who or what to look for. The player can keep
+    the models of the NPCs it names (npcs), so the player knows who or what to look for: add them to every
+    step about a quest giver, vendor, trainer or mob, or the player sees no models. The player can keep
     several plans, each under its own tab above the checklist, with a name and an icon for its kind: this plan
     replaces the one in the tab of the same name (the tab 'Plan' if none is given) or else adds a tab, and
     becomes the one shown. It also replaces the route from show_route. The player can switch tabs, tick steps
@@ -573,6 +575,10 @@ async def show_plan(
         result += f"; the player's tabs are now: {', '.join(tabs)}." if len(tabs) > 1 else "."
     if manual:
         result += f"\n{manual} step(s) have nothing the game can check, so the player ticks them off."
+    if not any(s.npcs for s in steps):
+        result += ("\nNo step names its NPCs (npcs), so hovering the steps shows no models. If steps are about "
+                   "characters or mobs (quest givers, vendors, trainers, mobs to kill), send the plan again with "
+                   "their NPC IDs.")
     return result + "\nSteps already done in game tick off right away; get_plan_progress shows where they are." \
         + (f" {checked}" if checked else "") + delivery_note()
 
