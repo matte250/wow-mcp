@@ -641,31 +641,76 @@ local function Empty(model)
 	return ok and (file == nil or file == 0)
 end
 
--- The boxes with something to see side by side, the first beside the tooltip's text. A box that's
--- waiting for its model is shown too (a hidden model may never load), but can't be seen and takes
--- no place: it waits after the others (a frame that's nowhere may not load its model either).
+-- The boxes sit in one frame that's kept on screen as a whole: boxes kept on screen one by one
+-- would pile up on each other at the screen's edge.
+local holder
+
+local function Holder()
+	if not holder then
+		holder = CreateFrame("Frame", nil, UIParent)
+		holder:SetFrameStrata("TOOLTIP")
+		holder:SetClampedToScreen(true)
+		holder:Hide()
+	end
+	return holder
+end
+
+-- A frame's edge or size in UIParent's units, or nil if the client can't say (yet).
+local function Measure(frame, method)
+	local ok, value = pcall(frame[method] or error, frame)
+	if not ok or type(value) ~= "number" then return nil end
+	local okFrame, scale = pcall(frame.GetEffectiveScale or error, frame)
+	local okParent, parentScale = pcall(UIParent.GetEffectiveScale or error, UIParent)
+	if okFrame and okParent and type(scale) == "number" and type(parentScale) == "number" and parentScale > 0 then
+		value = value * scale / parentScale
+	end
+	return value
+end
+
+-- The boxes with something to see, beside the tooltip on the side of the screen with more room,
+-- nearest it first; in rows when one row doesn't fit there. A box that's waiting for its model is
+-- shown too (a hidden model may never load), but can't be seen and takes no place: it waits after
+-- the others (a frame that's nowhere may not load its model either).
 local function PlaceModels()
-	local shown = 0
-	local function place(box)
+	local seen, waiting = {}, {}
+	for _, box in ipairs(models) do
+		if box:IsShown() then table.insert(box:GetAlpha() > 0 and seen or waiting, box) end
+	end
+	local left, right = Measure(GameTooltip, "GetLeft"), Measure(GameTooltip, "GetRight")
+	local screen = Measure(UIParent, "GetWidth")
+	local stepX, stepY = MODEL_WIDTH + MODEL_GAP, MODEL_HEIGHT + MODEL_NAME + MODEL_GAP
+	local count = math.max(#seen, 1)
+	-- The right if they fit there in a row, else the left if they fit there, else the roomier side.
+	local onRight, room = true, nil
+	if left and right and screen then
+		local roomRight, roomLeft, need = screen - right - MODEL_GAP, left - MODEL_GAP, count * stepX - MODEL_GAP
+		onRight = roomRight >= need or (roomLeft < need and roomRight >= roomLeft)
+		room = onRight and roomRight or roomLeft
+	end
+	local perRow = room and math.max(1, math.min(count, math.floor((room + MODEL_GAP) / stepX))) or count
+	local h = Holder()
+	h:SetSize(perRow * stepX - MODEL_GAP, math.ceil(count / perRow) * stepY - MODEL_GAP)
+	h:ClearAllPoints()
+	if onRight then
+		h:SetPoint("TOPLEFT", GameTooltip, "TOPRIGHT", MODEL_GAP, 0)
+	else
+		h:SetPoint("TOPRIGHT", GameTooltip, "TOPLEFT", -MODEL_GAP, 0)
+	end
+	h:Show()
+	local function place(box, slot)
+		local column, row = slot % perRow, math.floor(slot / perRow)
+		if not onRight then column = perRow - 1 - column end
 		box:ClearAllPoints()
-		box:SetPoint("TOPLEFT", GameTooltip, "TOPRIGHT", MODEL_GAP + shown * (MODEL_WIDTH + MODEL_GAP), 0)
+		box:SetPoint("TOPLEFT", h, "TOPLEFT", column * stepX, -row * stepY)
 	end
-	for _, box in ipairs(models) do
-		if box:IsShown() and box:GetAlpha() > 0 then
-			place(box)
-			shown = shown + 1
-		end
-	end
-	for _, box in ipairs(models) do
-		if box:IsShown() and box:GetAlpha() == 0 then place(box) end
-	end
+	for i, box in ipairs(seen) do place(box, i - 1) end
+	for _, box in ipairs(waiting) do place(box, #seen) end
 end
 
 local function CreateModel()
-	local box = CreateFrame("Frame", nil, UIParent)
+	local box = CreateFrame("Frame", nil, Holder())
 	box:SetSize(MODEL_WIDTH, MODEL_HEIGHT + MODEL_NAME)
 	box:SetFrameStrata("TOOLTIP")
-	box:SetClampedToScreen(true)
 	box:Hide()
 	box.Back = box:CreateTexture(nil, "BACKGROUND")
 	box.Back:SetAllPoints()
@@ -703,19 +748,31 @@ local function HideModels()
 		box.npc = nil
 		box:Hide()
 	end
+	if holder then holder:Hide() end
+end
+
+local function SameNpc(a, b)
+	return a and b and a.id == b.id and a.display == b.display
 end
 
 local function ShowModels(npcs)
-	HideModels()
-	for i = 1, math.min(#npcs, MAX_MODELS) do
+	local wanted = math.min(#npcs, MAX_MODELS)
+	for i = wanted + 1, #models do
+		models[i].npc = nil
+		models[i]:Hide()
+	end
+	for i = 1, wanted do
 		local box = models[i] or CreateModel()
-		if not box then return end
+		if not box then break end
 		models[i] = box
 		local npc = npcs[i]
-		box.npc = npc
-		box.Name:SetText(npc.name and ns.Escape(npc.name) or "")
-		box:Show() -- first, and it stays shown while the step is hovered: a hidden model may not load
-		box:SetAlpha(ShowCreature(box.Model, npc) and 1 or 0) -- nothing to see: unseen until OnModelLoaded
+		-- A creature that's already on show keeps going: asking for it again restarts its animation.
+		if not (box:IsShown() and SameNpc(box.npc, npc)) then
+			box.npc = npc
+			box.Name:SetText(npc.name and ns.Escape(npc.name) or "")
+			box:Show() -- first, and it stays shown while the step is hovered: a hidden model may not load
+			box:SetAlpha(ShowCreature(box.Model, npc) and 1 or 0) -- nothing to see: unseen until OnModelLoaded
+		end
 	end
 	PlaceModels()
 end
@@ -723,6 +780,7 @@ end
 local function RowTooltip(row)
 	row.Hover:Show()
 	hovered = row
+	row.tipFor = row.n
 	local step = steps[row.n]
 	if not step then return HideModels() end
 	local done = State().done[step.n]
@@ -1160,7 +1218,8 @@ function Layout()
 		to = from + count - 1
 	end
 	f.from = from
-	for _, row in ipairs(f.Rows) do row:Hide() end
+	-- Rows stay shown while they're refilled: a row hidden under the mouse is told the mouse left,
+	-- and shown again that it came back, which would close its tooltip and restart its NPC models.
 
 	local y = PAD + HEADER
 	local function Note(text, shown)
@@ -1182,12 +1241,15 @@ function Layout()
 		y = y + FillRow(row, steps[n], n == state.current, state.done[n] ~= nil) + GAP
 		row:Show()
 	end
+	for j = i + 1, #f.Rows do f.Rows[j]:Hide() end
 	local below = to and #steps - to or 0
 	f.Later:SetText(collapsed and not state.current and GREEN .. "All steps done.|r"
 		or string.format("%d more step%s below", below, below > 1 and "s" or ""))
 	Note(f.Later, (below > 0 and not collapsed) or (collapsed and not state.current))
 	f:SetHeight(y + PAD - GAP)
 	if hovered and not hovered:IsShown() then HideModels() end -- its step went from under the mouse
+	-- Another step moved under the mouse (a new current step, scrolling): its tooltip and NPCs.
+	if hovered and hovered:IsShown() and hovered.tipFor ~= hovered.n then RowTooltip(hovered) end
 end
 
 ---------------------------------------------------------------------------

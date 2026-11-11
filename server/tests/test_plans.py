@@ -1737,6 +1737,92 @@ WHO = plan(
 )
 
 
+def test_npcs_beside_a_tooltip_near_the_screen_edge(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + WHO + r"""]])
+        client.Wait()
+        local function boxes()
+            local list = {}
+            for _, frame in ipairs(client.frames) do
+                if frame.SetCreature and frame.parent:IsShown() then table.insert(list, frame.parent) end
+            end
+            return list
+        end
+        local function at(box) return box.points[1][4], box.points[1][5] end
+        UIParent.GetWidth = function() return 1920 end
+        UIParent.GetEffectiveScale = function() return 1 end
+        GameTooltip.GetEffectiveScale = function() return 1 end
+        local function tooltipAt(left, right)
+            GameTooltip.GetLeft = function() return left end
+            GameTooltip.GetRight = function() return right end
+        end
+
+        -- Room on the right: there, as before.
+        tooltipAt(300, 600)
+        row(2).OnEnter(row(2))
+        local first, second = table.unpack(boxes())
+        local holder = first.parent
+        assert(holder.points[1][1] == "TOPLEFT" and holder.points[1][3] == "TOPRIGHT")
+        row(2).OnLeave(row(2))
+
+        -- The plan on the right of the screen: the models go to the left of the tooltip, nearest first.
+        tooltipAt(1500, 1800)
+        row(2).OnEnter(row(2))
+        first, second = table.unpack(boxes())
+        local point = holder.points[1]
+        assert(point[1] == "TOPRIGHT" and point[2] == GameTooltip and point[3] == "TOPLEFT" and point[4] == -4)
+        assert(holder.width == 2 * 130 + 4, holder.width)
+        assert(at(first) == 134 and at(second) == 0, "the first next to the tooltip")
+        row(2).OnLeave(row(2))
+
+        -- No room for a row on either side: one above the other on the roomier side, never on top of each other.
+        tooltipAt(200, 1800)
+        row(2).OnEnter(row(2))
+        first, second = table.unpack(boxes())
+        assert(holder.points[1][1] == "TOPRIGHT" and holder.width == 130 and holder.height == 2 * (170 + 16) + 4)
+        local x1, y1 = at(first)
+        local x2, y2 = at(second)
+        assert(x1 == 0 and y1 == 0 and x2 == 0 and y2 == -(170 + 16 + 4), x2 .. "," .. y2)
+        noErrors()
+    """)
+
+
+def test_npc_models_keep_going_while_the_window_updates(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + WHO + r"""]])
+        client.Wait()
+        local asked = 0
+        for _, frame in ipairs(client.frames) do
+            if frame.SetCreature then error("no models before a step is hovered") end
+        end
+        row(2).OnEnter(row(2))
+        local models = {}
+        for _, frame in ipairs(client.frames) do
+            if frame.SetCreature then
+                table.insert(models, frame)
+                local set = frame.SetCreature
+                frame.SetCreature = function(self, ...) asked = asked + 1 return set(self, ...) end
+            end
+        end
+        assert(#models == 2)
+        -- The window checks its steps every second; the step under the mouse stays shown, so it isn't
+        -- told the mouse left and came back, and its creatures aren't asked for again.
+        local hidden = 0
+        local hide = row(2).Hide
+        row(2).Hide = function(self) hidden = hidden + 1 return hide(self) end
+        client.Wait(5)
+        assert(hidden == 0 and row(2):IsShown(), "the hovered row was hidden " .. hidden .. " times")
+        -- Entering the same step again doesn't restart them either.
+        row(2).OnEnter(row(2))
+        assert(asked == 0, asked .. " creatures asked for again")
+        noErrors()
+    """)
+
+
 def test_hovering_a_step_shows_its_npcs(game):
     game(r"""
         client.LoadAddon()
@@ -1770,15 +1856,18 @@ def test_hovering_a_step_shows_its_npcs(game):
         local shown = models(true)
         assert(#shown == 2 and shown[1].creature == 6 and shown[2].creature == 257)
         assert(name(shown[1]) == "Kobold Vermin" and name(shown[2]) == "Kobold Worker")
-        local point = shown[1].parent.points[1]
+        -- In one frame beside the tooltip, which is kept on screen as a whole.
+        local holder = shown[1].parent.parent
+        local point = holder.points[1]
         assert(point[1] == "TOPLEFT" and point[2] == GameTooltip and point[3] == "TOPRIGHT" and point[4] == 4)
-        assert(left(shown[2]) == 4 + 130 + 4 and shown[1].width == 130 and shown[1].height == 170)
+        assert(shown[1].parent.points[1][2] == holder and holder:IsShown())
+        assert(left(shown[1]) == 0 and left(shown[2]) == 130 + 4 and shown[1].width == 130 and shown[1].height == 170)
         assert(shown[1].parent.Back.color[4] > 0.5, "on a dark background")
         assert(tip():find("NPC: Kobold Vermin\nNPC: Kobold Worker", 1, true), tip())
 
         -- Only while it's hovered.
         leave(2)
-        assert(#models(true) == 0)
+        assert(#models(true) == 0 and not holder:IsShown())
 
         -- A step without NPCs shows none; the same frames serve every step.
         enter(4)
@@ -1796,8 +1885,8 @@ def test_hovering_a_step_shows_its_npcs(game):
         enter(3)
         shown = models(true)
         assert(#models() == 3 and #shown == 2, #shown)
-        assert(shown[1].creature == 40 and left(shown[1]) == 4 and name(shown[1]) == "Kobold Miner")
-        assert(shown[2].creature == 888888 and shown[2].display == 373 and left(shown[2]) == 138)
+        assert(shown[1].creature == 40 and left(shown[1]) == 0 and name(shown[1]) == "Kobold Miner")
+        assert(shown[2].creature == 888888 and shown[2].display == 373 and left(shown[2]) == 134)
         assert(tip():find("NPC: Nobody\nNPC: Kobold Miner\nNPC: Old Kobold\nNPC: Kobold Tunneler", 1, true), tip())
         -- It may only have needed loading, which a hidden model might never do: its box is shown, but
         -- can't be seen. Once it's loaded it joins the others.
@@ -1806,7 +1895,7 @@ def test_hovering_a_step_shows_its_npcs(game):
         client.unseenCreatures[999999] = nil
         late.OnModelLoaded(late)
         shown = models(true)
-        assert(#shown == 3 and shown[1].creature == 999999 and left(shown[1]) == 4 and left(shown[3]) == 272)
+        assert(#shown == 3 and shown[1].creature == 999999 and left(shown[1]) == 0 and left(shown[3]) == 268)
         leave(3)
         assert(not late.parent:IsShown(), "no box waits once the mouse left")
         late.OnModelLoaded(late)
