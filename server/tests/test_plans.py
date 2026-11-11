@@ -1789,6 +1789,45 @@ def test_npcs_beside_a_tooltip_near_the_screen_edge(game):
     """)
 
 
+def test_npcs_still_loading_never_share_a_place(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + WHO + r"""]])
+        client.Wait()
+        -- Neither of step 2's creatures has loaded yet: both boxes wait, unseen, but the client may
+        -- draw them anyway, so each has a place of its own.
+        client.unseenCreatures[6], client.unseenCreatures[257] = true, true
+        local holderShown = {}
+        local NewFrame = CreateFrame
+        function CreateFrame(kind, ...)
+            local frame = NewFrame(kind, ...)
+            if frame.SetCreature then
+                local set = frame.SetCreature
+                function frame:SetCreature(id)
+                    -- The box's frame is shown, so a model asked for now can load.
+                    table.insert(holderShown, self.parent.parent:IsShown())
+                    return set(self, id)
+                end
+            end
+            return frame
+        end
+        row(2).OnEnter(row(2))
+        local boxes = {}
+        for _, frame in ipairs(client.frames) do
+            if frame.SetCreature then table.insert(boxes, frame.parent) end
+        end
+        assert(#boxes == 2 and boxes[1]:GetAlpha() == 0 and boxes[2]:GetAlpha() == 0)
+        assert(boxes[1].points[1][4] ~= boxes[2].points[1][4], "two waiting boxes in one place")
+        assert(#holderShown == 2 and holderShown[1] and holderShown[2], "a creature asked for while hidden")
+        -- Once one has loaded it's first; the other still has its own place.
+        client.unseenCreatures[257] = nil
+        boxes[2].Model.OnModelLoaded(boxes[2].Model)
+        assert(boxes[2].points[1][4] == 0 and boxes[1].points[1][4] == 134)
+        noErrors()
+    """)
+
+
 def test_npc_models_keep_going_while_the_window_updates(game):
     game(r"""
         client.LoadAddon()

@@ -667,10 +667,10 @@ local function Measure(frame, method)
 	return value
 end
 
--- The boxes with something to see, beside the tooltip on the side of the screen with more room,
--- nearest it first; in rows when one row doesn't fit there. A box that's waiting for its model is
--- shown too (a hidden model may never load), but can't be seen and takes no place: it waits after
--- the others (a frame that's nowhere may not load its model either).
+-- The boxes, beside the tooltip on the side of the screen with more room, nearest it first; in rows
+-- when one row doesn't fit there. Boxes with something to see come first. A box that's waiting for
+-- its model is shown too (a hidden model may never load) and gets a place of its own after them:
+-- the client may draw its model even though the box can't be seen.
 local function PlaceModels()
 	local seen, waiting = {}, {}
 	for _, box in ipairs(models) do
@@ -679,7 +679,7 @@ local function PlaceModels()
 	local left, right = Measure(GameTooltip, "GetLeft"), Measure(GameTooltip, "GetRight")
 	local screen = Measure(UIParent, "GetWidth")
 	local stepX, stepY = MODEL_WIDTH + MODEL_GAP, MODEL_HEIGHT + MODEL_NAME + MODEL_GAP
-	local count = math.max(#seen, 1)
+	local count = math.max(#seen + #waiting, 1)
 	-- The right if they fit there in a row, else the left if they fit there, else the roomier side.
 	local onRight, room = true, nil
 	if left and right and screen then
@@ -704,7 +704,7 @@ local function PlaceModels()
 		box:SetPoint("TOPLEFT", h, "TOPLEFT", column * stepX, -row * stepY)
 	end
 	for i, box in ipairs(seen) do place(box, i - 1) end
-	for _, box in ipairs(waiting) do place(box, #seen) end
+	for i, box in ipairs(waiting) do place(box, #seen + i - 1) end
 end
 
 local function CreateModel()
@@ -756,6 +756,15 @@ local function SameNpc(a, b)
 end
 
 local function ShowModels(npcs)
+	-- Beside the tooltip and shown before any creature is asked for: a model asked for while its
+	-- frame is hidden may never load. PlaceModels picks the side afterwards.
+	local h = Holder()
+	if not h:IsShown() then
+		h:ClearAllPoints()
+		h:SetPoint("TOPLEFT", GameTooltip, "TOPRIGHT", MODEL_GAP, 0)
+		h:SetSize(MODEL_WIDTH, MODEL_HEIGHT + MODEL_NAME)
+		h:Show()
+	end
 	local wanted = math.min(#npcs, MAX_MODELS)
 	for i = wanted + 1, #models do
 		models[i].npc = nil
