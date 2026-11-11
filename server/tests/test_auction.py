@@ -8,6 +8,8 @@ once per 15 minutes. Listed: Medium Hide (4232) 30 at 45c, 12 at 52c (2 of them 
 own at 80s. The player has 10 Light Leather in the bank, none in their bags. What they could sell from their bags
 (stub/apis/inventory.lua), most valuable first: Raider's Legguards (9789), 7 Linen Cloth (2589), 2 Ruined Pelts
 (4865), 5 Refreshing Spring Water (159).
+
+The status panel under the window (WowMCPAuctionPanel) is read as text, without colours and icons, like the chat.
 """
 
 import asyncio
@@ -581,6 +583,303 @@ def test_the_priority_list(game):
         -- Replacing the watch list drops what the AI watched before.
         WowMCP_Receive({ seq = 1003, auctionWatch = { items = {}, cleared = now + 20 } })
         assert(next(realm().tracked) == nil)
+        noErrors()
+    """)
+
+
+PANEL = r"""
+    -- The status panel under the window: its line as read, and whether it shows.
+    local function line() return WowMCPAuctionPanel and plain(WowMCPAuctionPanel.Text:GetText()) or "" end
+    local function showing() return WowMCPAuctionPanel ~= nil and WowMCPAuctionPanel:IsShown() end
+    -- Every line it showed, in order, and how many times it was drawn.
+    local lines, draws = {}, 0
+    local Region = getmetatable(UIParent:CreateFontString())
+    local SetText = Region.SetText
+    function Region:SetText(text)
+        if WowMCPAuctionPanel and self == WowMCPAuctionPanel.Text then
+            draws = draws + 1
+            if lines[#lines] ~= plain(text) then lines[#lines + 1] = plain(text) end
+        end
+        return SetText(self, text)
+    end
+    -- Ticks until the panel shows a line matching pattern; that line.
+    local function untilLine(pattern, ticks)
+        for _ = 1, ticks or 200 do
+            if showing() and line():find(pattern) then return line() end
+            client.Tick()
+        end
+        error("the panel never showed " .. pattern .. "; it showed: " .. table.concat(lines, " / "))
+    end
+    -- None of it was a problem (Auction.lua's errors show as "Auction prices: ...").
+    local function noProblems()
+        for _, l in ipairs(lines) do assert(not l:find("^Auction prices:"), l) end
+    end
+"""
+
+
+def test_the_status_panel_follows_the_full_scan(game):
+    """A big full scan: asked for, waited for, read (in small chunks still, the panel redrawn at most once a tick), done;
+    then it fades out. A visit too soon for another full scan says when one can be."""
+    game(SAVED + PANEL + r"""
+        client.FillAuctionHouse(100000, 5000, 4)
+        local ns = setUp()
+        -- The panel redraws from a timer, due within a quarter of a second: those are timed too (not the stub's own
+        -- auction house answering, half a second and more later).
+        local After, slowestTimer = C_Timer.After, 0
+        C_Timer.After = function(delay, fn)
+            if delay > 0.25 then return After(delay, fn) end
+            return After(delay, function()
+                local started = os.clock()
+                fn()
+                slowestTimer = math.max(slowestTimer, (os.clock() - started) * 1000)
+            end)
+        end
+        client.OpenAuctionHouse()
+        local blizzard = {}
+        for key in pairs(AuctionHouseFrame) do blizzard[key] = true end
+        local opened = client.now
+        untilScanned(1)
+        client.Tick()
+        local ticks = (client.now - opened) / 0.5
+
+        -- Our own frame, under the window at its right (its tabs hang under the left side), only anchored to it.
+        local f = WowMCPAuctionPanel
+        local point, to, relative, x, y = f:GetPoint()
+        assert(f.parent == UIParent and point == "TOPRIGHT" and to == AuctionHouseFrame and relative == "BOTTOMRIGHT")
+        assert(x < 0 and y < 0 and f.width >= 220 and f.width <= 460 and f.strata == "MEDIUM", f.width)
+        -- Asked for, waited for, read: further each time it's drawn; done.
+        local all = table.concat(lines, " / ")
+        assert(lines[1] == "Full scan: asking the game…" and lines[2] == "Full scan: waiting for the game…", all)
+        local read = {}
+        for _, l in ipairs(lines) do
+            local percent = l:match("^Reading the full scan… (%d+)%%$")
+            if percent then read[#read + 1] = tonumber(percent) end
+        end
+        assert(#read >= 5 and lines[3]:find("^Reading the full scan…"), all)
+        for i = 2, #read do assert(read[i] > read[i - 1], all) end
+        assert(line() == "Full scan: 5,006 items · prices up to date" and #lines == #read + 3, all)
+        assert(f:GetAlpha() == 1 and f.Bar:GetValue() == 1 and f.Bar.barColor[2] == 0.8)
+        -- At most one redraw a tick (two a second here, a few in the game), never one per frame; and the frames stay
+        -- short, the redraws' too.
+        assert(draws <= ticks, draws .. " redraws in " .. ticks .. " ticks")
+        assert(frames >= 20 and slowest < 5, string.format("%d frames, the slowest %.2f ms", frames, slowest))
+        assert(slowestTimer < 5, string.format("the slowest timer %.2f ms", slowestTimer))
+
+        -- Shown for four seconds, then it fades out, and stays out.
+        client.Wait(7)
+        assert(showing() and f:GetAlpha() == 1)
+        client.Wait(2)
+        assert(showing() and f:GetAlpha() > 0 and f:GetAlpha() < 1, f:GetAlpha())
+        client.Wait(3)
+        assert(not showing())
+        client.Wait(10)
+        assert(not showing())
+        -- Nothing was written on Blizzard's window.
+        for key in pairs(AuctionHouseFrame) do assert(blizzard[key], key) end
+        client.CloseAuctionHouse()
+
+        -- Back six minutes after the account's last full scan: the prices are recent, and the next one can't be yet.
+        WowMCPDB.auctionScan.asked = time() - 360
+        client.OpenAuctionHouse()
+        client.Tick()
+        assert(showing() and line() == "Prices up to date · next full scan possible in 9 min", line())
+        client.CloseAuctionHouse()
+        assert(not showing())
+        noProblems()
+        noErrors()
+    """)
+
+
+def test_the_status_panel_while_searching(game):
+    """The searches: how many of the AI's and of the bags' are done, which one is under way, about how long is left;
+    paused while the player looks at an item, sells or looks at their auctions, or Blizzard's window isn't there."""
+    game(PANEL + r"""
+        setUp()
+        scannedRecently()
+        client.OpenAuctionHouse()
+        client.Tick()
+        -- All ten to go, the AI's six and the bags' four, at the pace the game allows (80 a minute).
+        local f = WowMCPAuctionPanel
+        assert(showing() and line() == "Checking prices: watched 0/6 · bags 0/4 · about 10 s left", line())
+        assert(f.Bar:GetValue() == 0 and f.Bar.barColor[1] == 1)
+        -- One at a time: the one under way counts, and is named.
+        assert(untilLine("watched 3/6") == "Checking prices: watched 3/6 · bags 0/4 · Fine Thread · about 5 s left", line())
+        assert(math.abs(f.Bar:GetValue() - 0.3) < 1e-9, f.Bar:GetValue())
+
+        -- The player opens an item: paused, with how many are left, until they're back.
+        client.ViewAuctionItem(783)
+        assert(untilLine("^Paused") == "Paused while you look at an item · 6 prices left", line())
+        assert(f.Bar.barColor[1] == 0.5)
+        client.Wait(6)
+        assert(line() == "Paused while you look at an item · 6 prices left", line())
+        client.BackToBrowse()
+        assert(untilLine("bags 1/4"):find("^Checking prices: watched 6/6 · bags 1/4 · Raider's Legguards · about 5 s left$"),
+            line())
+        -- Selling, and the player's own auctions.
+        client.SellAuctionItem(4232)
+        assert(untilLine("^Paused"):find("^Paused while you sell · %d prices? left$"), line())
+        AuctionHouseFrame.mode = AuctionHouseFrameDisplayMode.Auctions
+        client.Tick()
+        assert(line():find("^Paused while you look at your auctions · %d prices? left$"), line())
+        -- Another addon's window instead of Blizzard's: said, at the top of the screen.
+        client.BackToBrowse()
+        AuctionHouseFrame:Hide()
+        client.Tick()
+        assert(line():find("^Paused: the game's auction house window isn't showing %(another addon's instead%?%) · %d prices? left$"),
+            line())
+        local point, to = f:GetPoint()
+        assert(point == "TOP" and to == UIParent)
+        AuctionHouseFrame:Show()
+
+        -- Many changes at once (the player's own searches, say) still make one redraw.
+        local before = draws
+        for _ = 1, 50 do client.Fire("COMMODITY_SEARCH_RESULTS_UPDATED", 783) end
+        assert(draws == before)
+        client.Tick()
+        assert(draws - before <= 1, draws - before)
+
+        -- All done: how things stand, back under the window; the chat has the summary, not a line per item.
+        local done = untilLine("^Prices up to date")
+        local wait = math.ceil((WowMCPDB.auctionScan.asked + 900 - time()) / 60)
+        assert(done == "Prices up to date · next full scan possible in " .. wait .. " min", done)
+        point, to = f:GetPoint()
+        assert(point == "TOPRIGHT" and to == AuctionHouseFrame and f.Bar:GetValue() == 1)
+        assert(searched() == ALL and has("Noted the auction prices of 10 items for your AI."), searched())
+        assert(not has("Checking prices") and not has("Paused"), chat())
+        -- Closed: gone at once; open again: there again.
+        client.CloseAuctionHouse()
+        assert(not showing())
+        client.OpenAuctionHouse()
+        client.Tick()
+        assert(showing() and line():find("^Prices up to date"), line())
+        noProblems()
+        noErrors()
+    """)
+
+
+def test_the_status_panel_tooltip(game):
+    """Hovering the panel: the full scans, what's still to search in the order it goes, the AI's apart from the bags'
+    and bank's, and the commands; kept up to date while the mouse is on it."""
+    game(PANEL + r"""
+        setUp()
+        client.itemNames[4340], client.itemsLoaded[4340] = "Gray Dye", true
+        -- Priced before, a while ago: they go after everything never priced, the stalest first.
+        prices()[4253] = { price = 9500, listed = 3, at = time() - 3600, src = "search", name = "Toughened Leather Gloves" }
+        prices()[2318] = { price = 30, listed = 80, at = time() - 1200, src = "search", name = "Light Leather" }
+        prices()[9789] = { price = 5000, listed = 1, at = time() - 1200, src = "search", name = "Raider's Legguards" }
+        scannedRecently()
+        client.OpenAuctionHouse()
+        untilLine("watched 3/6")
+        local tip
+        GameTooltip.SetOwner = function(_, owner, anchor) tip = { owner = owner, anchor = anchor } end
+        GameTooltip.SetText = function(_, text) tip[#tip + 1] = plain(text) end
+        GameTooltip.AddLine = function(_, text) tip[#tip + 1] = plain(text) end
+        local f = WowMCPAuctionPanel
+        f.OnEnter(f)
+        local wait = math.ceil((WowMCPDB.auctionScan.asked + 900 - time()) / 60)
+        local expected = {
+            "Auction prices for your AI",
+            "No full scan yet, next one possible in " .. wait .. " min.",
+            "Checking now: Gray Dye",
+            "For your AI (goals, plan, watched, asked about), 2 still to check:",
+            "   Toughened Leather Gloves (watched)",
+            "   Light Leather (plan)",
+            "From your bags and bank, 4 still to check:",
+            "   Linen Cloth (in your bags)",
+            "   Ruined Pelt (in your bags)",
+            "   Refreshing Spring Water (in your bags)",
+            "   Raider's Legguards (in your bags)",
+            "/mcp prices: the prices your AI has, and look the list up again. /mcp prices panel off: hide this.",
+        }
+        assert(tip.owner == f and tip.anchor == "ANCHOR_TOP")
+        assert(table.concat(tip, "\n") == table.concat(expected, "\n"), table.concat(tip, "\n"))
+
+        -- Redrawn as the searches go on, while the mouse is on it.
+        client.Wait(2)
+        assert(tip[3] == "Checking now: Linen Cloth" and tip[7] == "From your bags and bank, 3 still to check:",
+            table.concat(tip, "\n"))
+        f.OnLeave(f)
+        tip = nil
+        client.Wait(2)
+        assert(tip == nil, "redrawn after the mouse left")
+        -- Searched in that order.
+        untilLine("^Prices up to date")
+        assert(searched() == "4232,4289,2321,4340,2589,4865,159,4253,2318,9789", searched())
+        noProblems()
+        noErrors()
+    """)
+
+
+def test_the_status_panel_can_be_turned_off(game):
+    """/mcp prices panel off: hidden at once and at later visits, also after a /reload; the lookups go on. on brings it
+    back."""
+    game(PANEL + r"""
+        -- /reload: Lua state, frames and loaded slots reset (Blizzard's window too); saved variables don't.
+        local function Reload()
+            for _, t in ipairs({ client.loaded, client.tickers, client.timers, client.frames, client.chat,
+                                 client.fontStrings }) do
+                wipe(t)
+            end
+            AuctionHouseFrame, WowMCPAuctionPanel = nil, nil
+            return client.LoadAddon()
+        end
+        setUp()
+        scannedRecently()
+        client.OpenAuctionHouse()
+        client.Wait(2)
+        assert(showing())
+        SlashCmdList.WOWMCP("prices panel off")
+        assert(not showing() and WowMCPDB.auctionPanel.hidden == true)
+        assert(has("The auction house status panel is off. /mcp prices panel on brings it back."), chat())
+        client.Wait(20)
+        assert(not showing() and searched() == ALL, searched())
+        client.CloseAuctionHouse()
+
+        Reload()
+        client.Wait()
+        client.OpenAuctionHouse()
+        client.Wait(4)
+        assert(WowMCPAuctionPanel == nil)
+        SlashCmdList.WOWMCP("prices panel")
+        assert(has("The auction house status panel is off."), chat())
+
+        SlashCmdList.WOWMCP("prices panel on")
+        assert(WowMCPDB.auctionPanel.hidden == nil and has("The auction house status panel is on"), chat())
+        client.Tick()
+        assert(showing() and line():find("^Prices up to date"), line())
+        -- /mcp prices itself is as before: everything looked up again.
+        SlashCmdList.WOWMCP("prices")
+        assert(has("Looking up the auction prices of 10 items."), chat())
+        client.Tick()
+        assert(line():find("^Checking prices: watched 0/6 · bags 0/4"), line())
+        noProblems()
+        noErrors()
+    """)
+
+
+def test_the_status_panel_shows_the_upgrade_finder(game):
+    """find_upgrades while the player is at the auction house, with nothing else going on there: how far it is."""
+    game(PANEL + r"""
+        client.LoadAddon()
+        client.Wait()
+        client.FillGear(100000, 5000)
+        local ids = {}
+        for i = 0, 19999 do ids[#ids + 1] = 100000 + i end
+        client.Scanned(ids, function(id) return 100 + id % 997 end)
+        scannedRecently()
+        client.OpenAuctionHouse()
+        untilLine("^Prices up to date")
+        WowMCP_Receive({ seq = 1000, upgradeQuery = { id = 1000, at = time() } })
+        untilLine("^Looking for upgrades")
+        untilLine("^Prices up to date", 400)
+        local found = {}
+        for _, l in ipairs(lines) do
+            local percent = l:match("^Looking for upgrades: (%d+)%%$")
+            if percent then found[#found + 1] = tonumber(percent) end
+        end
+        assert(#found >= 3, table.concat(lines, " / "))
+        for i = 2, #found do assert(found[i] > found[i - 1], table.concat(lines, " / ")) end
+        noProblems()
         noErrors()
     """)
 

@@ -15,8 +15,11 @@
 -- Weapons and armor can have random suffixes ("of the Bear"), each with its own stats but the same item ID, so
 -- the full scan also keeps their cheapest price per suffix, from each auction's link.
 --
--- The upgrade finder (find_upgrades, at the end) searches all of it, plus quest rewards and vendors, for gear
--- that beats what the player wears.
+-- The upgrade finder (find_upgrades) searches all of it, plus quest rewards and vendors, for gear that beats what
+-- the player wears.
+--
+-- While the window is open, a status panel under it (at the end) shows what's going on: the full scan, the searches
+-- and how many are left, and why they wait.
 --
 -- The lookups must not disturb the player's own browsing. Searches are item searches, and in Blizzard's
 -- auction house window (Blizzard_AuctionHouseUI, Shared and Mainline code on Forever) the Browse view only
@@ -64,6 +67,7 @@ local reader  -- a full scan being read (see StartRead)
 local scanAdded = 0 -- items new to the scan table, for the upgrade finder walking it
 local lookup  -- what get_auction_prices asks for: { id, items }
 local problem
+local Notify, PanelCommand -- the status panel (at the end): Notify() whenever what it shows may have changed
 
 -- WowMCPDB.auction[realm] = {
 --   items = { [item ID] = { price (cheapest, per item, copper), listed, n (auctions), tiers = { { price, count } },
@@ -113,6 +117,7 @@ end
 
 local function Report(err)
 	problem = tostring(err)
+	if visit then visit.problem = problem end -- the panel says so
 end
 
 local function Here()
@@ -379,6 +384,7 @@ local function StopReading(state)
 	reader = nil
 	scanner:SetScript("OnUpdate", nil)
 	if visit and visit.scan then visit.scan.state = state end
+	Notify()
 end
 
 -- Whether an item is a weapon or armor, from the client's static data; asked once per item per read.
@@ -503,6 +509,7 @@ local function ReadSome()
 				for itemID in pairs(r.points) do
 					if r.listed[itemID] then r.queue[#r.queue + 1] = itemID end
 				end
+				r.queued = #r.queue -- for the panel's progress
 			end
 		elseif r.queue[1] then
 			DetailOne(r)
@@ -514,6 +521,7 @@ local function ReadSome()
 			if again then StartRead() end
 		end
 	end
+	if reader == r then Notify() end -- cheap: the panel redraws from a timer, a few times a second
 end
 
 -- REPLICATE_ITEM_LIST_UPDATE: the full scan's auctions are there, whoever asked for them.
@@ -550,6 +558,7 @@ function StartRead()
 			StopReading("lost")
 		end
 	end)
+	Notify()
 end
 
 ---------------------------------------------------------------------------
@@ -613,7 +622,8 @@ end
 -- /mcp prices at the auction house: the whole priority list again, recent prices too.
 local function Again()
 	visit.priority, visit.searched, visit.force = Priority(), {}, true
-	visit.notBefore, visit.told, visit.finished = GetTime(), nil, nil
+	visit.notBefore, visit.told, visit.finished, visit.last = GetTime(), nil, nil, nil
+	Notify()
 	return #visit.priority
 end
 
@@ -634,7 +644,9 @@ local function Send(itemID)
 	table.insert(sent, GetTime())
 	visit.searched[itemID] = true
 	visit.count = visit.count + 1
+	visit.last = itemID -- the panel names it until the next one goes
 	C_AuctionHouse.SendSearchQuery(key, sorts, false)
+	Notify()
 end
 
 local function Replicate()
@@ -642,6 +654,7 @@ local function Replicate()
 	visit.scan = { state = "asked", at = GetTime() }
 	table.insert(sent, GetTime())
 	C_AuctionHouse.ReplicateItems()
+	Notify()
 end
 
 -- Once per visit, when the goals' and the plan's items have their prices: Goals.lua points out the ones
@@ -681,6 +694,7 @@ end
 
 local function Step()
 	if not visit then return end
+	Notify() -- also keeps the panel's countdowns and pauses current
 	local now = GetTime()
 	if current and now - current.at > TIMEOUT then current = nil end -- no answer: on to the next
 	if current then return end
@@ -712,6 +726,7 @@ local function Result(itemID, read, arg)
 	entry.src = "search"
 	Store(itemID, entry, time(), Here())
 	if current and current.item == itemID then current = nil end
+	Notify()
 end
 
 ---------------------------------------------------------------------------
@@ -726,22 +741,36 @@ local function Ago(at)
 	return string.format("%d days ago", math.floor(minutes / 1440))
 end
 
+-- 5218 as "5,218", as the client writes large numbers.
+local function Thousands(n)
+	n = math.floor(n)
+	if BreakUpLargeNumbers then
+		local ok, text = pcall(BreakUpLargeNumbers, n)
+		if ok and type(text) == "string" then return text end
+	end
+	local text, k = tostring(n), nil
+	repeat text, k = text:gsub("^(%d+)(%d%d%d)", "%1,%2") until k == 0
+	return text
+end
+
+-- The full scans: when the last one was, and when the next one can be.
+local function ScanState()
+	local latest = CurrentScan(Realm())
+	local scan = latest and string.format("last full scan %s (%s items)", Ago(latest.at), Thousands(latest.items))
+		or "no full scan yet"
+	local wait = Asked() + SCAN_INTERVAL - time()
+	if reader then return scan .. ", reading a new one" end
+	if wait > 0 then return scan .. string.format(", next one possible in %d min", math.ceil(wait / 60)) end
+	return scan .. ", next one at the auction house"
+end
+
 -- The full scan, the priority list and the searches still to come, in a line.
 local function State(priority)
-	local latest, ai = CurrentScan(Realm()), 0
+	local ai = 0
 	for _, p in ipairs(priority) do
 		if p.ai then ai = ai + 1 end
 	end
-	local scan = latest and string.format("last full scan %s (%d items)", Ago(latest.at), latest.items)
-		or "no full scan yet"
-	local wait = Asked() + SCAN_INTERVAL - time()
-	if reader then
-		scan = scan .. ", reading a new one"
-	elseif wait > 0 then
-		scan = scan .. string.format(", next one possible in %d min", math.ceil(wait / 60))
-	else
-		scan = scan .. ", next one at the auction house"
-	end
+	local scan = ScanState()
 	local searches = visit and Left()
 	local left = searches and string.format("; %d search%s left this visit", searches, searches == 1 and "" or "es") or ""
 	return string.format("Auction prices: %s. Priority list: %d items (%d your AI tracks, %d from your bags and bank)%s.",
@@ -761,7 +790,9 @@ end
 
 local MAX_LINES = 20
 
-function Auction.Command()
+function Auction.Command(rest)
+	local word, arg = strtrim(tostring(rest or "")):lower():match("^(%S*)%s*(.-)$")
+	if word == "panel" then return PanelCommand(arg) end
 	if visit then
 		local count = Again()
 		ns.Print(State(visit.priority))
@@ -862,13 +893,14 @@ ns.RegisterReceiver("auctionWatch", function(payload)
 	end
 	if visit then
 		visit.priority = Priority()
+		Notify()
 	else
 		Tracked() -- drops the oldest past MAX_PRIORITY
 	end
 end)
 ns.RegisterSection(ns.Kinds.KNOWLEDGE, "auction", Section)
-ns.RegisterCommand("prices", "/mcp prices - the auction prices your AI has: the full scan, the priority list, and "
-	.. "at the auction house, look the list up again", Auction.Command)
+ns.RegisterCommand("prices", "/mcp prices [panel on, off] - the auction prices your AI has: the full scan, the "
+	.. "priority list, and at the auction house, look the list up again; panel: the status panel there", Auction.Command)
 ns.OnLogin(function()
 	C_Timer.NewTicker(STEP_INTERVAL, function()
 		local ok, err = pcall(Step)
@@ -882,10 +914,12 @@ local function Open()
 	if visit then return end -- AUCTION_HOUSE_SHOW and the interaction event both say so
 	local ok, err = pcall(Start)
 	if not ok then Report(err) end
+	Notify()
 end
 
 local function Close()
 	visit, current = nil, nil
+	Notify()
 end
 
 local events = CreateFrame("Frame")
@@ -1311,6 +1345,7 @@ local function Load(f)
 		while i <= #queue and #loading < LOAD_BATCH do
 			local c = queue[i]
 			i = i + 1
+			f.loaded = i - 1 -- for the panel's progress
 			if Cached(c.id) then
 				TryEvaluate(f, c)
 				Pause(f)
@@ -1387,7 +1422,8 @@ end
 
 -- Stage 3: per slot group, the best that the character can use, up to perSlot; asked items always.
 local function Choose(f)
-	for _, group in ipairs(GROUPS) do
+	for g, group in ipairs(GROUPS) do
+		f.group = g - 1 -- for the panel's progress
 		local list, kept, n = f.ranked[group] or {}, {}, 0
 		for i = #list, 1, -1 do
 			local e = list[i]
@@ -1507,6 +1543,7 @@ local function Resume()
 		end
 	end
 	if not (f and f.co) then finderFrame:SetScript("OnUpdate", nil) end
+	Notify() -- its progress, at the auction house
 end
 
 local function Upgrades()
@@ -1542,3 +1579,340 @@ finderFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 finderFrame:SetScript("OnEvent", function()
 	if finder and finder.status == "done" then finder.stale = true end
 end)
+
+---------------------------------------------------------------------------
+-- The status panel
+---------------------------------------------------------------------------
+
+-- A line and a thin bar under Blizzard's auction house window while there's something to say: the full scan
+-- (waiting for it, reading it), the searches (how many of the AI's and of the bags', which one, how long still), why
+-- they wait, and the upgrade finder; then how things stand, for a moment, and it fades out. The tooltip lists what's
+-- still to search. Our own frame, parented to UIParent and only anchored to Blizzard's window. The code above calls
+-- Notify when something changes; the panel redraws from a timer, at most every REDRAW_EVERY seconds, so the scan
+-- reader's frame budget stays its own. /mcp prices panel off hides it (WowMCPDB.auctionPanel, for the account).
+
+local REDRAW_EVERY = 0.25 -- seconds
+local HOLD, FADE = 4, 1.5 -- seconds "Prices up to date" stays, then fades out over
+local PANEL_MIN, PANEL_MAX, PANEL_PAD = 220, 460, 6 -- width: it grows with its line, right of the window's tabs
+local MAX_QUEUE_LINES = 8 -- per group, in the tooltip
+local COLORS = { scan = { 0.3, 0.6, 1 }, search = { 1, 0.82, 0 }, paused = { 0.5, 0.5, 0.5 }, done = { 0.25, 0.8, 0.25 },
+	problem = { 1, 0.3, 0.3 } }
+local WHY = { goal = "goal", plan = "plan", watch = "watched", asked = "asked about", bags = "in your bags",
+	bank = "in your bank" }
+
+local panel -- the frame, made the first time it shows
+local draw = { at = 0 } -- pending: a redraw is coming; at: the last one; idleAt: since when nothing's going on
+
+local function PanelSaved()
+	WowMCPDB.auctionPanel = WowMCPDB.auctionPanel or {}
+	return WowMCPDB.auctionPanel
+end
+
+-- An item with its icon and name in quality colour (Core.lua); the name the prices have while the client loads it.
+local function Shown(realm, itemID)
+	local known = realm.items[itemID]
+	local name = (ItemName(itemID) or (known and known.name) or ("item " .. itemID)):gsub("[{}|\n]", "")
+	return ns.RenderItems(string.format("{item:%d:%s}", itemID, name))
+end
+
+-- How far the full scan's reading is, 0 to 1: going through the auctions is most of the work.
+local function ReadProgress(r)
+	if r.phase == "read" then return 0.75 * r.index / math.max(r.total, 1) end
+	if r.phase == "store" then return 0.75 + 0.2 * (r.index - 1) / math.max(#r.ids, 1) end
+	return 0.95 + 0.05 * (1 - #r.queue / math.max(r.queued or 0, 1))
+end
+
+-- How far the upgrade finder is, 0 to 1, or nil if it isn't searching: going through the items is most of it. Their
+-- number is a guess, the latest full scan's and the searched ones.
+local function FinderProgress()
+	local f = finder
+	if not (f and f.co) then return nil end
+	if f.stage == "stats" then return 0.6 + 0.3 * (f.loaded or 0) / math.max(#f.queue, 1) end
+	if f.stage == "usable" then return 0.9 + 0.1 * (f.group or 0) / #GROUPS end
+	if not f.total then
+		local realm, n = Realm(), 0
+		for _ in pairs(realm.items) do n = n + 1 end
+		local latest = CurrentScan(realm)
+		f.total = n + (latest and latest.items or 0)
+	end
+	return 0.6 * math.min(1, f.checked / math.max(f.total, 1))
+end
+
+-- This visit's priority list in two groups, what the AI tracks (ai) and what's from the bags and bank (bags): how
+-- many were searched (the one under way too) and how many in all; left: how many are still due. order, if given,
+-- gets those, in the order they'll go (as NextSearch picks them: the stalest first, then as listed).
+local function Queue(realm, order)
+	local q = { ai = { done = 0, all = 0 }, bags = { done = 0, all = 0 }, left = 0 }
+	for i, p in ipairs(visit.priority) do
+		local group = p.ai and q.ai or q.bags
+		if visit.searched[p.item] then
+			group.done, group.all = group.done + 1, group.all + 1
+		elseif Due(realm, p.item) then
+			group.all, q.left = group.all + 1, q.left + 1
+			if order then order[#order + 1] = { p = p, at = Checked(realm, p.item), i = i } end
+		end
+	end
+	if order then
+		table.sort(order, function(a, b)
+			if a.at ~= b.at then return a.at < b.at end
+			return a.i < b.i
+		end)
+	end
+	return q
+end
+
+-- Seconds per search from here on: the last minute's pace, never faster than MAX_PER_MINUTE allows.
+local function Pace()
+	local now, first, n = GetTime(), nil, 0
+	for _, at in ipairs(sent) do
+		if now - at < 60 then first, n = first or at, n + 1 end
+	end
+	local each = 60 / MAX_PER_MINUTE
+	if n >= 3 then each = math.max(each, (now - first) / n) end
+	return each
+end
+
+local function Eta(seconds)
+	if seconds < 60 then return string.format("about %d s left", math.max(5, math.floor(seconds / 5 + 0.5) * 5)) end
+	return string.format("about %d min left", math.floor(seconds / 60 + 0.5))
+end
+
+-- Why the searches wait (see Safe), by the window's view.
+local function Paused()
+	local f, M = AuctionHouseFrame, AuctionHouseFrameDisplayMode
+	if not (f and f:IsShown() and f.GetDisplayMode and M) then
+		return "Paused: the game's auction house window isn't showing (another addon's instead?)"
+	end
+	local mode = f:GetDisplayMode()
+	if mode == M.ItemSell or mode == M.CommoditiesSell or mode == M.WoWTokenSell then return "Paused while you sell" end
+	if mode == M.Auctions then return "Paused while you look at your auctions" end
+	return "Paused while you look at an item"
+end
+
+-- Nothing going on: how this visit went.
+local function Done()
+	if visit.problem then return "|cffff5050Auction prices: " .. ns.Escape(visit.problem) .. "|r" end
+	if visit.scanned then return string.format("Full scan: %s items · prices up to date", Thousands(visit.scanned)) end
+	local text = "Prices up to date"
+	if visit.scan and visit.scan.state == "refused" then text = text .. " · the game didn't send a full scan" end
+	local wait = Asked() + SCAN_INTERVAL - time()
+	if wait > 0 then text = text .. string.format(" · next full scan possible in %d min", math.ceil(wait / 60)) end
+	return text
+end
+
+-- What the panel says: its line, the bar's fill (0 to 1) and colour, and true if nothing's going on.
+local function Now()
+	if reader then
+		local done = ReadProgress(reader)
+		return string.format("Reading the full scan… %d%%", math.floor(100 * done)), done, COLORS.scan
+	end
+	if visit.scan and visit.scan.state == "asked" then return "Full scan: waiting for the game…", 0, COLORS.scan end
+	local realm = Realm()
+	local q, scan = Queue(realm), ScanAllowed()
+	if scan or q.left > 0 or current then
+		local all = q.ai.all + q.bags.all
+		local done = all > 0 and (q.ai.done + q.bags.done) / all or 0
+		if not Safe() then
+			return Paused() .. " · " .. (scan and "a full scan is next"
+				or string.format("%d price%s left", q.left, q.left == 1 and "" or "s")), done, COLORS.paused
+		end
+		if scan then return "Full scan: asking the game…", 0, COLORS.scan end
+		local parts = {}
+		if q.ai.all > 0 then parts[#parts + 1] = string.format("watched %d/%d", q.ai.done, q.ai.all) end
+		if q.bags.all > 0 then parts[#parts + 1] = string.format("bags %d/%d", q.bags.done, q.bags.all) end
+		local item = current and current.item or visit.last
+		if item then parts[#parts + 1] = Shown(realm, item) end
+		parts[#parts + 1] = q.left > 0 and Eta(q.left * Pace()) or "almost done"
+		return "Checking prices: " .. table.concat(parts, " · "), done, COLORS.search
+	end
+	local finding = FinderProgress()
+	if finding then
+		return string.format("Looking for upgrades: %d%%", math.floor(100 * finding)), finding, COLORS.scan
+	end
+	return Done(), 1, visit.problem and COLORS.problem or COLORS.done, true
+end
+
+-- Fully there while something's going on, and HOLD seconds after; then fading out over FADE.
+local function Alpha()
+	if not draw.idleAt then return 1 end
+	return math.max(0, math.min(1, 1 - (GetTime() - draw.idleAt - HOLD) / FADE))
+end
+
+local function Fade(self)
+	if self.hovered then draw.idleAt = GetTime() end -- it stays while the mouse is on it
+	local alpha = Alpha()
+	if alpha <= 0 then return self:Hide() end
+	self:SetAlpha(alpha)
+end
+
+local function TipLine(text, r, g, b)
+	GameTooltip:AddLine(text, r or 0.8, g or 0.8, b or 0.8, true)
+end
+
+-- The full scans, what's still to search in the order it goes (the AI's, then the bags' and bank's), the commands.
+local function Tooltip(f)
+	local realm, order = Realm(), {}
+	local q = Queue(realm, order)
+	GameTooltip:SetOwner(f, "ANCHOR_TOP")
+	GameTooltip:SetText("Auction prices for your AI", 1, 0.82, 0)
+	TipLine((ScanState():gsub("^%l", string.upper)) .. ".")
+	if visit.scan and visit.scan.state == "refused" then
+		TipLine("The game didn't send the full scan asked for (another addon's may have used it up), so prices are "
+			.. "searched one at a time.")
+	end
+	if visit.problem then TipLine("Problem: " .. ns.Escape(visit.problem), 1, 0.3, 0.3) end
+	if current then TipLine("Checking now: " .. Shown(realm, current.item), 1, 1, 1) end
+	for _, group in ipairs({ { ai = true, title = "For your AI (goals, plan, watched, asked about)" },
+		{ ai = false, title = "From your bags and bank" } }) do
+		local list = {}
+		for _, e in ipairs(order) do
+			if (e.p.ai == true) == group.ai then list[#list + 1] = e.p end
+		end
+		if list[1] then
+			TipLine(string.format("%s, %d still to check:", group.title, #list), 1, 1, 1)
+			for i = 1, math.min(#list, MAX_QUEUE_LINES) do
+				TipLine("   " .. Shown(realm, list[i].item) .. GREY .. " (" .. (WHY[list[i].why] or list[i].why) .. ")|r")
+			end
+			if #list > MAX_QUEUE_LINES then TipLine(string.format("   and %d more", #list - MAX_QUEUE_LINES)) end
+		end
+	end
+	if q.left == 0 then TipLine("Nothing left to check at this visit.") end
+	TipLine("/mcp prices: the prices your AI has, and look the list up again. /mcp prices panel off: hide this.",
+		0.4, 0.8, 1)
+	GameTooltip:Show()
+end
+
+-- Under the window at its right: its tabs hang under the left side, and nothing else of it is there but the corner
+-- of its frame, 8 px down on Forever (Camelot/NineSliceLayoutOverrides.lua). Without Blizzard's window (another
+-- addon's instead), at the top of the screen.
+local function Anchor(f)
+	local ah = AuctionHouseFrame
+	local to = ah and ah:IsShown() and ah or UIParent
+	if f.anchoredTo == to then return end
+	f.anchoredTo = to
+	f:ClearAllPoints()
+	if to == UIParent then
+		f:SetPoint("TOP", UIParent, "TOP", 0, -40)
+		f:SetFrameStrata("MEDIUM")
+	else
+		f:SetPoint("TOPRIGHT", ah, "BOTTOMRIGHT", -6, -10)
+		f:SetFrameStrata(ah:GetFrameStrata())
+	end
+end
+
+-- Wide enough for its line, up to PANEL_MAX; it doesn't narrow again while the window's open, so it doesn't jump.
+local function Fit(f)
+	local want = math.min(PANEL_MAX, math.max(PANEL_MIN, f.Text:GetUnboundedStringWidth() + 2 * PANEL_PAD))
+	if want > (f.wide or 0) then
+		f.wide = want
+		f:SetWidth(want)
+		f.Text:SetWidth(want - 2 * PANEL_PAD)
+	end
+end
+
+local function CreatePanel()
+	local f = CreateFrame("Frame", "WowMCPAuctionPanel", UIParent)
+	f:SetSize(PANEL_MIN, 24)
+	f:SetClampedToScreen(true) -- the window can be near the bottom of the screen
+	f:EnableMouse(true) -- for the tooltip
+	local bg = f:CreateTexture(nil, "BACKGROUND")
+	bg:SetAllPoints()
+	bg:SetColorTexture(0, 0, 0, 0.6)
+	f.Text = f:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	f.Text:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_PAD, -4)
+	f.Text:SetJustifyH("LEFT")
+	f.Text:SetWordWrap(false)
+	f.Bar = CreateFrame("StatusBar", nil, f)
+	f.Bar:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_PAD, 5)
+	f.Bar:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PANEL_PAD, 5)
+	f.Bar:SetHeight(3)
+	f.Bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+	f.Bar:SetMinMaxValues(0, 1)
+	local track = f.Bar:CreateTexture(nil, "BACKGROUND")
+	track:SetAllPoints()
+	track:SetColorTexture(1, 1, 1, 0.12)
+	f:SetScript("OnEnter", function(self)
+		self.hovered = true
+		if visit then Tooltip(self) end
+	end)
+	f:SetScript("OnLeave", function(self)
+		self.hovered = nil
+		GameTooltip:Hide()
+	end)
+	return f
+end
+
+local function Hide()
+	if panel then
+		panel:Hide()
+		panel.wide = nil
+		if panel.hovered then
+			panel.hovered = nil
+			GameTooltip:Hide()
+		end
+	end
+	draw.idleAt = nil
+end
+
+local function Draw()
+	draw.at = GetTime()
+	if not visit or PanelSaved().hidden then return Hide() end
+	local text, fill, color, idle = Now()
+	if not idle then
+		draw.idleAt = nil
+	elseif not draw.idleAt then
+		draw.idleAt = draw.at
+	end
+	if Alpha() <= 0 and not (panel and panel.hovered) then
+		if panel then panel:Hide() end -- said, and faded out
+		return
+	end
+	panel = panel or CreatePanel()
+	local f = panel
+	Anchor(f)
+	f.Text:SetText(text)
+	Fit(f)
+	f.Bar:SetValue(fill)
+	f.Bar:SetStatusBarColor(color[1], color[2], color[3])
+	f:SetAlpha(Alpha())
+	f:SetScript("OnUpdate", idle and Fade or nil)
+	f:Show()
+	if f.hovered then Tooltip(f) end
+end
+
+local function Redraw()
+	draw.pending = false
+	local ok, err = pcall(Draw)
+	if not ok then Report(err) end
+end
+
+function Notify()
+	if not visit then
+		-- Gone with the window; also when it had faded out, so the next visit starts afresh.
+		if draw.idleAt or (panel and panel:IsShown()) then Hide() end
+		return
+	end
+	if draw.pending then return end
+	draw.pending = true
+	C_Timer.After(math.max(0, draw.at + REDRAW_EVERY - GetTime()), Redraw)
+end
+
+-- /mcp prices panel [on, off]
+function PanelCommand(arg)
+	if arg == "off" then
+		PanelSaved().hidden = true
+		Hide()
+	elseif arg == "on" then
+		PanelSaved().hidden = nil
+		draw.idleAt = nil -- says how things stand once more
+		Notify()
+	end
+	if PanelSaved().hidden then
+		ns.Print("The auction house status panel is off. /mcp prices panel on brings it back.")
+	else
+		ns.Print("The auction house status panel is on: under the auction house window, what's being looked up and "
+			.. "how much is left. /mcp prices panel off hides it.")
+	end
+end
+
+ns.OnItemsLoaded(Notify) -- names shown before they loaded
