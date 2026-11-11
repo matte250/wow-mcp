@@ -176,7 +176,7 @@ def test_probe_runs(run_client):
         client.Wait()
         local function chat() return table.concat(client.chat, "\n") end
         SlashCmdList.WOWMCP("probe")
-        assert(chat():find("/mcp probe files or /mcp probe audio", 1, true), chat())
+        assert(chat():find("/mcp probe files, audio, stream or font", 1, true), chat())
         SlashCmdList.WOWMCP("probe files")
         client.Wait(8)  -- ticks of 0.5 s: the probe takes about 3 s
         assert(chat():find("Probe done.", 1, true) and not chat():find("Probe failed", 1, true), chat())
@@ -184,5 +184,12 @@ def test_probe_runs(run_client):
         assert(#files.sounds == 8 and #files.fonts == 8 and #files.textures == 8 and files.sounds[2][1] == "lower case")
         SlashCmdList.WOWMCP("probe audio")
         client.Wait(8)
+        SlashCmdList.WOWMCP("probe stream")
+        client.Wait(30)  -- about 13 s
+        local stream = WowMCPDB.probes.stream.files
+        assert(stream["big.ogg"].prepared and stream["big.ogg"].emptied and stream["big.ogg"].restored, chat())
+        SlashCmdList.WOWMCP("probe font")
+        client.Wait(6)
+        assert(WowMCPDB.probes.font.first and WowMCPDB.probes.font.newString, chat())
         assert(#WowMCPDB.probes.audio.played == 8 and not chat():find("Probe failed", 1, true), chat())
     """)

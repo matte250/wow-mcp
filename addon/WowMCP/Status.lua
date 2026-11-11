@@ -47,6 +47,8 @@ ns.RegisterSection(ns.Kinds.STATUS, "status", Status)
 -- in WowMCPDB.probes[name] (a /reload writes them to disk).
 --   files  does the game remember a file per path as written? (fewer files, no per-launch limit)
 --   audio  short quiet tones the server hears in WoW's own audio stream (no file opens)
+--   stream long sounds read afresh on every play? (one file, no per-launch limit)
+--   font   a real font whose letter widths the server rewrites (bigger data)
 ---------------------------------------------------------------------------
 
 do
@@ -187,12 +189,95 @@ do
 		end
 	end
 
-	local PROBES = { files = Files, audio = Audio }
-	ns.RegisterCommand("probe", "/mcp probe [files, audio] - research into other channels (needs the server's probe helper)",
+	-- stream ----------------------------------------------------------------------------------------
+	-- Long or compressed sounds may be streamed from disk on every play rather than read once and
+	-- remembered. Each is played as prepared (60 s of silence), after the server empties it, and after
+	-- it puts it back 3 s long: silent the second time and about 3 s the third means the game read the
+	-- file again each time, so one file could signal without limit.
+
+	local STREAMS = { "big.wav", "big.ogg", "big.mp3", "small.ogg" }
+	local timer
+
+	local function Stream()
+		local results = Keep("stream", { files = {} })
+		for _, f in ipairs(STREAMS) do results.files[f] = {} end
+		ns.Print("Probe stream: playing four long silent sounds three times while the server changes them (about 15 s)…")
+		local handles = {}
+		local function PlayAll()
+			for i, f in ipairs(STREAMS) do handles[i] = Play(DIR .. f) end
+		end
+		local function CheckAll(phase)
+			for i, f in ipairs(STREAMS) do results.files[f][phase] = Playing(handles[i]) end
+		end
+		PlayAll()
+		C_Timer.After(1, Safely(function()
+			CheckAll("prepared")
+			Play(DIR .. "go2.wav") -- the server empties them
+			C_Timer.After(1.5, Safely(function()
+				PlayAll()
+				C_Timer.After(1, Safely(function()
+					CheckAll("emptied")
+					Play(DIR .. "go3.wav") -- the server puts them back, 3 s long
+					C_Timer.After(1.5, Safely(function()
+						PlayAll()
+						local started, lasted = GetTime(), {}
+						timer = timer or CreateFrame("Frame")
+						timer:SetScript("OnUpdate", Safely(function()
+							local now = GetTime() - started
+							for i, f in ipairs(STREAMS) do
+								if not lasted[f] and not (handles[i] and C_Sound.IsPlaying(handles[i])) then
+									lasted[f] = handles[i] and string.format("%.1f s", now) or "no handle"
+								end
+							end
+							if now < 8 then return end
+							timer:SetScript("OnUpdate", nil)
+							for i, f in ipairs(STREAMS) do
+								if handles[i] then StopSound(handles[i]) end
+								results.files[f].restored = lasted[f] or "over 8 s"
+								local r = results.files[f]
+								ns.Print(string.format("%s: prepared %s, emptied %s, back as 3 s: played %s", f, r.prepared,
+									r.emptied, r.restored))
+							end
+							ns.Print("Probe done. /reload writes the results to disk.")
+						end))
+					end))
+				end))
+			end))
+		end))
+	end
+
+	-- font ------------------------------------------------------------------------------------------
+	-- A real font's letters, before and after the server gives them other widths: does SetFont take
+	-- it, and does setting it again (or on a new string) read the new file?
+
+	local function Font()
+		Measuring()
+		local results = Keep("font", {})
+		results.control = Widths("Fonts\\FRIZQT__.TTF")
+		results.first = Widths(DIR .. "real.ttf")
+		ns.Print("Probe font: " .. results.first)
+		Play(DIR .. "go4.wav") -- the server rewrites real.ttf with other widths
+		C_Timer.After(1.5, Safely(function()
+			Widths("Fonts\\FRIZQT__.TTF") -- away and back, so the font is set anew
+			results.again = Widths(DIR .. "real.ttf")
+			local saved = text
+			text = UIParent:CreateFontString(nil, "ARTWORK") -- a new string, in case each keeps its own copy
+			text:SetAlpha(0)
+			results.newString = Widths(DIR .. "real.ttf")
+			text = saved
+			ns.Print("Control: " .. results.control)
+			ns.Print("After the change, set again: " .. results.again)
+			ns.Print("After the change, a new string: " .. results.newString)
+			ns.Print("Probe done. /reload writes the results to disk.")
+		end))
+	end
+
+	local PROBES = { files = Files, audio = Audio, stream = Stream, font = Font }
+	ns.RegisterCommand("probe", "/mcp probe [files, audio, stream, font] - research into other channels (needs the server's probe helper)",
 		function(rest)
 			local probe = PROBES[strtrim(tostring(rest or "")):lower()]
 			if not probe then
-				ns.Print("/mcp probe files or /mcp probe audio (each needs its server half running)")
+				ns.Print("/mcp probe files, audio, stream or font (each needs its server half running)")
 				return
 			end
 			Safely(probe)()

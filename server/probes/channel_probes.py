@@ -17,6 +17,12 @@ files    Server to game, few files: does the game remember a file per path as wr
 listen   Game to server, no file opens: the addon plays short, very high, quiet tones; this records
          WoW's own audio stream (PipeWire, only WoW's) and reports which tones it heard, and when.
          Game: /mcp probe audio
+stream   Server to game without a per-launch limit: small sounds are read once and remembered,
+         but long or compressed ones may be streamed from disk on every play. Watches probe/;
+         on go2.wav empties the long sounds, on go3.wav puts them back 3 seconds long. If the game
+         reads them again each time, one file can signal again and again. Game: /mcp probe stream
+font     Server to game, bigger data: a real font (a few letters of a system font) whose letter
+         widths the server rewrites on go4.wav. Run `stream` for it too. Game: /mcp probe font
 chatlog  Game to server for what the player types: follows WoW's chat log (/chatlog in game) and
          prints each new line with the time it arrived, to see how soon the client writes it.
 """
@@ -49,6 +55,11 @@ TEXTURE = {1: (64, 16), 2: (16, 64)}
 RATE = 48000
 TONES = {"tone_a": 19000, "tone_b": 19600, "tone_c": 1000}
 TONE_SECONDS, TONE_LEVEL = 0.08, 0.05
+# Long silent sounds for `stream`, in the formats a game might stream rather than load: seconds as
+# prepared, and after go3.wav.
+STREAMS = {"big.wav": 60, "big.ogg": 60, "big.mp3": 60, "small.ogg": 2}
+RESTORED_SECONDS = 3
+REAL_FONT = "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf"
 
 
 def font(version: int) -> bytes:
@@ -93,6 +104,39 @@ def tga(width: int, height: int) -> bytes:
     return header + bytes([40, 160, 220, 255]) * (width * height)
 
 
+def silent(name: str, seconds: float) -> bytes:
+    """Silence as a wav, ogg or mp3 (by the name's extension)."""
+    if name.endswith(".wav"):
+        samples = int(44100 * seconds)
+        return struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + 2 * samples, b"WAVE", b"fmt ", 16, 1, 1, 44100,
+                           88200, 2, 16, b"data", 2 * samples) + bytes(2 * samples)
+    codec, fmt = ("libvorbis", "ogg") if name.endswith(".ogg") else ("libmp3lame", "mp3")
+    return subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t",
+                           str(seconds), "-c:a", codec, "-f", fmt, "pipe:1"], capture_output=True, check=True).stdout
+
+
+def real_font(version: int) -> bytes:
+    """A few letters of a real TrueType font (the generated one was refused), widths from WIDTHS."""
+    from io import BytesIO
+
+    from fontTools import subset
+    from fontTools.ttLib import TTFont
+
+    font = TTFont(REAL_FONT)
+    options = subset.Options()
+    options.layout_features, options.name_IDs, options.hinting = [], ["*"], False
+    sub = subset.Subsetter(options)
+    sub.populate(text=GLYPHS + " ")
+    sub.subset(font)
+    cmap = font.getBestCmap()
+    for c, width in zip(GLYPHS, WIDTHS[version]):
+        glyph = cmap[ord(c)]
+        font["hmtx"][glyph] = (width * font["head"].unitsPerEm // 1000, font["hmtx"][glyph][1])
+    out = BytesIO()
+    font.save(out)
+    return out.getvalue()
+
+
 def tone(frequency: float) -> bytes:
     """A short mono 16-bit wav: a sine with soft edges, so it doesn't click."""
     count = int(RATE * TONE_SECONDS)
@@ -120,6 +164,11 @@ def prepare(addons: Path, _args) -> None:
     (folder / "t.tga").write_bytes(tga(*TEXTURE[1]))
     for name, frequency in TONES.items():
         (folder / f"{name}.wav").write_bytes(tone(frequency))
+    for name, seconds in STREAMS.items():
+        (folder / name).write_bytes(silent(name, seconds))
+    for trigger in ("go2.wav", "go3.wav", "go4.wav"):
+        (folder / trigger).write_bytes(b"")
+    (folder / "real.ttf").write_bytes(real_font(1))
     print(f"Wrote {', '.join(sorted(p.name for p in folder.iterdir()))} to {folder}")
     print("Start WoW now (the game only sees new files at startup).")
 
@@ -218,6 +267,48 @@ def listen(_addons: Path, args) -> None:
     print(f"Done: {heard} tone(s) heard.")
 
 
+# --- stream (and font) -----------------------------------------------------------------------------
+
+def stream(addons: Path, _args) -> None:
+    folder = probe_dir(addons)
+    if not (folder / "big.wav").exists():
+        sys.exit(f"No long sounds in {folder}: run `prepare` first (with WoW closed).")
+    for name, seconds in STREAMS.items():  # back to the start, so the probe can be run again
+        (folder / name).write_bytes(silent(name, seconds))
+    (folder / "real.ttf").write_bytes(real_font(1))
+    restored = {name: silent(name, RESTORED_SECONDS) for name in STREAMS}
+    second_font = real_font(2)
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_CLOEXEC)
+    if fd < 0 or libc.inotify_add_watch(fd, os.fsencode(folder), IN_CLOSE_NOWRITE) < 0:
+        sys.exit(f"inotify failed: {os.strerror(ctypes.get_errno())}")
+    print(f"Watching {folder}. Run /mcp probe stream (or font) in game; Ctrl+C to stop.", flush=True)
+    start = None
+    while True:
+        data = os.read(fd, 64 * 1024)
+        at = 0
+        while at < len(data):
+            _wd, mask, _cookie, size = struct.unpack_from("iIII", data, at)
+            name = data[at + 16:at + 16 + size].rstrip(b"\0").decode()
+            at += 16 + size
+            if not mask & IN_CLOSE_NOWRITE or not name:
+                continue
+            now = time.monotonic()
+            start = start or now
+            print(f"{now - start:7.3f}s  game read {name}", flush=True)
+            if name == "go2.wav":
+                for stream_name in STREAMS:
+                    (folder / stream_name).write_bytes(b"")
+                print(f"{time.monotonic() - start:7.3f}s  -> long sounds emptied", flush=True)
+            elif name == "go3.wav":
+                for stream_name, data_ in restored.items():
+                    (folder / stream_name).write_bytes(data_)
+                print(f"{time.monotonic() - start:7.3f}s  -> long sounds back, {RESTORED_SECONDS} s long", flush=True)
+            elif name == "go4.wav":
+                (folder / "real.ttf").write_bytes(second_font)
+                print(f"{time.monotonic() - start:7.3f}s  -> real.ttf with other widths", flush=True)
+
+
 # --- chatlog ----------------------------------------------------------------------------------------
 
 def chatlog(addons: Path, args) -> None:
@@ -239,14 +330,14 @@ def chatlog(addons: Path, args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["prepare", "files", "listen", "chatlog"])
+    parser.add_argument("command", choices=["prepare", "files", "stream", "listen", "chatlog"])
     parser.add_argument("--addons-dir", type=Path, default=os.environ.get(install.ADDONS_DIR_ENV))
     parser.add_argument("--seconds", type=float, default=120)
     parser.add_argument("--snr", type=float, default=8.0, help="listen: how far above the noise counts as a tone")
     args = parser.parse_args()
     if not args.addons_dir:
         sys.exit(f"Pass --addons-dir or set {install.ADDONS_DIR_ENV}.")
-    {"prepare": prepare, "files": files, "listen": listen, "chatlog": chatlog}[args.command](
+    {"prepare": prepare, "files": files, "stream": stream, "listen": listen, "chatlog": chatlog}[args.command](
         Path(args.addons_dir), args)
 
 
