@@ -34,6 +34,17 @@ guidance(
     order=12,
 )
 
+guidance(
+    "Gathering needs the profession. Before a plan step or goal asks the player to mine, pick herbs, skin, fish or "
+    "open locked boxes, check get_professions: they need that profession, at a skill high enough for the node or "
+    "mob. Quest objectives count too, e.g. a quest that asks for ore from veins needs Mining. When they can't "
+    "gather it, or buying is cheap next to the time farming takes, make it a buy step instead: a 'have' "
+    "condition for the item with the auction house (or vendor) as the place, and its price from "
+    "get_auction_prices in the step text. A price there means the item can be traded. Say why you chose buying or "
+    "gathering, and ask when it's a close call.",
+    order=15,
+)
+
 
 class _Condition(BaseModel):
     model_config = ConfigDict(extra="forbid")
