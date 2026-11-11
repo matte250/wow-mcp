@@ -44,7 +44,7 @@ def test_every_exchange_is_archived_for_good(addons, tmp_path):
     long = "First line.\n\n" + "word " * 400 + "end."
     outcomes = ["Karolek, in The Drag.\n", bridge.AgentError("overloaded"), long]
 
-    def agent(prompt, model, player, effort):
+    def agent(prompt, model, player, effort, progress):
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -82,7 +82,7 @@ def test_a_new_conversation_keeps_the_archive(addons):
     """/ai new: the next prompt starts afresh, but nothing leaves the archive."""
     prompts, said = [], []
 
-    def agent(prompt, model, player, effort):
+    def agent(prompt, model, player, effort, progress):
         prompts.append(prompt)
         return f"Answer {len(prompts)}."
 
@@ -311,7 +311,7 @@ def test_notes_come_with_every_prompt(addons):
     notes.add("Thorgrim", FLIPPING, datetime(2026, 11, 10, 21, 0).timestamp())
     prompts, players = [], []
 
-    def agent(prompt, model, player, effort):
+    def agent(prompt, model, player, effort, progress):
         prompts.append(prompt)
         players.append(player)
         return "OK."
@@ -344,13 +344,13 @@ print(json.dumps([config["mcpServers"]["wow"]["env"].get("WOW_MCP_PLAYER") for c
 
 def test_the_bridge_tells_the_tools_who_asks(addons, monkeypatch):
     command = [sys.executable, "-c", WHO_AGENT, "{mcp_config}"]
-    agent = CommandAgent(command, addons, timeout=20)
+    agent = CommandAgent(command, addons, max_time=20)
     assert json.loads(agent("Where?", None, "Thorgrim")) == ["Thorgrim"] * 3
     assert json.loads(agent("Where?", None, "Grunta")) == ["Grunta"] * 3
     assert json.loads(agent("Where?")) == [None] * 3
     # Never anyone from the bridge's own environment.
     monkeypatch.setenv(memory.PLAYER_ENV, "Stale")
-    assert json.loads(CommandAgent(command, addons, timeout=20)("Where?")) == [None] * 3
+    assert json.loads(CommandAgent(command, addons, max_time=20)("Where?")) == [None] * 3
 
     # The tools go by it, unless they're given another character.
     monkeypatch.setenv(memory.PLAYER_ENV, "Thorgrim")

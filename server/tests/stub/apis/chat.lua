@@ -71,6 +71,13 @@ function ChatWindow:RemoveMessagesByPredicate(predicate)
 		if predicate(self.lines[i]) then table.remove(self.lines, i) end
 	end
 end
+-- Like ScrollingMessageFrameMixin: each line the predicate picks becomes what transform returns for it,
+-- in place.
+function ChatWindow:TransformMessages(predicate, transform)
+	for i, line in ipairs(self.lines) do
+		if predicate(line) then self.lines[i] = (transform(line)) end
+	end
+end
 function ChatWindow:Clear() wipe(self.lines) end
 function ChatWindow:IsVisible() return self:IsShown() end
 

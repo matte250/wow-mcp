@@ -9,6 +9,10 @@
 -- keeps it like any chat window. /mcp aitab picks the tab, the tab and the main chat window, or only
 -- the main window.
 --
+-- While answers are due, "Thinking…" is a status line with a clock and the step the bridge says the
+-- AI is on. The bridge says it has each question right away, and how it's coming along now and then,
+-- so the line can also say when the bridge seems to be down.
+--
 -- Which Claude model answers, and how hard it thinks, is picked per character, with the picker at the
 -- AI tab's top right or /ai model and /ai thinking. Each question carries both to the bridge, which
 -- only takes the models and levels listed here.
@@ -19,12 +23,21 @@ local AIChat = {}
 ns.AIChat = AIChat
 
 local MAX_QUESTION = 500 -- bytes; the chat box allows 255 anyway
-local HINT_AFTER = 90    -- seconds without any update before saying the bridge may be down
+local ACK_WAIT = 15      -- seconds for the bridge to say it has a question; longer, and it may not be running
+local QUIET = 120        -- seconds the bridge may go without news while it answers, until it says (bridge.py's SILENCE)
+local QUIET_MARGIN = 60  -- seconds more before saying the AI seems to have stopped
+local STATUS_EVERY = 1   -- seconds between redraws of the status line, for its clock
+local HELD = 2           -- seconds a chat line may wait for its items (ns.Chat), and the status line behind it
 local TAB_NAME = "AI"
 local TAB_DELAY = 5      -- seconds after login before the tab may be made: the chat windows are set up by then
 local YOU = "|cff8fc8ff[You]|r "
 local NOTE = "|cffaaaaaa"
-local THINKING = "|cffaaaaaaThinking…|r"
+-- The status line's grey: the notes' one, a shade off, so the line can be found again among the others
+-- (also one left from before a /reload).
+local STATUS = "|cffababab"
+local THINKING = "Thinking…"
+local DOWN = "No answer from wow-mcp-bridge. Is it running?"
+local STOPPED = "The AI seems to have stopped responding."
 local LABEL = "|cff33ff99AI:|r"
 
 -- Links shift-clicked into the question become text the agent can read:
@@ -58,8 +71,14 @@ end
 
 local settled = false -- TAB_DELAY has passed since login
 local told = {}       -- said once per session: the tab is gone, or can't be made
-local waiting = 0     -- questions without an answer yet
 local picker          -- the model and thinking picker on the AI tab, once made: { frame, Update }
+-- Questions without an answer yet, oldest first: { session, post (what Stream.Post named it), asked (GetTime()),
+-- acked, step (what the bridge says the AI is doing) }.
+local pending = {}
+local heard = -math.huge -- GetTime() of the last news from the server: a note, an answer, any new data
+local seq                -- ns.run.seq when last looked
+local quiet = QUIET      -- as the bridge's notes say
+local warned             -- what seems wrong, as the main window was told (once)
 
 -- The open chat window named TAB_NAME. Looked up every time, by name: the player can close, rename
 -- or undock it, and the game restores chat windows at login.
@@ -124,23 +143,6 @@ local function TabLine(tab, text)
 	Flash(tab)
 end
 
--- "Thinking…" at the bottom of the tab while an answer is due, one at a time. Chat windows let
--- addons remove lines (ScrollingMessageFrameSecureMixin), so that doesn't taint them. Found
--- within the line, as chat addons may add timestamps; pcall: another addon's line there could be
--- secret.
-local function Unthink(tab)
-	if tab.RemoveMessagesByPredicate then
-		pcall(tab.RemoveMessagesByPredicate, tab, function(message)
-			return type(message) == "string" and message:find(THINKING, 1, true) ~= nil
-		end)
-	end
-end
-
-local function Think(tab)
-	Unthink(tab)
-	ns.Chat(THINKING, tab)
-end
-
 -- A note about the conversation, already escaped: in the tab, and as an addon line in the main window.
 local function Say(text)
 	local tab, main = Where()
@@ -148,10 +150,137 @@ local function Say(text)
 	if main then ns.Print(text) end
 end
 
--- An answer from the bridge (Messages.lua). "Thinking…" moves below it while more are due.
--- bridgeModel, bridgeEffort: what the bridge answers with, and how hard it thinks, when none is picked
--- ("" if it doesn't know), for the picker's Defaults.
-function AIChat.Answer(text, style, sender, bridgeModel, bridgeEffort)
+---------------------------------------------------------------------------
+-- The status line at the bottom of the tab while answers are due: "Thinking… 1:24 · checking auction
+-- prices", how long the oldest question has waited and the step the bridge last said it's on. The clock
+-- ticks here, at no cost; each note from the bridge costs a live-update slot, so they come seldom
+-- (bridge.py's Progress). The line says instead when the bridge hasn't said it has a question, or has
+-- said nothing for longer than it said it might.
+--
+-- Chat windows let addons change and remove their lines (ScrollingMessageFrameSecureMixin's
+-- TransformMessages and RemoveMessagesByPredicate), so that doesn't taint them. The line is found by
+-- its colour within the line, as chat addons may add timestamps; pcall: another addon's line there
+-- could be secret.
+---------------------------------------------------------------------------
+
+local ticker = CreateFrame("Frame") -- redraws the line while answers are due
+local untilRedraw = 0
+local added = -math.huge           -- GetTime() the line was last added: it may wait behind chat lines (HELD)
+
+local function IsStatus(message)
+	return type(message) == "string" and message:find(STATUS, 1, true) ~= nil
+end
+
+local function Unthink(tab)
+	if tab.RemoveMessagesByPredicate then pcall(tab.RemoveMessagesByPredicate, tab, IsStatus) end
+end
+
+-- What seems wrong, if anything: a question the bridge hasn't said it has (nothing at all came since it
+-- was asked), or nothing from it for longer than it said it might stay quiet.
+local function Warning(now)
+	for _, q in ipairs(pending) do
+		if heard < q.asked and now - q.asked >= ACK_WAIT then return DOWN end
+	end
+	if heard >= pending[1].asked and now - heard >= quiet + QUIET_MARGIN then return STOPPED end
+end
+
+local function StatusText(now, warning)
+	if warning then return warning end
+	local q = pending[1]
+	local waited = math.max(0, math.floor(now - q.asked))
+	local text = string.format("%s %d:%02d", THINKING, math.floor(waited / 60), waited % 60)
+	return q.step and text .. " · " .. ns.Escape(q.step) or text
+end
+
+-- The line in place; at the bottom if `bottom`, or if it isn't there (or is twice: one held back behind
+-- chat lines whose items were loading, then added again).
+local function Draw(tab, text, now, bottom)
+	local line, found = STATUS .. text .. "|r", 0
+	if not bottom and tab.TransformMessages then
+		pcall(tab.TransformMessages, tab, IsStatus, function(_, ...)
+			found = found + 1
+			return line, ...
+		end)
+		if found == 1 or (found == 0 and now - added < HELD) then return end
+	end
+	Unthink(tab)
+	ns.Chat(line, tab)
+	added = now
+end
+
+-- On news and every STATUS_EVERY seconds while answers are due: the status line (moved to the bottom of the
+-- tab if `bottom`), gone once none are due. What seems wrong is also said once in the main window when the
+-- conversation shows there.
+local function Update(bottom)
+	local tab = FindTab() -- never made from here: asking makes it
+	if tab and Mode() == "off" then
+		Unthink(tab)
+		tab = nil
+	end
+	if #pending == 0 then
+		ticker:SetScript("OnUpdate", nil)
+		warned = nil
+		if tab then Unthink(tab) end
+		return
+	end
+	local now = GetTime()
+	-- Any new data means the server's there (e.g. markers the AI sets meanwhile), and so does data that
+	-- waits for a fight to end.
+	if ns.run.seq ~= seq or ns.run.pendingLoad then seq, heard = ns.run.seq, now end
+	local warning = Warning(now)
+	if warning ~= warned then
+		warned = warning
+		if warning and (not tab or Mode() == "both") then ns.Print(warning) end
+	end
+	if tab then Draw(tab, StatusText(now, warning), now, bottom) end
+end
+
+local function Tick(_, elapsed)
+	untilRedraw = untilRedraw - elapsed
+	if untilRedraw > 0 then return end
+	untilRedraw = STATUS_EVERY
+	Update()
+end
+
+-- The question news from the bridge is about, by the post it came in: its place in pending. Without a post
+-- (a bridge from before notes), the oldest.
+local function Find(session, post)
+	if post == nil then return pending[1] and 1 or nil end
+	for i, q in ipairs(pending) do
+		if q.post == post and q.session == session then return i end
+	end
+end
+
+-- The bridge takes questions in turn, so news about question i means the ones asked before it are done, or
+-- never got there (asked while it was down, or lost on the way): they go. If the news is only that it has
+-- question i (ack), the ones before that it has are still coming. Returns i's new place.
+local function Reached(i, ack)
+	for j = i - 1, 1, -1 do
+		if not (ack and pending[j].acked) then
+			table.remove(pending, j)
+			i = i - 1
+		end
+	end
+	return i
+end
+
+-- A note from the bridge about a question it's answering (Messages.lua): status "ack", it has it, or
+-- "progress", text is the step it's on ("" for none). Each says how long the bridge may stay quiet now.
+function AIChat.Status(m)
+	heard = GetTime()
+	if type(m.quiet) == "number" and m.quiet > 0 then quiet = m.quiet end
+	local i = Find(m.session, m.post)
+	if not i then return end -- asked before a /reload, or given up on
+	local q = pending[Reached(i, m.status ~= "progress")]
+	q.acked = true
+	if m.status == "progress" then q.step = m.text ~= "" and m.text or nil end
+	Update()
+end
+
+-- An answer from the bridge (Messages.lua), to the question asked in post `post` of `session`. The status
+-- line moves below it while more are due. bridgeModel, bridgeEffort: what the bridge answers with, and how
+-- hard it thinks, when none is picked ("" if it doesn't know), for the picker's Defaults.
+function AIChat.Answer(text, style, sender, bridgeModel, bridgeEffort, session, post)
 	local store = Store()
 	if type(bridgeModel) == "string" then store.bridgeModel = bridgeModel ~= "" and bridgeModel or nil end
 	if type(bridgeEffort) == "string" then store.bridgeEffort = bridgeEffort ~= "" and bridgeEffort or nil end
@@ -161,12 +290,11 @@ function AIChat.Answer(text, style, sender, bridgeModel, bridgeEffort)
 	if tab then frames[1] = tab end
 	if main then frames[#frames + 1] = DEFAULT_CHAT_FRAME end
 	ns.ShowMessage(text, style, sender, nil, frames)
-	waiting = math.max(0, waiting - 1)
-	if tab then
-		Unthink(tab)
-		if waiting > 0 then Think(tab) end
-		Flash(tab)
-	end
+	heard = GetTime()
+	local i = Find(session, post)
+	if i then table.remove(pending, Reached(i)) end
+	Update(true)
+	if tab then Flash(tab) end
 end
 
 ---------------------------------------------------------------------------
@@ -324,8 +452,8 @@ local function Ask(input)
 		question = question:sub(1, MAX_QUESTION + 1):gsub("[\1-\127\192-\255][\128-\191]*$", "")
 	end
 	local model, effort = Picked(MODEL).id, Picked(EFFORT).id
-	ns.Stream.Post({ question = question, player = UnitName("player"), model = model ~= "default" and model or nil,
-		effort = effort ~= "default" and effort or nil })
+	local post, session = ns.Stream.Post({ question = question, player = UnitName("player"),
+		model = model ~= "default" and model or nil, effort = effort ~= "default" and effort or nil })
 	local tab, main = Where()
 	if tab then TabLine(tab, YOU .. typed) end
 	if main then ns.Print("Asking… " .. typed) end
@@ -333,17 +461,11 @@ local function Ask(input)
 		Say("Live updates are off (" .. ns.run.liveProblem .. "), so the answer will only show after /reload.")
 		return
 	end
-	waiting = waiting + 1
-	if tab then Think(tab) end
-	local seq = ns.run.seq
-	C_Timer.After(HINT_AFTER, function()
-		if ns.run.seq == seq then
-			waiting = 0
-			local current = FindTab()
-			if current then Unthink(current) end
-			Say("Still no answer. If none comes, check that the wow-mcp-bridge service is running.")
-		end
-	end)
+	if #pending == 0 then seq = ns.run.seq end -- data from before doesn't say the bridge has this one
+	table.insert(pending, { session = session, post = post, asked = GetTime() })
+	untilRedraw = STATUS_EVERY
+	ticker:SetScript("OnUpdate", Tick)
+	Update(true)
 end
 
 -- Neither is a command of the default UI.

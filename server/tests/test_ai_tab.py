@@ -6,14 +6,19 @@ import sys
 
 import pytest
 
-# How the Lua test scripts publish, through the real tools: answers to /ai are replies.
+# How the Lua test scripts publish, through the real tools: answers to /ai are replies, the bridge's notes
+# about a question (ack, progress) statuses.
 PUBLISH_SCRIPT = """
 import json, sys
 from wow_mcp.tools import messages
 args = json.loads(sys.argv[1])
-messages.publish_message(args["text"], args.get("style", "chat"), args.get("sender", "Claude"),
-                         reply=args.get("reply", False), default_model=args.get("defaultModel"),
-                         default_effort=args.get("defaultEffort"))
+question = (args["session"], args["post"]) if "post" in args else None
+if "status" in args:
+    messages.publish_status(args["status"], args.get("text", ""), question=question, quiet=args.get("quiet"))
+else:
+    messages.publish_message(args["text"], args.get("style", "chat"), args.get("sender", "Claude"),
+                             reply=args.get("reply", False), default_model=args.get("defaultModel"),
+                             default_effort=args.get("defaultEffort"), question=question)
 """
 
 HELPERS = """
@@ -102,7 +107,42 @@ local function Labelled(box)
     return false
 end
 
-local YOU, THINKING = "|cff8fc8ff[You]|r ", "|cffaaaaaaThinking…|r"
+local YOU, STATUS = "|cff8fc8ff[You]|r ", "|cffababab"
+local DOWN, STOPPED = "No answer from wow-mcp-bridge. Is it running?", "The AI seems to have stopped responding."
+
+-- Whether a line is the status line saying the AI is thinking.
+local function Thinking(line)
+    return line ~= nil and line:find(STATUS .. "Thinking…", 1, true) == 1
+end
+
+-- What the addon posts to the bridge, named as Stream.Post names them: post ids from 1, session 77.
+local function Asks(ns)
+    local posted = {}
+    ns.Stream.Post = function(value)
+        posted[#posted + 1] = value
+        return #posted, 77
+    end
+    return posted
+end
+
+-- The game's clock on the server's (published messages have its time): a test can wait for long here.
+local function Now() client.epoch = os.time() - client.now end
+
+-- The bridge's note about the question in post `post`: "ack", or "progress" with the step it's on. `quiet`:
+-- the most seconds it says it may go without news.
+local function Note(status, post, step, quiet)
+    Now()
+    client.Publish('{"status":"' .. status .. '","session":77,"post":' .. post .. ',"text":"' .. (step or "") .. '"'
+        .. (quiet and ',"quiet":' .. quiet or "") .. '}')
+    client.Wait()
+end
+
+-- The bridge's answer to the question in post `post`.
+local function AnswerTo(post, text, session)
+    Now()
+    client.Publish('{"text":"' .. text .. '","reply":true,"session":' .. (session or 77) .. ',"post":' .. post .. '}')
+    client.Wait()
+end
 """
 
 
@@ -140,7 +180,8 @@ def test_tab_is_made_once_when_first_needed(game):
         assert(w.docked == 3 and GENERAL_CHAT_DOCK.selected == tab and tab:IsShown() and not ChatFrame1:IsShown())
         local lines = client.Lines(tab)
         assert(lines[1]:find("Type here to ask the AI, no /ai needed", 1, true), lines[1])
-        assert(lines[2] == YOU .. "where is the bank?" and lines[3] == THINKING and #lines == 3, table.concat(lines, "\n"))
+        assert(lines[2] == YOU .. "where is the bank?" and lines[3] == STATUS .. "Thinking… 0:00|r" and #lines == 3,
+            table.concat(lines, "\n"))
         assert(not Has(client.chat, "where is the bank") and posted[1].question == "where is the bank?")
 
         client.Type("/ai and the auction house?")
@@ -179,7 +220,7 @@ def test_conversation_and_where_it_shows(game):
         assert(Count(client.Lines(tab), "Thinking") == 1)
         Answer("One.")
         lines = client.Lines(tab)
-        assert(lines[#lines - 1] == "|cff33ff99[Claude]|r One." and lines[#lines] == THINKING, table.concat(lines, "\n"))
+        assert(lines[#lines - 1] == "|cff33ff99[Claude]|r One." and Thinking(lines[#lines]), table.concat(lines, "\n"))
         Answer("Two.")
         assert(not Has(client.Lines(tab), "Thinking"))
 
@@ -228,11 +269,12 @@ def test_conversation_and_where_it_shows(game):
         SlashCmdList.WOWMCP("aitab loud")
         assert(Has(client.chat, "/mcp aitab [on, both, off]") and WowMCPDB.aiTab.mode == "on")
 
-        -- No answer for a while: "Thinking…" gives way to a hint about the bridge.
+        -- Nothing at all from the bridge for a while: "Thinking…" gives way to a hint about it, in the tab only.
         client.Type("/ai anyone?")
-        client.Wait(182)
+        client.Wait(32)
         lines = client.Lines(tab)
-        assert(not Has(lines, "Thinking") and lines[#lines]:find("Still no answer", 1, true), lines[#lines])
+        assert(not Has(lines, "Thinking") and lines[#lines] == STATUS .. DOWN .. "|r", lines[#lines])
+        assert(Count(lines, DOWN) == 1 and not Has(client.chat, DOWN))
     """)
 
 
@@ -835,3 +877,207 @@ def test_thinking_command(game):
         client.EnterLine("thinking about professions")
         assert(posted[8].question == "thinking about professions" and posted[8].effort == "max")
     """)
+
+
+def test_status_line(game):
+    """While an answer is due, the status line says how long it's taking and the step the bridge last said the AI
+    is on. The clock ticks in game, at no cost, in place; each step the bridge sends costs it a live-update slot."""
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Asks(ns)
+        Settle()
+        client.Type("/ai any good flips near me?")
+        local tab = Tab()
+        local function Status()
+            local lines = client.Lines(tab)
+            return lines[#lines]
+        end
+        assert(posted[1].question == "any good flips near me?" and Status() == STATUS .. "Thinking… 0:00|r", Status())
+
+        -- The bridge says it has it, and the clock ticks on, every second: the line changes in place.
+        Note("ack", 1, nil, 120)
+        local count = #client.Lines(tab)
+        client.Wait(20)
+        assert(Status():match("^|cffababab" .. "Thinking… 0:1[01]|r$"), Status())
+        assert(#client.Lines(tab) == count and Count(client.Lines(tab), STATUS) == 1)
+
+        -- The steps the bridge says the AI is on.
+        Note("progress", 1, "checking auction prices")
+        assert(Status():match("^|cffababab" .. "Thinking… 0:1%d · checking auction prices|r$"), Status())
+
+        -- Long past the bridge's old limit (180 s), while it keeps saying it's at work (at least every 120 s, as its
+        -- ack said): no warning.
+        for _ = 1, 3 do
+            client.Wait(220)
+            assert(Thinking(Status()), Status())
+            Note("progress", 1, "working it out")
+        end
+        assert(Status():match("^|cffababab" .. "Thinking… 5:4%d · working it out|r$"), Status())
+
+        -- Nothing for longer than that, and a margin: it seems to have stopped. In the tab only, where the
+        -- conversation shows.
+        client.Wait(340)
+        assert(Thinking(Status()), Status())
+        client.Wait(30)
+        assert(Status() == STATUS .. STOPPED .. "|r" and not Has(client.chat, STOPPED), Status())
+        -- It was only slow: carry on.
+        Note("progress", 1, "writing")
+        assert(Status():match("^|cffababab" .. "Thinking… 8:5%d · writing|r$"), Status())
+
+        -- The answer: the status line goes, and stays gone.
+        AnswerTo(1, "Nothing worth flipping here.")
+        local lines = client.Lines(tab)
+        assert(lines[#lines] == "|cff33ff99[Claude]|r Nothing worth flipping here." and Count(lines, STATUS) == 0)
+        client.Wait(20)
+        assert(Count(client.Lines(tab), STATUS) == 0)
+
+        -- A bridge whose agent says nothing until it's done (--agent) says how long it may take.
+        client.Type("/ai a slow one?")
+        Note("ack", 2, nil, 1800)
+        client.Wait(1200)
+        assert(Thinking(Status()), Status())
+        AnswerTo(2, "Done.")
+        assert(Count(client.Lines(tab), STATUS) == 0)
+    """)
+
+
+def test_bridge_down(game):
+    """No word from the bridge that it has a question: it may not be running. The status line says so, and goes
+    back to thinking if word comes after all."""
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Asks(ns)
+        Settle()
+        client.Type("/ai anyone there?")
+        local tab = Tab()
+        local function Status()
+            local lines = client.Lines(tab)
+            return lines[#lines]
+        end
+        client.Wait(28)
+        assert(Thinking(Status()), Status())
+        client.Wait(4)
+        assert(Status() == STATUS .. DOWN .. "|r", Status())
+        assert(Count(client.Lines(tab), STATUS) == 1 and not Has(client.chat, "wow-mcp-bridge"))
+        -- It was slow to say so: carry on.
+        Note("ack", 1)
+        assert(Status():match("^|cffababab" .. "Thinking… 0:1%d|r$"), Status())
+        AnswerTo(1, "Yes.")
+        assert(Count(client.Lines(tab), STATUS) == 0)
+
+        -- In a fight, news waits for it to end: that there is some is word enough.
+        client.combat = true
+        client.Type("/ai in a fight?")
+        Note("ack", 2)
+        client.Wait(60)
+        assert(Thinking(Status()) and ns.run.pendingLoad, Status())
+        client.combat = false
+        client.Fire("PLAYER_REGEN_ENABLED")
+        AnswerTo(2, "Won.")
+        assert(Count(client.Lines(tab), STATUS) == 0)
+
+        -- The conversation in the main window too (/mcp aitab both): it's told there as well, once.
+        SlashCmdList.WOWMCP("aitab both")
+        client.Type("/ai both?")
+        client.Wait(40)
+        assert(Status() == STATUS .. DOWN .. "|r" and Count(client.chat, DOWN) == 1)
+        client.Wait(40)
+        assert(Count(client.chat, DOWN) == 1 and not Has(client.chat, "Thinking"))
+    """)
+
+
+def test_several_questions(game):
+    """Questions asked while another is answered: one status line, for the oldest, below the latest answer. The
+    bridge answers in turn, so a question it never had is given up once it has a later one."""
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Asks(ns)
+        Settle()
+        client.Type("/ai first?")
+        local tab = Tab()
+        local function Status()
+            local lines = client.Lines(tab)
+            return lines[#lines]
+        end
+        client.Wait(20)
+        client.Type("/ai second?")
+        Note("ack", 1)
+        Note("ack", 2)
+        Note("progress", 1, "checking auction prices")
+        local lines = client.Lines(tab)
+        assert(Count(lines, STATUS) == 1 and lines[#lines - 1] == YOU .. "second?", table.concat(lines, "\n"))
+        assert(Status():match("^|cffababab" .. "Thinking… 0:1%d · checking auction prices|r$"), Status())
+
+        -- The first answered: the line moves below it, for the second (waiting since it was asked), no step yet.
+        AnswerTo(1, "One.")
+        lines = client.Lines(tab)
+        assert(lines[#lines - 1] == "|cff33ff99[Claude]|r One." and Count(lines, STATUS) == 1)
+        assert(Status():match("^|cffababab" .. "Thinking… 0:0%d|r$"), Status())
+        Note("progress", 2, "searching the web")
+        assert(Status():find(" · searching the web|r", 1, true), Status())
+        -- An answer to a question asked before a /reload shows, and changes nothing here.
+        AnswerTo(9, "Old answer.", 12)
+        assert(Has(client.Lines(tab), "Old answer.") and Status():find(" · searching the web|r", 1, true), Status())
+        AnswerTo(2, "Two.")
+        assert(Count(client.Lines(tab), STATUS) == 0)
+
+        -- Asked while the bridge was down: no word. Asked again once it's up: the first never got there, so it goes.
+        client.Type("/ai lost?")
+        client.Wait(32)
+        assert(Status() == STATUS .. DOWN .. "|r", Status())
+        client.Type("/ai again?")
+        Note("ack", 4)
+        assert(Status():match("^|cffababab" .. "Thinking… 0:0%d|r$"), Status())
+        AnswerTo(4, "Found it.")
+        assert(Count(client.Lines(tab), STATUS) == 0)
+
+        -- A bridge from before these notes doesn't say which question it answers: the oldest, then.
+        client.Type("/ai old bridge?")
+        client.Type("/ai and again?")
+        Answer("Old one.")
+        assert(Thinking(Status()), Status())
+        Answer("Old two.")
+        assert(Count(client.Lines(tab), STATUS) == 0)
+    """)
+
+
+def test_status_notes_are_not_messages(game):
+    """The bridge's notes go to the status line only: never into chat, /mcp messages or a message's sound."""
+    game(r"""
+        local ns = client.LoadAddon()
+        Asks(ns)
+        Settle()
+        client.Type("/ai where?")
+        local tab = Tab()
+        local sounds = #client.sounds
+        Note("ack", 1, nil, 120)
+        Note("progress", 1, "checking where you are")
+        assert(#client.sounds == sounds and not Has(client.chat, "checking where"))
+        assert(not Has(client.Lines(tab), "[Claude]"))
+        SlashCmdList.WOWMCP("messages")
+        assert(Has(client.chat, "No messages yet."))
+        AnswerTo(1, "Here.")
+        wipe(client.chat)
+        SlashCmdList.WOWMCP("messages")
+        assert(Has(client.chat, "[Claude]|r Here.") and not Has(client.chat, "checking where"))
+    """)
+
+
+def test_status_notes_make_room(addons):
+    """A question's notes give way to its newer note and to its answer, so they don't crowd answers out of the
+    payload (it keeps the newest 10) while the game waits to take them, e.g. for a fight to end."""
+    from wow_mcp.app import transport
+    from wow_mcp.tools import messages
+
+    messages.publish_status("ack", question=(77, 1), quiet=120)
+    messages.publish_status("ack", question=(77, 2), quiet=120)
+    messages.publish_status("progress", "checking   auction prices", question=(77, 1), quiet=120)
+    sent = transport().load_state()["messages"]
+    assert [(m["status"], m["post"], m["text"], m["quiet"]) for m in sent] == [
+        ("ack", 2, "", 120), ("progress", 1, "checking auction prices", 120)]
+    assert all(m["session"] == 77 and "from" not in m and "reply" not in m for m in sent)
+    messages.publish_message("Answer one.", sender="Claude Fable", reply=True, question=(77, 1))
+    sent = transport().load_state()["messages"]
+    assert [(m.get("status"), m["post"]) for m in sent] == [("ack", 2), (None, 1)]
+    with pytest.raises(ValueError, match="status must be one of ack, progress"):
+        messages.publish_status("done", question=(77, 1))

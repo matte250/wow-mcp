@@ -113,7 +113,8 @@ end
 
 local session, posts -- set by the first post
 
--- Send a Lua value to the server unasked (keep it small); returns its post id.
+-- Send a Lua value to the server unasked (keep it small); returns its post id and the session token,
+-- which together name it (the server's replies say which post they're about by them).
 function Stream.Post(value)
 	if not session then
 		session, posts = (math.floor(time()) % 65536) * 65536 + math.random(0, 65535), 0
@@ -121,5 +122,5 @@ function Stream.Post(value)
 	posts = posts + 1
 	local body = Body(value)
 	Enqueue(POST_MAGIC .. U32(session) .. U32(posts) .. U32(#body) .. body)
-	return posts
+	return posts, session
 end

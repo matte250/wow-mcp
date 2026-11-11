@@ -20,21 +20,40 @@ guidance(
 guidance(item_text.GUIDANCE, order=66)  # items in any text sent to the game, this tool's and the others'
 
 STYLES = ("chat", "center", "both")
+STATUSES = ("ack", "progress")
 KEEP = 10  # the payload carries only the newest; the addon shows the ids it hasn't shown yet
 MAX_TEXT = 4000
 MAX_SENDER = 40
+MAX_STATUS = 80
+
+
+def _add(message: dict, question: tuple[int, int] | None) -> int:
+    """Publish a message, keeping the newest. A question's status notes go once a newer note or its answer is
+    there, so they don't crowd out answers the game hasn't shown yet (e.g. while it waits out a fight)."""
+    if question:
+        message["session"], message["post"] = question
+
+    def change(state: dict, seq: int) -> None:
+        kept = [m for m in state.get("messages") or [] if isinstance(m, dict)]
+        if question:
+            kept = [m for m in kept if not (m.get("status") and (m.get("session"), m.get("post")) == tuple(question))]
+        state["messages"] = [*kept[-(KEEP - 1) :], {"id": seq, **message}]
+
+    return transport().publish(change)
 
 
 def publish_message(text: str, style: str = "chat", sender: str = "Claude", reply: bool = False,
-                    default_model: str | None = None, default_effort: str | None = None) -> int:
+                    default_model: str | None = None, default_effort: str | None = None,
+                    question: tuple[int, int] | None = None) -> int:
     """Show text in the player's game and return the message's id (other features use this too).
 
     style: "chat" (printed with the sender's name), "center" (big text in the middle of the
     screen) or "both". reply: it answers what the player asked in game (/ai, the bridge), so it
     shows in the game's AI chat tab with their question. default_model (with reply): the model
     the bridge answers with when the player hasn't picked one, "" if it doesn't know, for the
-    game's model picker; default_effort likewise how hard it thinks. Messages sent while the
-    game is closed show at the next login.
+    game's model picker; default_effort likewise how hard it thinks. question (with reply): the
+    post the question came in, (session, id), so the game knows which one is answered. Messages
+    sent while the game is closed show at the next login.
     """
     if style not in STYLES:
         raise ValueError(f"style must be one of {', '.join(STYLES)}, not {style!r}")
@@ -43,20 +62,32 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude", repl
         raise ValueError("the message is empty")
     text = item_text.shorten(text, MAX_TEXT)
     sender = (sender or "").strip()[:MAX_SENDER] or "Claude"
+    message = {"text": text, "style": style, "from": sender, "at": int(time.time())}
+    if reply:
+        message["reply"] = True
+        if default_model is not None:
+            message["defaultModel"] = default_model
+        if default_effort is not None:
+            message["defaultEffort"] = default_effort
+    return _add(message, question if reply else None)
 
-    def change(state: dict, seq: int) -> None:
-        kept = [m for m in state.get("messages") or [] if isinstance(m, dict)][-(KEEP - 1) :]
-        message = {"id": seq, "text": text, "style": style, "from": sender, "at": int(time.time())}
-        if reply:
-            message["reply"] = True
-            if default_model is not None:
-                message["defaultModel"] = default_model
-            if default_effort is not None:
-                message["defaultEffort"] = default_effort
-        kept.append(message)
-        state["messages"] = kept
 
-    return transport().publish(change)
+def publish_status(status: str, text: str = "", question: tuple[int, int] | None = None,
+                   quiet: float | None = None) -> int:
+    """Tell the game how a question the player asked in game (/ai, the bridge) is coming along, for the
+    AI chat tab's status line; it's never shown as a message. Returns its id.
+
+    status: "ack" (the question arrived) or "progress" (text: the step the agent is on, e.g. "checking
+    auction prices"; "" for none). question: the post it came in, (session, id). quiet: the most
+    seconds the bridge goes without telling the game anything while it works on it; longer, and the
+    game says it seems to have stopped.
+    """
+    if status not in STATUSES:
+        raise ValueError(f"status must be one of {', '.join(STATUSES)}, not {status!r}")
+    message = {"text": " ".join(text.split())[:MAX_STATUS], "status": status, "at": int(time.time())}
+    if quiet is not None:
+        message["quiet"] = quiet
+    return _add(message, question)
 
 
 def delivery_note() -> str:
