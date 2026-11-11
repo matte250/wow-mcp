@@ -24,7 +24,6 @@ hourly) when Blizzard API credentials are set up, so price history builds up eve
 
 import argparse
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -43,7 +42,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from wow_mcp import item_text, stream
+from wow_mcp import item_text, locking, stream
 from wow_mcp.install import ADDONS_DIR_ENV
 from wow_mcp.transport import ADDON, write_atomic
 
@@ -338,6 +337,57 @@ def claude_command(model: str | None = None) -> list[str]:
     return command + ["--model", model] if model else command
 
 
+WINDOWS = sys.platform == "win32"
+# What npm's launcher script for a native program (claude.cmd) runs: "%dp0%\...\claude.exe" %*
+NPM_SHIM = re.compile(r'"%dp0%\\([^"\r\n]+\.exe)"\s+%\*', re.IGNORECASE)
+LAUNCHERS = (".cmd", ".bat")  # run by cmd.exe
+
+
+def split_command(text: str, windows: bool = WINDOWS) -> list[str]:
+    """An agent command line (--agent) as its words."""
+    if not windows:
+        return shlex.split(text)
+    # Windows paths have backslashes, which POSIX rules would eat. Without those rules the
+    # quotes around a word stay on, so they come off here: "C:\Program Files\x\agent.exe".
+    words = shlex.split(text, posix=False)
+    return [word[1:-1] if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'" else word for word in words]
+
+
+def resolve_command(command: list[str]) -> list[str] | None:
+    """The command if its program is on PATH, or None if it isn't there.
+
+    On Windows the program is replaced by where it was found. It's often installed as a .cmd
+    launcher there (npm's claude.cmd), and arguments with line breaks or quotes, like the system
+    prompt, don't survive cmd.exe. So a launcher that only starts a program runs as that program
+    instead (see launcher_problem for the ones that don't).
+    """
+    program = shutil.which(command[0]) if command else None
+    if not program:
+        return None
+    if not WINDOWS:
+        return command
+    if program.lower().endswith(LAUNCHERS):
+        with contextlib.suppress(OSError):
+            if m := NPM_SHIM.search(Path(program).read_text(encoding="utf-8", errors="replace")):
+                target = Path(program).parent / m.group(1)
+                if target.is_file():
+                    program = str(target)
+    return [program, *command[1:]]
+
+
+def launcher_problem(command: list[str], windows: bool = WINDOWS) -> str | None:
+    """Why a command, as it will be run, can't be: its program is still a .cmd or .bat launcher
+    and an argument has a line break or a double quote, which cmd.exe would cut off or garble."""
+    if not windows or not command or not command[0].lower().endswith(LAUNCHERS):
+        return None
+    if not any(c in arg for arg in command[1:] for c in '\r\n"'):
+        return None
+    return (f"{command[0]} is a batch launcher, and Windows can't pass it arguments with line breaks or double "
+            "quotes (the system prompt, the MCP config). Name the program it starts as the agent instead (--agent), "
+            "or leave {system_prompt} and {mcp_config} out of the command: the agent also gets them in its "
+            "environment, as WOW_MCP_SYSTEM_PROMPT and WOW_MCP_MCP_CONFIG.")
+
+
 def with_model(command: list[str], model: str) -> list[str]:
     """Claude Code's command with --model set to one of MODELS, in place of its own."""
     if model not in MODELS:  # never anything else from the game on the command line
@@ -385,9 +435,12 @@ class CommandAgent:
         command = self.command if model is None else with_model(self.command, model)
         try:
             # Its own process group, so a timeout also stops whatever it started (MCP servers).
+            # On Windows its output is read as UTF-8, not in the system's code page.
+            platform = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP, "encoding": "utf-8", "errors": "replace"}
+                        if WINDOWS else {"start_new_session": True})
             process = subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=self.env, cwd=self._folder.name, start_new_session=True,
+                text=True, env=self.env, cwd=self._folder.name, **platform,
             )
         except OSError as e:
             raise AgentError(f"couldn't start {self.command[0]}: {e.strerror}") from e
@@ -406,12 +459,16 @@ class CommandAgent:
         process = self._process
         if process is None:
             return
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(5)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)  # anything still left in its group
+        if WINDOWS:
+            # The process and everything under it; Windows has no polite way to ask a tree to stop.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False)
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(5)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)  # anything still left in its group
         process.wait()
         for pipe in (process.stdin, process.stdout, process.stderr):
             with contextlib.suppress(OSError):
@@ -536,9 +593,7 @@ def claim(addon_dir: Path):
     """Make this the only bridge answering for this game; two would each answer every question.
     Returns the lock, which is held as long as the returned file stays open."""
     lock = open(addon_dir / ".bridge.lock", "a+")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not locking.acquire(lock, blocking=False):
         lock.seek(0)
         pid = lock.read().strip()
         lock.close()
@@ -598,9 +653,13 @@ def main() -> None:
         sys.exit(f"{ADDON} isn't installed in {addons_dir}. Run wow-mcp-install first.")
     lock = claim(addons_dir / ADDON)  # noqa: F841 (held until exit)
     os.environ[ADDONS_DIR_ENV] = str(addons_dir)  # where publish_message sends answers
-    command = shlex.split(args.agent) if args.agent else claude_command(args.model)
-    if not command or not shutil.which(command[0]):
-        sys.exit(f"Agent command not found: {args.agent or command[0]}")
+    asked = split_command(args.agent) if args.agent else claude_command(args.model)
+    command = resolve_command(asked)
+    if not command:
+        sys.exit(f"Agent command not found: {args.agent or asked[0]}")
+    agent = CommandAgent(command, addons_dir, args.timeout)
+    if problem := launcher_problem(agent.command):
+        sys.exit(problem)
     from wow_mcp.tools import messages
 
     if not hasattr(messages, "publish_message"):
@@ -608,7 +667,6 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx2").setLevel(logging.WARNING)  # a line per request otherwise
-    agent = CommandAgent(command, addons_dir, args.timeout)
     history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
     background = auction_refresh(addons_dir, args.no_auction_refresh)
     bridge = Bridge(addons_dir, agent, history=history, background=background, models=not args.agent, model=args.model)

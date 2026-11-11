@@ -240,7 +240,7 @@ def test_full_inbox_stays_compact(run_client, tmp_path):
         local f = assert(io.open("OUT", "w"))
         f:write(C_EncodingUtil.SerializeJSON(reply))
         f:close()
-    """.replace("OUT", str(out)))
+    """.replace("OUT", out.as_posix()))
     body = out.read_bytes()
     assert len(json.loads(body)["mail"]["inbox"]["mails"]) == 50
     size = len(zlib.compress(body, 9))

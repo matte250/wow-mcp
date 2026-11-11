@@ -1,5 +1,6 @@
 """The game-to-server stream of file opens (stream.py, Stream.lua)."""
 
+import sys
 import threading
 import time
 
@@ -122,10 +123,90 @@ def test_addon_posts(run_client, tmp_path):
         local f = assert(io.open("OPENS", "w"))
         f:write(table.concat(opened, " "))
         f:close()
-    """.replace("OPENS", str(opens)))
+    """.replace("OPENS", opens.as_posix()))
     symbols = [int(s, 16) for s in opens.read_text().split()]
     posts = stream.find_posts(symbols)
     assert [(p.id, p.value) for p in posts] == [(1, {"question": "first"}), (2, {"question": "second"}),
                                                 (1, {"question": "third"})]
     assert posts[0].session == posts[1].session != posts[2].session
     assert stream.find_message(symbols, 5) == {"reply": True}
+
+
+# The Windows watcher (opens_windows.py) -----------------------------------------------------
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="the Windows file watcher")
+
+
+@pytest.fixture
+def watcher(out):
+    """The Windows watcher's module, with the watcher of `out` stopped afterwards."""
+    from wow_mcp import opens_windows
+
+    yield opens_windows
+    opens_windows.stop(out)
+
+
+@windows_only
+def test_watcher_tells_busy_files_from_ones_it_can_never_watch(watcher):
+    path = r"C:\game\out\000.wav"
+    assert watcher._oplock_taken(0, watcher._ERROR_IO_PENDING, path) is True
+    assert watcher._oplock_taken(0, watcher._ERROR_OPLOCK_NOT_GRANTED, path) is False, "held elsewhere: try again"
+    for error in (1, 50, 87):  # invalid function, not supported, invalid parameter
+        with pytest.raises(watcher.Unavailable, match=rf"no oplock on C:\\game\\out\\000\.wav: .*\(Windows error {error}\)"):
+            watcher._oplock_taken(0, error, path)
+
+
+@windows_only
+def test_watcher_that_cannot_watch_says_why(out, watcher):
+    (out / "7ff.wav").unlink()
+    started = time.monotonic()
+    with pytest.raises(stream.StreamError, match=r"can't watch .*out for file opens: can't open .*7ff\.wav: .*error 2\)$"):
+        stream.Receiver(out)
+    assert time.monotonic() - started < watcher.START_TIMEOUT, "reported when it gave up, not after waiting it out"
+    assert not watcher._exists(watcher._names(out)["ready"])
+
+
+@windows_only
+def test_watcher_waits_for_a_file_whose_oplock_is_held_elsewhere(out, watcher):
+    import ctypes
+
+    k32, held = watcher._k32, out / "0aa.wav"
+    handle = k32.CreateFileW(str(held), watcher._FILE_READ_ATTRIBUTES, watcher._SHARE_ALL, None,
+                             watcher._OPEN_EXISTING, watcher._FILE_FLAG_OVERLAPPED, None)
+    assert handle != watcher._INVALID
+    request = watcher._OplockRequest(1, ctypes.sizeof(watcher._OplockRequest), watcher._OPLOCK_READ_WRITE,
+                                     watcher._OPLOCK_REQUEST)
+    overlapped, reply = watcher._Overlapped(), watcher._OplockReply()
+    k32.DeviceIoControl(handle, watcher._FSCTL_REQUEST_OPLOCK, ctypes.byref(request), ctypes.sizeof(request),
+                        ctypes.byref(reply), ctypes.sizeof(reply), None, ctypes.byref(overlapped))
+    assert ctypes.get_last_error() == watcher._ERROR_IO_PENDING
+    try:
+        with stream.Receiver(out) as receiver:  # starts all the same
+            open_files(out, [0x001])
+            assert receiver._opens.read(2) == [0x001]
+            k32.CloseHandle(handle)
+            handle = None
+            time.sleep(0.2)  # the watcher takes the file within a moment
+            open_files(out, [0x0AA, 0x002])
+            deadline, seen = time.monotonic() + 2, []
+            while len(seen) < 2 and time.monotonic() < deadline:
+                seen += receiver._opens.read(0.2)
+            assert seen == [0x0AA, 0x002]
+    finally:
+        if handle:
+            k32.CloseHandle(handle)
+
+
+@windows_only
+def test_watcher_does_not_work_in_its_starters_folder(out, watcher, monkeypatch):
+    started = []
+    popen = watcher.subprocess.Popen
+
+    def recording(command, **options):
+        started.append(options.get("cwd"))
+        return popen(command, **options)
+
+    monkeypatch.setattr(watcher.subprocess, "Popen", recording)
+    with stream.Receiver(out):
+        pass
+    assert started and set(started) == {str(out.parent)}

@@ -1,7 +1,8 @@
 """Receives what the addon streams as file opens (see addon/WowMCP/Stream.lua).
 
 The addon "plays" empty files out/000.wav-out/fff.wav; each play makes the client open
-the file, and inotify reports the opens here, in order. Each file name is a 12-bit
+the file, and the system reports the opens here, in order: inotify on Linux, a watcher
+holding oplocks on Windows (opens_windows.py). Each file name is a 12-bit
 symbol, offset by a whitening sequence so that equal symbols in a row become different
 files (the client opens a file at most once per frame). Nothing is drawn or heard in
 game, and the game doesn't have to be on screen.
@@ -16,6 +17,7 @@ import os
 import re
 import select
 import struct
+import sys
 import time
 import zlib
 from collections.abc import Container, Iterator
@@ -177,9 +179,8 @@ def find_posts(files: list[int], handled: Container[tuple[int, int]] = ()) -> li
     return posts
 
 
-class Receiver:
-    """Watches a folder of symbol files; use as a context manager around the request, or keep
-    one open to receive posts."""
+class _Inotify:
+    """Linux: the symbol files in a folder as they're opened."""
 
     def __init__(self, folder: Path):
         self._libc = ctypes.CDLL(None, use_errno=True)
@@ -190,24 +191,19 @@ class Receiver:
         if self._libc.inotify_add_watch(self._fd, os.fsencode(folder), IN_OPEN | IN_CLOSE_NOWRITE) < 0:
             os.close(self._fd)
             raise StreamError(f"can't watch {folder}: {os.strerror(ctypes.get_errno())}")
-        self.symbols: list[int] = []
-        self._handled: set[tuple[int, int]] = set()
 
-    def __enter__(self) -> "Receiver":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
+    def close(self) -> None:
         os.close(self._fd)
 
-    def _read(self, wait: float) -> bool:
-        """Collect pending opens, waiting up to `wait` seconds; True if any arrived."""
+    def read(self, wait: float) -> list[int]:
+        """The files opened since the last call (as symbol numbers), waiting up to `wait` seconds."""
         if not select.select([self._fd], [], [], max(wait, 0))[0]:
-            return False
+            return []
         try:
             data = os.read(self._fd, 1 << 20)
         except BlockingIOError:
-            return False
-        got = False
+            return []
+        symbols = []
         pos = 0
         while pos < len(data):
             _, mask, _, length = struct.unpack_from("iIII", data, pos)
@@ -218,9 +214,54 @@ class Receiver:
             if mask & IN_IGNORED:
                 raise StreamError("the watched folder was removed")
             if mask & IN_OPEN and (m := SYMBOL_FILE.fullmatch(name)):
-                self.symbols.append(int(m.group(1), 16))
-                got = True
-        return got
+                symbols.append(int(m.group(1), 16))
+        return symbols
+
+
+class _WindowsOpens:
+    """Windows: the same, from the folder's watcher process (opens_windows.py)."""
+
+    def __init__(self, folder: Path):
+        from wow_mcp import opens_windows
+
+        self._errors = opens_windows
+        try:
+            self._opens = opens_windows.Opens(folder)
+        except (opens_windows.Unavailable, OSError) as e:
+            raise StreamError(str(e)) from e
+
+    def close(self) -> None:
+        self._opens.close()
+
+    def read(self, wait: float) -> list[int]:
+        try:
+            return self._opens.read(wait)
+        except self._errors.Lost as e:
+            raise Corrupt(str(e)) from e
+        except (self._errors.Unavailable, OSError) as e:
+            raise StreamError(str(e)) from e
+
+
+class Receiver:
+    """Watches a folder of symbol files; use as a context manager around the request, or keep
+    one open to receive posts."""
+
+    def __init__(self, folder: Path):
+        self._opens = _WindowsOpens(folder) if sys.platform == "win32" else _Inotify(folder)
+        self.symbols: list[int] = []
+        self._handled: set[tuple[int, int]] = set()
+
+    def __enter__(self) -> "Receiver":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._opens.close()
+
+    def _read(self, wait: float) -> bool:
+        """Collect pending opens, waiting up to `wait` seconds; True if any arrived."""
+        symbols = self._opens.read(wait)
+        self.symbols += symbols
+        return bool(symbols)
 
     def receive(self, request_id: int, start_timeout: float, idle_timeout: float) -> object:
         """Wait for the reply: it must start within start_timeout and keep arriving without

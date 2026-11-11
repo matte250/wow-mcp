@@ -52,6 +52,26 @@ MapCanvasPinMixin = {
 	UseFrameLevelType = function() end,
 	SetScalingLimits = function() end,
 	SetPosition = function(self, x, y) self.x, self.y = x, y end,
+	-- The buttons a pin lets through to the map; addons may not change them in combat.
+	SetPassThroughButtons = function(self, ...)
+		if client.combat then
+			client.blocked = (client.blocked or 0) + 1
+			return
+		end
+		self.passThrough = { ... }
+	end,
+	-- As in the game: the canvas calls CheckMouseButtonPassthrough("RightButton") on a pin
+	-- after OnAcquired, and right-clicks fall through to the map unless the pin says otherwise.
+	ShouldMouseButtonBePassthrough = function(self, button) return button == "RightButton" end,
+	CheckMouseButtonPassthrough = function(self, ...)
+		self:SetPassThroughButtons()
+		local buttons = {}
+		for i = 1, select("#", ...) do
+			local button = select(i, ...)
+			if self:ShouldMouseButtonBePassthrough(button) then table.insert(buttons, button) end
+		end
+		self:SetPassThroughButtons((table.unpack or unpack)(buttons))
+	end,
 }
 
 local function FontString()

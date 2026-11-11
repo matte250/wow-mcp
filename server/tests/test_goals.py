@@ -589,7 +589,8 @@ def test_plans_wait_for_goals_that_are_set(addons):
     result = asyncio.run(plans.show_plan("Belts", [step, plans.Step(text="Craft")]))
     assert "1. Goal: 6 Medium Hide [done when: goal 'medium-hide' done]" in result
     assert "1 step(s) have nothing the game can check" in result
-    assert Transport(addons).load_state()["plan"]["steps"][0]["conditions"] == [{"goal": "medium-hide"}]
+    (sent,) = plans.sent_plans(Transport(addons).load_state())
+    assert sent["steps"][0]["conditions"] == [{"goal": "medium-hide"}]
     with pytest.raises(ValidationError, match="String should match pattern"):
         plans.Step(text="x", conditions=[{"goal": "Medium Hide"}])
 

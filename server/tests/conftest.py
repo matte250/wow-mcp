@@ -81,7 +81,11 @@ def addons(wow_root, tmp_path, monkeypatch):
     monkeypatch.setenv("WOW_MCP_ADDONS_DIR", str(addons_dir))
     monkeypatch.setenv("WOWMCP_PUBLISH", f"{sys.executable} {script}")
     monkeypatch.setattr(app, "_transport", None)
-    return addons_dir
+    yield addons_dir
+    if sys.platform == "win32":  # the folder's file watcher (opens_windows.py) would keep it from being removed
+        from wow_mcp import opens_windows
+
+        opens_windows.stop(addons_dir / "WowMCP" / "out")
 
 
 @pytest.fixture
@@ -92,7 +96,7 @@ def run_client(addons, tmp_path):
         if not LUA:
             pytest.skip("lua interpreter not installed")
         test = tmp_path / "test.lua"
-        test.write_text(textwrap.dedent(script))
+        test.write_text(textwrap.dedent(script), encoding="utf-8")
         result = subprocess.run([LUA, str(STUB), str(addons), str(test)], capture_output=True, text=True)
         assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 

@@ -113,6 +113,99 @@ def test_slash_commands(run_client):
     """)
 
 
+def test_the_player_removes_a_marker(run_client):
+    run_client(r"""
+        client.LoadAddon()
+        client.Wait()
+        local mcp = SlashCmdList.WOWMCP
+        local function last() return client.chat[#client.chat] end
+        local function labels()
+            local list = {}
+            for _, pin in ipairs(WorldMapFrame.pins) do table.insert(list, pin.marker.index .. ":" .. pin.marker.label) end
+            table.sort(list)
+            return table.concat(list, ",")
+        end
+        client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"},{"zone":"Durotar","x":40,"y":60,"label":"Bank"},{"zone":"Durotar","x":45,"y":20,"label":"Inn"}]}')
+        client.Wait()
+        assert(labels() == "1:Razor Hill,2:Bank,3:Inn" and client.waypoint, labels())
+
+        -- By command: the pin goes, the others keep their numbers, the waypoint (on the first) stays.
+        mcp("remove 2")
+        assert(labels() == "1:Razor Hill,3:Inn" and client.waypoint, labels())
+        assert(last():find("Removed marker", 1, true) and last():find("Bank.", 1, true), last())
+        mcp("2")
+        assert(last():find("No marker 2", 1, true))
+        mcp("remove 2")
+        assert(last():find("No marker 2", 1, true))
+        mcp("remove")
+        assert(last():find("/mcp remove <n> removes marker n", 1, true))
+
+        -- Right-clicking a pin on the map; the waypoint goes with its marker.
+        local pin
+        for _, p in ipairs(WorldMapFrame.pins) do if p.marker.index == 1 then pin = p end end
+        pin:OnMouseClickAction("RightButton")
+        assert(labels() == "3:Inn" and not client.waypoint, labels())
+        assert(last():find("Razor Hill and its waypoint.", 1, true), last())
+
+        -- A /reload doesn't bring them back; new markers from the AI start over.
+        wipe(client.loaded); wipe(client.tickers); wipe(client.timers); wipe(client.frames); wipe(client.chat); wipe(client.opened)
+        WorldMapFrame.providers = {}; wipe(WorldMapFrame.pins); WorldMapFrame.shown = false
+        client.LoadAddon()
+        assert(labels() == "3:Inn", labels())
+        mcp("3")
+        assert(client.waypoint)
+        mcp("remove 3")
+        assert(labels() == "" and not client.waypoint)
+        mcp("")
+        assert(last():find("No markers", 1, true))
+        client.Wait()
+        client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"},{"zone":"Durotar","x":40,"y":60,"label":"Bank"}]}')
+        client.Wait()
+        assert(labels() == "1:Razor Hill,2:Bank", labels())
+    """)
+
+
+def test_removing_a_marker_leaves_a_waypoint_that_is_no_longer_its_own(run_client):
+    run_client(r"""
+        client.LoadAddon()
+        client.Wait()
+        local function last() return client.chat[#client.chat] end
+        client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"},{"zone":"Durotar","x":40,"y":60,"label":"Bank"}]}')
+        client.Wait()
+        assert(client.waypoint.uiMapID == 1411, "the first marker has the waypoint")
+
+        -- The player (or a route step) puts the waypoint somewhere else; the markers' record stays.
+        client.waypoint = UiMapPoint.CreateFromCoordinates(1454, 0.3, 0.3)
+        SlashCmdList.WOWMCP("remove 1")
+        assert(client.waypoint and client.waypoint.uiMapID == 1454, "that waypoint is not ours to remove")
+        assert(last():find("Razor Hill.", 1, true), last())
+        assert(not last():find("waypoint", 1, true), last())
+    """)
+
+
+def test_right_clicks_on_a_pin_stay_on_the_pin(run_client):
+    run_client(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"}]}')
+        client.Wait()
+        -- The map canvas asks every pin it hands out, after OnAcquired.
+        local pin = WorldMapFrame.pins[1]
+        assert(MapCanvasPinMixin.ShouldMouseButtonBePassthrough(pin, "RightButton"), "the game's default lets them through")
+        assert(not pin:ShouldMouseButtonBePassthrough("RightButton"))
+        pin:CheckMouseButtonPassthrough("RightButton")
+        assert(pin.passThrough and #pin.passThrough == 0, "no button falls through to the map")
+
+        -- In combat the game blocks addons from changing that, so the pin must not try.
+        client.combat = true
+        client.blocked = nil
+        WorldMapFrame:SetMapID(1411)
+        pin = WorldMapFrame.pins[1]
+        pin:CheckMouseButtonPassthrough("RightButton")
+        assert(pin.marker.label == "Razor Hill" and not client.blocked, "nothing blocked in combat")
+    """)
+
+
 def test_live_updates_off_when_sound_disabled(run_client):
     run_client(r"""
         client.sound = false

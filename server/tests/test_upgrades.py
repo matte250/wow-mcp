@@ -473,7 +473,7 @@ def test_the_reply_stays_small(game, tmp_path):
         local answer = Find({ perSlot = 5 })
         for _, slot in ipairs(answer.slots) do assert(#slot.items == 5, slot.slot .. " " .. #slot.items) end
         Write("OUT", answer)
-    """.replace("OUT", str(out)))
+    """.replace("OUT", out.as_posix()))
     reply = json.loads(out.read_text())
     body = json.dumps(reply, separators=(",", ":")).encode()
     size = len(zlib.compress(body, 9))
@@ -518,7 +518,7 @@ def test_default_weights():
 def saved_reply(game, tmp_path):
     """The game's answer to the default query, as JSON."""
     out = tmp_path / "answer.json"
-    game(f'Write("{out}", Find({{}}))')
+    game(f'Write("{out.as_posix()}", Find({{}}))')
     return json.loads(out.read_text())
 
 

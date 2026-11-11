@@ -4,7 +4,9 @@ Two sources, both outside the game: the install's .build.info (installed version
 game flavour) and the running processes (which flavour is being played right now).
 """
 
+import ctypes
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,23 +107,67 @@ def installed_game(root: Path, folder: str) -> Game:
     return game
 
 
-def running_folders(proc: Path = Path("/proc")) -> set[str]:
-    """Install folders (e.g. "_forever_") of the WoW clients running right now (Linux only)."""
-    folders = set()
+def _linux_commands(proc: Path) -> list[str]:
+    """The command line of every running process."""
+    commands = []
     try:
         entries = list(proc.iterdir())
     except OSError:
-        return folders
+        return commands
     for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
-            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            commands.append((entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace"))
         except OSError:
             continue
-        if m := RUNNING_EXE.search(cmdline):
-            folders.add(m.group(1).lower())
-    return folders
+    return commands
+
+
+def _windows_commands() -> list[str]:
+    """The program file of every running process."""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+    size = 4096
+    while True:
+        pids = (wintypes.DWORD * size)()
+        used = wintypes.DWORD()
+        if not psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(used)):
+            return []
+        count = used.value // ctypes.sizeof(wintypes.DWORD)
+        if count < size:
+            break
+        size *= 2
+    commands = []
+    name = ctypes.create_unicode_buffer(32768)
+    for pid in pids[:count]:
+        process = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            continue
+        length = wintypes.DWORD(len(name))
+        if kernel32.QueryFullProcessImageNameW(process, 0, name, ctypes.byref(length)):
+            commands.append(name.value)
+        kernel32.CloseHandle(process)
+    return commands
+
+
+def running_folders(proc: Path | None = None) -> set[str]:
+    """Install folders (e.g. "_forever_") of the WoW clients running right now: from /proc on
+    Linux (where the game's Windows path is in its command line), from the process list on
+    Windows. `proc` is a /proc folder to read instead."""
+    if proc is None and sys.platform == "win32":
+        commands = _windows_commands()
+    else:
+        commands = _linux_commands(proc or Path("/proc"))
+    return {m.group(1).lower() for command in commands if (m := RUNNING_EXE.search(command))}
 
 
 @dataclass
@@ -137,7 +183,7 @@ class Situation:
         return None
 
 
-def situation(addons_dir: Path, proc: Path = Path("/proc")) -> Situation:
+def situation(addons_dir: Path, proc: Path | None = None) -> Situation:
     # <root>/<_flavour_>/Interface/AddOns
     flavour_dir = addons_dir.resolve().parents[1]
     root = flavour_dir.parent

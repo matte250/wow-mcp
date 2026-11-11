@@ -13,12 +13,14 @@ import contextlib
 import json
 import os
 import struct
+import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from wow_mcp import kinds
+from wow_mcp import kinds, locking
 
 ADDON = "WowMCP"
 INTERFACE = "16001"
@@ -30,10 +32,9 @@ BELLS = {"sig": 1000, "req": 500}
 # so keep the ones the addon will poll next empty in case a previous run left them raised.
 BELL_CLEAR_AHEAD = 50
 
-try:
-    import fcntl
-except ImportError:  # not on Linux/macOS; the in-process lock still applies
-    fcntl = None
+# Windows refuses to replace a file while another program has it open (the game reading it, a
+# virus scanner looking at a new file). That passes within moments, so keep trying this long.
+REPLACE_PATIENCE = 2.0
 
 
 # Long enough to still be playing when the addon checks on its next poll (0.5 s later).
@@ -104,13 +105,28 @@ def bell_path(addon_dir: Path, bell: str, n: int) -> Path:
     return addon_dir / bell / f"{n % BELLS[bell]:04d}.wav"
 
 
+def _replace(tmp: str, path: Path) -> None:
+    if sys.platform != "win32":
+        os.replace(tmp, path)
+        return
+    deadline = time.monotonic() + REPLACE_PATIENCE
+    while True:
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.01)
+
+
 def write_atomic(path: Path, data: bytes) -> None:
     # Write-then-rename so the game never reads a half-written file.
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wowmcp-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -127,8 +143,7 @@ class Transport:
     def _locked(self) -> Iterator[None]:
         # Several MCP server processes (one per agent session) can share one game.
         with self._lock, open(self.addon_dir / ".lock", "a") as lock_file:
-            if fcntl:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            locking.acquire(lock_file)
             yield
 
     def load_state(self) -> dict:

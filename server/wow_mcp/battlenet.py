@@ -65,10 +65,10 @@ def config_path() -> Path:
 
 
 def shown(path: Path) -> str:
-    """A path as the player would write it (~ for their home folder)."""
-    home = str(Path.home())
-    text = str(path)
-    return "~" + text[len(home):] if text == home or text.startswith(home + os.sep) else text
+    """A path as the player would write it (~ for their home folder; / also on Windows, which takes both)."""
+    home = Path.home().as_posix()
+    text = path.as_posix()
+    return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
 
 
 @dataclass(frozen=True)

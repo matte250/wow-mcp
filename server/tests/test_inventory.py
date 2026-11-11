@@ -215,7 +215,7 @@ def test_full_bags_and_bank_stay_compact(run_client, tmp_path):
         local f = assert(io.open("OUT", "w"))
         f:write(C_EncodingUtil.SerializeJSON(reply))
         f:close()
-    """.replace("OUT", str(out)))
+    """.replace("OUT", out.as_posix()))
     body = out.read_bytes()
     assert len(json.loads(body)["bags"]) == 5
     assert len(zlib.compress(body, 9)) < 5000, len(zlib.compress(body, 9))

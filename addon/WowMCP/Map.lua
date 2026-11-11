@@ -143,9 +143,25 @@ local Pin = {}
 
 function Pin:OnLoad()
 	self:UseFrameLevelType("PIN_FRAME_LEVEL_WAYPOINT_LOCATION")
+	-- For clients whose map canvas doesn't ask (see CheckMouseButtonPassthrough below).
+	self:CheckMouseButtonPassthrough()
 	self:SetScalingLimits(1, 1.0, 1.2)
 	local font = GameFontNormalSmallOutline or GameFontNormalSmall
 	if font then self.Label:SetFontObject(font) end
+end
+
+-- Right-clicks are for removing the marker, not for zooming the map out. The map canvas
+-- asks this each time it hands out a pin (MapCanvasMixin:AcquirePin, after OnAcquired) and
+-- by default lets right-clicks fall through to the map.
+function Pin:ShouldMouseButtonBePassthrough()
+	return false
+end
+
+-- Replaces MapCanvasPinMixin's version, which calls SetPassThroughButtons on every acquire:
+-- that call is blocked for addons in combat, and markers can arrive in combat. Our pins never
+-- pass a button through, so clearing is all there is to do, and only outside combat.
+function Pin:CheckMouseButtonPassthrough()
+	if self.SetPassThroughButtons and not InCombatLockdown() then pcall(self.SetPassThroughButtons, self) end
 end
 
 function Pin:OnAcquired(m, x, y, onOwnMap)
@@ -165,6 +181,7 @@ function Pin:OnMouseEnter()
 	local yards = Distance(m)
 	if yards then GameTooltip:AddLine(string.format("%d yards away", math.floor(yards + 0.5)), 0.7, 0.7, 0.7) end
 	GameTooltip:AddLine("Click to navigate here", 0.4, 0.8, 1)
+	GameTooltip:AddLine("Right-click or shift-click to remove it", 0.4, 0.8, 1)
 	GameTooltip:Show()
 end
 
@@ -173,7 +190,11 @@ function Pin:OnMouseLeave()
 end
 
 function Pin:OnMouseClickAction(button)
-	if button == "LeftButton" then Map.Navigate(self.marker.index) end
+	if button == "RightButton" or (button == "LeftButton" and IsShiftKeyDown and IsShiftKeyDown()) then
+		Map.Remove(self.marker.index)
+	elseif button == "LeftButton" then
+		Map.Navigate(self.marker.index)
+	end
 end
 
 local function CreateProvider()
@@ -237,17 +258,20 @@ local function SetWaypoint(m)
 	return false
 end
 
--- Remove the game waypoint, but only if it's still the one we set.
+-- Remove the game waypoint, but only if it's still the one we set. Returns whether it did:
+-- a route's waypoint, or one the player placed since, stays.
 local function ClearOurWaypoint()
 	local ours = WowMCPDB.waypoint
 	WowMCPDB.waypoint = nil
-	if not (ours and C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then return end
+	if not (ours and C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then return false end
 	local point = C_Map.GetUserWaypoint()
-	if not point or point.uiMapID ~= ours.mapID then return end
+	if not point or point.uiMapID ~= ours.mapID then return false end
 	local x, y = point.position.x, point.position.y
 	if math.abs(x - ours.x) < 0.001 and math.abs(y - ours.y) < 0.001 then
 		C_Map.ClearUserWaypoint()
+		return true
 	end
+	return false
 end
 
 local function OpenOn(mapID)
@@ -260,6 +284,18 @@ local function OpenOn(mapID)
 	elseif OpenWorldMap then
 		OpenWorldMap(mapID)
 	end
+end
+
+-- Markers keep their number when another is removed, so look one up by it.
+local function ByIndex(index)
+	for _, m in ipairs(markers) do
+		if m.index == index then return m end
+	end
+end
+
+-- The game's waypoint is on this marker (for removing it with the marker).
+local function WaypointOn(m)
+	if WowMCPDB.waypoint and current then WowMCPDB.waypoint.markers, WowMCPDB.waypoint.marker = current.id, m.order end
 end
 
 local function MarkerLink(m)
@@ -321,6 +357,15 @@ function Map.Receive(payload)
 		m.icon = ((i - 1) % 8) + 1
 	end
 	if WowMCPDB.hiddenMapId == payload.id then wipe(markers) end
+	-- The ones the player removed stay removed (WowMCPDB.removedMarkers: { id, [order] = true }).
+	local gone = WowMCPDB.removedMarkers
+	if gone and gone.id == payload.id then
+		for i = #markers, 1, -1 do
+			if gone[markers[i].order] then table.remove(markers, i) end
+		end
+	else
+		WowMCPDB.removedMarkers = nil
+	end
 	RefreshPins()
 
 	if not isNew then return end
@@ -340,19 +385,24 @@ function Map.Receive(payload)
 	end
 	local first = markers[1]
 	if not first then return end
-	if payload.setWaypoint ~= false and not SetWaypoint(first) then
-		ns.Print("Couldn't set a waypoint on " .. ns.Escape(first.zone) .. ".")
+	if payload.setWaypoint ~= false then
+		if SetWaypoint(first) then
+			WaypointOn(first)
+		else
+			ns.Print("Couldn't set a waypoint on " .. ns.Escape(first.zone) .. ".")
+		end
 	end
 	if payload.openMap ~= false then OpenOn(first.mapID) end
 end
 
 function Map.Navigate(index)
-	local m = markers[index]
+	local m = ByIndex(index)
 	if not m then
 		ns.Print("No marker " .. tostring(index) .. ". Type /mcp to list them.")
 		return
 	end
 	if SetWaypoint(m) then
+		WaypointOn(m)
 		ns.Print("Navigating to " .. MarkerLine(m))
 	else
 		ns.Print("Can't set a waypoint there, opening the map instead.")
@@ -379,6 +429,36 @@ function Map.Clear()
 	ClearOurWaypoint()
 	RefreshPins()
 	ns.Print("Markers hidden until your AI sends new ones.")
+end
+
+-- Removes one marker (its pin, and the waypoint if it's on it) until the AI sends new ones.
+function Map.Remove(index)
+	index = tonumber(strtrim(tostring(index or "")))
+	local m = index and ByIndex(index)
+	if not m then
+		ns.Print(index and ("No marker " .. index .. ". Type /mcp to list them.") or "/mcp remove <n> removes marker n; /mcp lists them.")
+		return
+	end
+	for i, other in ipairs(markers) do
+		if other == m then
+			table.remove(markers, i)
+			break
+		end
+	end
+	local id = current and current.id
+	local gone = WowMCPDB.removedMarkers
+	if not gone or gone.id ~= id then
+		gone = { id = id }
+		WowMCPDB.removedMarkers = gone
+	end
+	gone[m.order] = true
+	local ours = WowMCPDB.waypoint
+	local navigating = ours and ours.markers == id and ours.marker == m.order
+	-- The record can outlive the waypoint (a route step or the player replaced it), so say
+	-- "and its waypoint" only when the game's waypoint really went.
+	local cleared = navigating and ClearOurWaypoint()
+	RefreshPins()
+	ns.Print(string.format("Removed marker %s %s%s.", Icon(m), ns.Escape(m.label), cleared and " and its waypoint" or ""))
 end
 
 function Map.OnCombatEnded()
@@ -424,6 +504,7 @@ ns.RegisterCommand("list", nil, Map.List)
 ns.RegisterCommand("show", "/mcp show - open the map on the markers", Map.Open)
 ns.RegisterCommand("#", "/mcp <n> - navigate to marker n", Map.Navigate)
 ns.RegisterCommand("clear", "/mcp clear - hide the markers", Map.Clear)
+ns.RegisterCommand("remove", "/mcp remove <n> - remove marker n (or right-click it on the map)", Map.Remove)
 
 local combat = CreateFrame("Frame")
 combat:RegisterEvent("PLAYER_REGEN_ENABLED")

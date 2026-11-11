@@ -208,9 +208,22 @@ restricted content. Wrap anything doubtful in `pcall`.
 - Each cached recipe has `item` (what it makes). `recipes` also carries `learned`: per character,
   `{ id?, name, at, profession?, item?, reagents? }` for recipes learned (event or chat line) since a
   profession window last listed them. `ns.Knowledge.Learned()` gives plans this session's learns too.
+- (W17) Several plans, under tabs: payload `plan` is `{ id, list = { { id, tab, kind, profession, title,
+  steps }, ... } }` (one plan `{ id, title, steps }` from before tabs is still read). `show_plan(tab=...)`
+  replaces the plan in that tab or adds one (default tab `Plan`, up to 10); `kind` (questing, class,
+  profession, general) picks the tab's icon and is worked out from the steps when left out. In game one plan
+  is open: `WowMCPDB.plan` is its progress as before, `WowMCPDB.plans` everyone's by id.
+- (W17) Section `plan` on kind STATE: the open plan's progress, or `{ none, archived, cleared }`, plus `tabs`
+  (`{ id, tab, name, kind, title, steps, done, complete, archived, shown }`: `tab` is the name the server sent,
+  which its tools match on; `name` the player's own, if they renamed it), `removed` (ids of the plans the player
+  removed: `get_plan_progress`, and `show_plan` at the limit, drop them from the server's state without sending
+  anything) and `seen` (`WowMCPDB.planSeen`, the id of the last plan payload received: another than the
+  server's means its newest hasn't arrived).
 - (W17) `show_plan` is async: it looks up named `have` items with `items.look_up` (shared with
   `get_item_details`) and refuses a plan whose IDs are other items. In game, a `have` whose ID is
   another item counts the named item.
+- (W17) A step can name its NPCs: `npcs = { { id, name, display } }` (key left out when there are none). Hovering
+  the step, and only then, shows their models beside the tooltip (shared `PlayerModel` frames, `SetCreature`).
 
 ### W7 Messages
 - Payload key `messages`: a list (newest last, at most 10) of
