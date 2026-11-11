@@ -29,6 +29,7 @@ only by the integrator, who merges the workstreams one by one.
 | W22 | Online auction prices (Blizzard's API) | – | `battlenet.py`, `online_auctions.py`, `tools/auction.py`, `tools/upgrades.py`, `bridge.py` | config `~/.config/wow-mcp/battlenet.env`, cache `~/.cache/wow-mcp/auctions.sqlite3` |
 | W23 | Long-term memory: conversation archive, search, notes | – | `memory.py`, `tools/memory.py`, `bridge.py` | data `~/.local/share/wow-mcp/` (`conversations.jsonl`, `notes.json`) |
 | W24 | The player's own auctions | `Auction.lua` (after the lookups, own do-block) | `tools/my_auctions.py` | KNOWLEDGE section `myAuctions` |
+| W25 | Visuals: tables, lists, texts in a window | `Messages.lua` (own do-block) | `tools/visuals.py` | payload key `visuals` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -130,6 +131,11 @@ startup, so after the one restart for this restructure, every feature only needs
   section `myAuctions` = `{ seen, open, reading, realm, faction, auctions, more, notices, prices, places,
   mail = { at, sales }, problem }`. Guidance order 14, after the auction guidance. Auction.lua is at 184 of
   Lua's 200 top-level locals: new code goes in a do-block.
+- **Visuals**: payload `visuals = { id, list = { { id, title, subtitle, at, blocks } } }`, last 5, at most 64 KB
+  together. A block is `{ type, heading, … }`; a table row is one string with cells separated by `\n`. Block
+  types are `BLOCK_TYPES` in tools/visuals.py plus `BLOCKS[type] = { parse, prepare, width, least?, draw }` in
+  Messages.lua: a new type (bars, lines next) is one of each. Guidance order 67. Messages.lua's main chunk is at
+  135 of Lua's 200 locals.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,

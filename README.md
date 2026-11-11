@@ -155,6 +155,7 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
 | Memory | `search_conversations` (every earlier /ai conversation, kept for good: all words in any case, items by name or ID, by days or date; newest first, with how long ago), `remember` / `forget_note` / `list_notes` (lasting notes about each character, in every /ai prompt) |
+| Visuals | `visualize` (a window of its own with a title and blocks: tables that sort by a click on a header and scroll, lists of things with values, short texts; items with their icon and tooltip, money with coin icons, gains green and losses red; the last 5 to flip back through), `clear_visuals` |
 | Diagnostics | `get_status` (is the addon up to date, live updates, slots left; says when to /reload or reinstall) |
 
 At the auction house the addon takes a full scan whenever the game allows one (every 15 minutes),
@@ -223,6 +224,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
 | `/ai model [default, fable, opus, sonnet, haiku]` | Which Claude model answers your `/ai` questions (kept per character); the AI tab has a picker for it too |
 | `/ai thinking [default, low, medium, high, xhigh, max]` (or `/ai effort`) | How hard the AI thinks before answering (kept per character); the AI tab's picker has it too |
+| `/mcp visuals [show, hide, clear, <n>]` (or `/mcp table`) | The window of tables and lists from your AI. Click a header to sort (right-click: as it came); the wheel scrolls; drag the corner to resize |
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |
