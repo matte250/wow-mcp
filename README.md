@@ -76,13 +76,19 @@ and replies with R, work as usual. `/mcp aitab both` also shows the conversation
 window, `/mcp aitab off` only there. If you close or rename the tab, the AI talks in the main window,
 and `/mcp aitab` brings the tab back.
 
+**Which model answers:** the AI tab has a picker at its top right: Default (what the bridge was started
+with), Fable (the most capable, slowest), Opus, Sonnet (fast and strong) or Haiku (fastest, for simple
+lookups). `/ai model` says which one answers; `/ai model sonnet` (or fable, opus, haiku, default) picks
+one. The pick is kept per character and goes with each question. Answers are signed with the model,
+e.g. [Claude Sonnet], and the conversation carries over when you switch.
+
 ```sh
 cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_forever_/Interface/AddOns"
 ```
 
 To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
-`journalctl --user -u wow-mcp-bridge -f`. `--model`, `--timeout` and `--agent` change how it answers.
+`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--timeout` and `--agent` change how it answers (with `--agent`, picks are ignored).
 
 It remembers your recent questions (by default the last 8 from the past hour), so follow-ups
 like "and the next one?" work. `/ai new` starts a fresh conversation. `--history` and
@@ -167,6 +173,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | Command | Does |
 |---|---|
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
+| `/ai model [default, fable, opus, sonnet, haiku]` | Which Claude model answers your `/ai` questions (kept per character); the AI tab has a picker for it too |
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |

@@ -623,15 +623,15 @@ def test_model_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeypatc
         type_in(typed, "/ai model default", "/ai and now?")
         wait_for(seen("Answer 2."), seconds=15)
         type_in(typed, "/ai model")
-        wait_for(seen("Answers come from Default (Opus 5.5)."), seconds=5)
+        wait_for(seen("Answers come from Default (Opus)."), seconds=5)
 
     assert [model for _, model in asked] == ["sonnet", None]
     assert asked[1][0] == earlier(("where am I?", 0, "Answer 1.")) + "Thorgrim asks, in game: and now?"
     lines = log.read_text().splitlines()
-    assert "chat: |cff33ff99WowMCP|r Answers now come from Sonnet 5." in lines
+    assert "chat: |cff33ff99WowMCP|r Answers now come from Sonnet." in lines
     assert "chat: |cff33ff99[Claude Sonnet]|r Answer 1." in lines and "chat: |cff33ff99[Claude Opus]|r Answer 2." in lines
     # The first answer told the game what the bridge's own model is.
-    assert "chat: |cff33ff99WowMCP|r Answers now come from the model the bridge was started with (Opus 5.5)." in lines
+    assert "chat: |cff33ff99WowMCP|r Answers now come from the model the bridge was started with (Opus)." in lines
 
 
 def test_chat_lines():

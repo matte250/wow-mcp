@@ -466,17 +466,17 @@ def test_picking_a_model(game):
         local menu = table.concat(Menu(picker), "\n")
         assert(menu == table.concat({
             "*Default  |cffaaaaaawhat the bridge was started with|r",
-            "Fable 5.1  |cffaaaaaathe most capable, slowest|r",
-            "Opus 5.5  |cffaaaaaavery capable|r",
-            "Sonnet 5  |cffaaaaaafast and strong|r",
-            "Haiku 4.5  |cffaaaaaafastest, for simple lookups|r",
+            "Fable  |cffaaaaaathe most capable, slowest|r",
+            "Opus  |cffaaaaaavery capable|r",
+            "Sonnet  |cffaaaaaafast and strong|r",
+            "Haiku  |cffaaaaaafastest, for simple lookups|r",
         }, "\n"), menu)
 
         -- Picking one: kept for this character, said in the conversation, sent with the next questions.
-        client.PickMenu(picker, "Sonnet 5")
-        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "sonnet" and picker.Text.text == "Sonnet 5")
+        client.PickMenu(picker, "Sonnet")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "sonnet" and picker.Text.text == "Sonnet")
         local lines = client.Lines(tab)
-        assert(lines[#lines] == "|cffaaaaaaAnswers now come from Sonnet 5.|r", lines[#lines])
+        assert(lines[#lines] == "|cffaaaaaaAnswers now come from Sonnet.|r", lines[#lines])
         assert(#posted == 1 and not Has(client.chat, "Answers now"))
         client.Type("/ai where?")
         assert(posted[2].question == "where?" and posted[2].model == "sonnet")
@@ -486,7 +486,7 @@ def test_picking_a_model(game):
         lines = client.Lines(tab)
         assert(lines[#lines - 1] == "|cff33ff99[Claude Sonnet]|r Over there.", lines[#lines - 1])
         assert(WowMCPDB.aiTab.bridgeModel == "opus")
-        assert(Menu(picker)[1] == "Default (Opus 5.5)  |cffaaaaaawhat the bridge was started with|r")
+        assert(Menu(picker)[1] == "Default (Opus)  |cffaaaaaawhat the bridge was started with|r")
         assert(Menu(picker)[4]:sub(1, 1) == "*")
 
         -- Kept over a /reload; the picker shows it again (General is selected after one).
@@ -497,15 +497,15 @@ def test_picking_a_model(game):
         assert(not picker:IsShown())
         client.ClickTab(tab)
         client.Tick()
-        assert(picker:IsShown() and picker.Text.text == "Sonnet 5")
+        assert(picker:IsShown() and picker.Text.text == "Sonnet")
         client.Type("/ai still sonnet?")
         assert(posted[1].model == "sonnet")
 
         -- Back to Default: no model sent, and the bridge's own is named.
         client.PickMenu(picker, "Default")
         lines = client.Lines(tab)
-        assert(lines[#lines] == "|cffaaaaaaAnswers now come from the model the bridge was started with (Opus 5.5).|r", lines[#lines])
-        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == nil and picker.Text.text == "Default (Opus 5.5)")
+        assert(lines[#lines] == "|cffaaaaaaAnswers now come from the model the bridge was started with (Opus).|r", lines[#lines])
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == nil and picker.Text.text == "Default (Opus)")
         client.Type("/ai and now?")
         assert(posted[2].question == "and now?" and posted[2].model == nil)
         -- A bridge started without --model doesn't know: plain Default again.
@@ -544,18 +544,18 @@ def test_model_command(game):
         client.Type("/ai model")
         assert(Said("Answers come from Default. /ai model <name> picks another: default, fable, opus, sonnet, haiku."))
         client.Type("/ai model HAIKU")
-        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku" and Said("Answers now come from Haiku 4.5."))
-        assert(WowMCPModelPicker.Text.text == "Haiku 4.5")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku" and Said("Answers now come from Haiku."))
+        assert(WowMCPModelPicker.Text.text == "Haiku")
         client.Type("/ask  Model   fable ")
-        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable" and WowMCPModelPicker.Text.text == "Fable 5.1")
+        assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable" and WowMCPModelPicker.Text.text == "Fable")
         client.Type("/ai model")
-        assert(Said("Answers come from Fable 5.1."))
+        assert(Said("Answers come from Fable."))
 
         -- Another single word: the options, and nothing changes.
         client.Type("/ai model gpt-5")
         assert(Said("/ai model <name> - which Claude model answers you (also picked on the AI tab): default (what the "
-            .. "bridge was started with); fable (Fable 5.1, the most capable, slowest); opus (Opus 5.5, very capable); "
-            .. "sonnet (Sonnet 5, fast and strong); haiku (Haiku 4.5, fastest, for simple lookups)"))
+            .. "bridge was started with); fable (Fable, the most capable, slowest); opus (Opus, very capable); "
+            .. "sonnet (Sonnet, fast and strong); haiku (Haiku, fastest, for simple lookups)"))
         assert(WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable")
 
         client.Type("/ai model default")
@@ -601,19 +601,19 @@ def test_model_picker_without_blizzard_dropdowns(game):
         end })
         button.OnEnter(button)
         assert(lines[1] == "AI model: Default" and Has(lines, "> Default: what the bridge was started with"))
-        assert(Has(lines, "   Haiku 4.5: fastest, for simple lookups") and Has(lines, "Click: the next one."))
+        assert(Has(lines, "   Haiku: fastest, for simple lookups") and Has(lines, "Click: the next one."))
 
         -- A click: the next one; a right-click: the one before, round the list.
         button.OnClick(button, "LeftButton")
-        assert(button.text == "Fable 5.1" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable")
-        assert(Has(client.Lines(tab), "Answers now come from Fable 5.1."))
+        assert(button.text == "Fable" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "fable")
+        assert(Has(client.Lines(tab), "Answers now come from Fable."))
         button.OnClick(button, "RightButton")
         button.OnClick(button, "RightButton")
-        assert(button.text == "Haiku 4.5" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku")
+        assert(button.text == "Haiku" and WowMCPDB.aiTab.models["Thorgrim-Firemaw"] == "haiku")
         client.Type("/ai quick one")
         assert(posted[1].model == "haiku")
         client.Type("/ai model sonnet")
-        assert(button.text == "Sonnet 5")
+        assert(button.text == "Sonnet")
 
         client.ClickTab(ChatFrame1)
         client.Tick()

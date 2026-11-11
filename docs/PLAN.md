@@ -59,6 +59,11 @@ startup, so after the one restart for this restructure, every feature only needs
   the bridge) go to the AI tab, made with `FCF_OpenNewWindow(name, true)` and found by name;
   `WowMCPDB.aiTab = { mode, made = { ["Name-Realm"] = true } }`. Typing in the tab goes through
   EventRegistry's chat box events plus `hooksecurefunc` only: no writes to Blizzard's chat box fields.
+  `/ai model [name]` and the AI tab's model picker (a Blizzard_Menu dropdown, or a cycling button) pick
+  the model per character (`WowMCPDB.aiTab.models`); question posts are `{ question, player, model? }`
+  with `model` one of Chat.lua's `MODELS` ids, which must match `bridge.MODELS`. The bridge passes
+  `--model` only for those, signs answers "Claude <Model>", and replies carry `defaultModel`. The agent
+  contract is `agent(prompt, model)`.
 - **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
   `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
   for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and

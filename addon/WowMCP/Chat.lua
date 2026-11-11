@@ -175,10 +175,10 @@ end
 -- bridge.py). Default sends none, so the bridge answers with what it was started with.
 local MODELS = {
 	{ id = "default", name = "Default", note = "what the bridge was started with" },
-	{ id = "fable", name = "Fable 5.1", note = "the most capable, slowest" },
-	{ id = "opus", name = "Opus 5.5", note = "very capable" },
-	{ id = "sonnet", name = "Sonnet 5", note = "fast and strong" },
-	{ id = "haiku", name = "Haiku 4.5", note = "fastest, for simple lookups" },
+	{ id = "fable", name = "Fable", note = "the most capable, slowest" },
+	{ id = "opus", name = "Opus", note = "very capable" },
+	{ id = "sonnet", name = "Sonnet", note = "fast and strong" },
+	{ id = "haiku", name = "Haiku", note = "fastest, for simple lookups" },
 }
 
 local function Choice(id)
