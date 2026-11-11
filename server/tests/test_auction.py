@@ -284,8 +284,9 @@ def test_searches_stay_under_the_games_limit(game):
         client.CloseAuctionHouse()
         client.Publish('{"watch": [4232], "replace": true}')
         client.Wait(4)
-        client.ah.dropNext = true
         client.OpenAuctionHouse()
+        client.Wait(2) -- the player's own auctions are asked for first
+        client.ah.dropNext = true
         client.Wait(30)
         assert(client.ah.dropped == 1 and prices()[4232].price == 45)
         local tries = 0
