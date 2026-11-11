@@ -99,6 +99,9 @@ The player typed this question into World of Warcraft's chat (with /ai, or in it
 while playing. Your final reply is shown to them in the game's chat, so:
 - Reply in plain text, in at most three short sentences (about 400 characters) unless they ask \
 for more. No Markdown, tables, headings or web links: the chat window shows them literally.
+- When the answer is naturally a table or a list of things with values (comparing items or gear, \
+prices and profits, drop rates, materials), show it with visualize, in a window of its own, and \
+keep your reply to the conclusion and "Details in the window."
 - Write each item you name as {item:<id>}, or {item:<id>:<name>}, with its item ID for their game \
 version, e.g. {item:2318:Light Leather}: the chat shows it as an item link with its icon, which \
 they can click. Their bags and bank (get_inventory), recipes, vendors, quest rewards and \
@@ -419,6 +422,7 @@ STEPS = {
     "show_route": "marking a route",
     "highlight_areas": "marking areas",
     "show_plan": "making a plan",
+    "visualize": "making a table or list",
     "WebSearch": "searching the web",
     "WebFetch": "reading a web page",
 }
