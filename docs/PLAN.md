@@ -28,6 +28,7 @@ only by the integrator, who merges the workstreams one by one.
 | W21 | Gear upgrades | `Auction.lua` (finder, per-suffix scan prices), `Player.lua` (spec), `Inventory.lua` (exports) | `tools/upgrades.py`, `tools/items.py` (`ask`) | payload key `upgradeQuery`, ITEM_DETAILS section `upgrades` |
 | W22 | Online auction prices (Blizzard's API) | – | `battlenet.py`, `online_auctions.py`, `tools/auction.py`, `tools/upgrades.py`, `bridge.py` | config `~/.config/wow-mcp/battlenet.env`, cache `~/.cache/wow-mcp/auctions.sqlite3` |
 | W23 | Long-term memory: conversation archive, search, notes | – | `memory.py`, `tools/memory.py`, `bridge.py` | data `~/.local/share/wow-mcp/` (`conversations.jsonl`, `notes.json`) |
+| W24 | The player's own auctions | `Auction.lua` (after the lookups, own do-block) | `tools/my_auctions.py` | KNOWLEDGE section `myAuctions` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -119,6 +120,12 @@ startup, so after the one restart for this restructure, every feature only needs
   `get_auction_prices`. Vendor items carry `bind` when loaded at the merchant read. Auction prices carry
   `scanned = true` when some full scan saw the item; never-listed items asked about are looked up with
   `items.look_up`. The trading rule is `TRADING_GUIDANCE` (order 14).
+- **Own auctions**: `WowMCPDB.myAuctions["Name-Realm"] = { seen, auctions, notices }`; each auction
+  `{ id, item, name, count, price (per item), bid, status (active, sold-pending, sold, expired, cancelled,
+  gone), expires, soonest, left ("seconds" | "band"), how (list, notice, chat, mail, cancel), ... }`. KNOWLEDGE
+  section `myAuctions` = `{ seen, open, reading, realm, faction, auctions, more, notices, prices, places,
+  mail = { at, sales }, problem }`. Guidance order 14, after the auction guidance. Auction.lua is at 184 of
+  Lua's 200 top-level locals: new code goes in a do-block.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
