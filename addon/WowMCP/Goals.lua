@@ -908,12 +908,20 @@ function Goals.Receive(payload)
 		if #goals == 0 then
 			ns.Print("Goals cleared.")
 		else
+			local opened
 			for _, goal in ipairs(fresh) do
 				if db.state[goal.id].done then
 					ns.Print(TICK .. " Goal already done: " .. ChatText(goal.title))
 				else
 					ns.Print("New goal: |cffffffff" .. ChatText(goal.title) .. "|r " .. GREY .. "(" .. ns.Escape(goal.text) .. ")|r")
+					opened = true
 				end
+			end
+			-- New goals to work on are shown, even if the list was hidden or collapsed.
+			if opened then
+				local saved = WindowSaved()
+				saved.hidden, saved.collapsed = nil, nil
+				Layout()
 			end
 			local zones = {}
 			for zone in pairs(missing) do zones[#zones + 1] = zone end

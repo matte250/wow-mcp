@@ -468,6 +468,36 @@ def test_goal_commands_and_mute(game):
     """)
 
 
+def test_new_goals_open_the_list(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        local mcp = SlashCmdList.WOWMCP
+        client.Publish([[""" + lua_json({"goals": [HIDES]}) + r"""]])
+        client.Wait(4)
+        assert(WowMCPGoalsFrame:IsShown() and #rows() == 1)
+        -- Hidden, and collapsed: the AI's next new goal shows the list again, open.
+        WowMCPGoalsFrame.Collapse.OnClick(WowMCPGoalsFrame.Collapse)
+        mcp("goals hide")
+        assert(not WowMCPGoalsFrame:IsShown())
+        client.Publish([[""" + lua_json({"goals": [SALT]}) + r"""]])
+        client.Wait(4)
+        assert(WowMCPGoalsFrame:IsShown() and #rows() == 2, "new goals open the list")
+        assert(not WowMCPDB.goalsWindow.hidden and not WowMCPDB.goalsWindow.collapsed)
+        -- The same goals sent again, nothing new: the player's choice stands.
+        mcp("goals hide")
+        client.Publish([[""" + lua_json({"goals": [SALT]}) + r"""]])
+        client.Wait(4)
+        assert(not WowMCPGoalsFrame:IsShown(), "nothing new: stays hidden")
+        -- Nor does a new goal that's already done.
+        client.AddItem(4289, 3)
+        client.Publish([[""" + lua_json({"goals": [{**SALT, "id": "salt-again"}]}) + r"""]])
+        client.Wait(4)
+        assert(has("Goal already done: 3 Salt") and not WowMCPGoalsFrame:IsShown(), chat())
+        noErrors()
+    """)
+
+
 def test_reload_keeps_goals_as_they_were(game):
     game(r"""
         client.LoadAddon()
