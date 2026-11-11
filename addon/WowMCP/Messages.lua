@@ -136,10 +136,10 @@ end
 
 -- m.reply marks the bridge's answers to the player's questions: they belong to the AI conversation,
 -- which has its own chat tab (Chat.lua). They also say which model the bridge uses by default, and
--- how hard it thinks.
+-- how hard it thinks, and which question they answer (the post it came in).
 local function Show(m, text, style)
 	if m.reply == true and ns.AIChat then
-		ns.AIChat.Answer(text, style, m.from, m.defaultModel, m.defaultEffort)
+		ns.AIChat.Answer(text, style, m.from, m.defaultModel, m.defaultEffort, m.session, m.post)
 	else
 		ns.ShowMessage(text, style, m.from)
 	end
@@ -147,12 +147,15 @@ end
 
 -- The payload lists the newest messages; show the ones with ids we haven't shown.
 -- WowMCPDB.messageId (the newest shown) survives /reload, so nothing repeats.
+-- m.status marks the bridge's notes about a question it's answering: they go to the AI tab's status
+-- line (Chat.lua), never into chat or /mcp messages, and only while fresh.
 function Messages.Receive(list)
 	recent = {}
-	local newest = 0
+	local valid, newest = {}, 0
 	for _, m in ipairs(list) do
 		if Valid(m) then
-			table.insert(recent, m)
+			table.insert(valid, m)
+			if m.status == nil then table.insert(recent, m) end
 			newest = math.max(newest, m.id)
 		end
 	end
@@ -160,8 +163,10 @@ function Messages.Receive(list)
 	if newest < seen then seen = 0 end -- the server's state was reset, so its ids started over
 	WowMCPDB.messageId = newest
 	local now = time()
-	for _, m in ipairs(recent) do
-		if m.id > seen then
+	for _, m in ipairs(valid) do
+		if m.id > seen and m.status ~= nil then
+			if not (type(m.at) == "number" and now - m.at > STALE) and ns.AIChat then ns.AIChat.Status(m) end
+		elseif m.id > seen then
 			local text = ns.Escape(m.text)
 			if type(m.at) == "number" and now - m.at > STALE then
 				-- Sent while the game was closed: no flashing it on screen now.

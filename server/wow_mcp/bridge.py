@@ -5,6 +5,13 @@ This watches for them, asks an agent that has the wow tools, and shows the answe
 player's chat as a message (tools/messages.py), marked as a reply so the game shows it in its AI
 chat tab. Questions are answered one at a time.
 
+An answer may take as long as it needs while the agent visibly works. The game hears that each
+question arrived (an ack, right away) and, now and then, what the agent is doing (Progress), for
+the AI tab's status line; it can tell from them that the bridge is up. Claude Code streams its
+events (stream-json), and every one of them is a sign of life: it's stopped only after --timeout
+seconds without any, or when it reaches --max-time, a guard against runaways. Other agents
+(--agent) print only their answer, so --max-time is all they have.
+
 Each agent starts from zero, so the player's recent exchanges go into the prompt, which makes
 follow-up questions work. They're kept in a file (History), so a restart keeps the conversation;
 /ai new starts a fresh one. Every exchange also goes into the archive for good, which the agent
@@ -43,8 +50,9 @@ import tempfile
 import textwrap
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from wow_mcp import item_text, locking, memory, stream
@@ -56,7 +64,14 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"  # memory.read_log reads it
 
 AGENT_ENV = "WOW_MCP_BRIDGE_AGENT"
 SENDER = "Claude"
-TIMEOUT = 180.0  # seconds an agent may take per question
+# Seconds Claude Code may go without any sign of life before it's stopped (--timeout). Measured live (2.1.322, Fable at
+# max and xhigh): thinking streams an event about every 1.3 s (at most 3.3 s apart), so the silences are tool calls,
+# about 5 s for a web search or fetch. The slowest tools wait on the network for up to a minute (an auction snapshot).
+SILENCE = 120.0
+MAX_TIME = 30 * 60.0  # seconds any answer may take, however busy (--max-time): only a guard against runaways
+PROGRESS_EVERY = 40.0  # seconds at least between progress updates to the game: each costs a live-update slot
+SETTLE = 5.0  # seconds a step must last before the game is told about it, so short ones don't spend slots
+TICK = 1.0  # seconds between looks at a running agent
 MAX_WAITING = 5  # questions queued behind the one being answered
 MAX_QUESTION = 500
 LINE_WIDTH = 250  # characters per chat message
@@ -107,12 +122,16 @@ class AgentError(Exception):
 
 
 class AgentTimeout(AgentError):
-    pass
+    """It was stopped at the time limit (--max-time); the message says so: "after the 30-minute limit"."""
 
 
-# (prompt, model, player, effort) -> answer; model, effort None: its own; player: who asks, for its tools;
-# raises AgentError
-Agent = Callable[[str, str | None, str | None, str | None], str]
+class AgentSilent(AgentTimeout):
+    """It was stopped for showing no sign of life (--timeout): "no response from the model for 2 minutes"."""
+
+
+# (prompt, model, player, effort, progress) -> answer; model, effort None: its own; player: who asks, for its tools;
+# progress: what it does meanwhile, for the game (Progress); raises AgentError
+Agent = Callable[[str, str | None, str | None, str | None, "Progress"], str]
 
 
 def _player(post: dict) -> str | None:
@@ -155,6 +174,7 @@ class Question:
     player: str | None = None
     model: str | None = None  # one of MODELS, picked in game; None: the bridge's own
     effort: str | None = None  # one of EFFORTS, likewise
+    post: tuple[int, int] | None = None  # the post it came in, (session, id): the game knows its replies by it
 
     @classmethod
     def from_post(cls, value: object) -> "Question | None":
@@ -335,13 +355,141 @@ def chat_lines(text: str, width: int = LINE_WIDTH, limit: int = MAX_LINES) -> li
 
 
 def publish_message(text: str, style: str = "chat", sender: str = SENDER, reply: bool = False,
-                    default_model: str | None = None, default_effort: str | None = None) -> int:
+                    default_model: str | None = None, default_effort: str | None = None,
+                    question: tuple[int, int] | None = None) -> int:
     """Show text in game, through the messages feature (tools/messages.py)."""
     # Imported on first use: importing the tools package loads every feature.
     from wow_mcp.tools.messages import publish_message as publish
 
     return publish(text, style=style, sender=sender, reply=reply, default_model=default_model,
-                   default_effort=default_effort)
+                   default_effort=default_effort, question=question)
+
+
+def publish_status(status: str, text: str = "", question: tuple[int, int] | None = None,
+                   quiet: float | None = None) -> int:
+    """Tell the game how a question is coming along, for the AI tab's status line (tools/messages.py)."""
+    from wow_mcp.tools.messages import publish_status as publish
+
+    return publish(status, text, question=question, quiet=quiet)
+
+
+def _span(seconds: float, before_noun: bool = False) -> str:
+    """A time as said: "2 minutes", "90 seconds"; before a noun, "30-minute"."""
+    count, unit = (seconds / 60, "minute") if seconds >= 60 and seconds % 60 == 0 else (seconds, "second")
+    return f"{count:g}-{unit}" if before_noun else f"{count:g} {unit}{'' if count == 1 else 's'}"
+
+
+def _clock(seconds: float) -> str:
+    """A time taken, as a clock shows it: "4:07"."""
+    return f"{int(seconds // 60)}:{int(seconds % 60):02d}"
+
+
+# Progress ---------------------------------------------------------------------------------
+
+THINKING, WRITING = "working it out", "writing"  # under "Thinking…" in game, so not "thinking" again
+WOW_TOOLS = "mcp__wow__"  # how Claude Code names the wow tools
+# What the game's status line says the agent is doing while it calls each tool. The rest of the wow tools read the
+# game (get_..., list_...) or change what it shows.
+STEPS = {
+    "get_auction_prices": "checking auction prices",
+    "watch_auction_prices": "checking auction prices",
+    "find_upgrades": "looking for upgrades",
+    "get_item_details": "looking up items",
+    "get_inventory": "looking in your bags",
+    "get_player_location": "checking where you are",
+    "get_character_stats": "looking at your character",
+    "get_quest_log": "reading your quest log",
+    "get_quest_status": "checking your quests",
+    "get_professions": "checking your professions",
+    "get_known_recipes": "checking your recipes",
+    "get_vendor_items": "checking vendors",
+    "get_flight_paths": "checking flight paths",
+    "get_reputations": "checking reputations",
+    "search_conversations": "remembering earlier conversations",
+    "show_on_map": "marking the map",
+    "show_route": "marking a route",
+    "highlight_areas": "marking areas",
+    "show_plan": "making a plan",
+    "WebSearch": "searching the web",
+    "WebFetch": "reading a web page",
+}
+
+
+def tool_step(name: str) -> str:
+    """What the status line says while the agent calls a tool, by Claude Code's name for it."""
+    short = name.removeprefix(WOW_TOOLS)
+    if short in STEPS:
+        return STEPS[short]
+    if name.startswith(WOW_TOOLS):
+        return "looking at your game" if short.startswith(("get_", "list_", "search_")) else "updating your game"
+    return "using its tools"
+
+
+def event_step(event: object) -> tuple[str | None, str | None]:
+    """What one of Claude Code's stream-json events says the agent does now: (step, tool), each None if it doesn't.
+    Content starting says it (--include-partial-messages): thinking, a tool call, text."""
+    if not isinstance(event, dict) or event.get("type") != "stream_event":
+        return None, None
+    inner = event.get("event")
+    starts = isinstance(inner, dict) and inner.get("type") == "content_block_start"
+    block = inner.get("content_block") if starts else None
+    kind = block.get("type") if isinstance(block, dict) else None
+    if kind in ("tool_use", "server_tool_use", "mcp_tool_use"):
+        name = str(block.get("name") or "")
+        return tool_step(name), name.removeprefix(WOW_TOOLS) or None
+    if kind in ("thinking", "redacted_thinking"):
+        return THINKING, None
+    if kind == "text":
+        return WRITING, None
+    return None, None
+
+
+class Progress:
+    """Tells the game how an answer is coming along, for the AI tab's status line: the step the agent is on (e.g.
+    "checking auction prices"), as the agent says (CommandAgent, from Claude Code's events).
+
+    Each update costs one of the game's live-update slots (300 per UI session), so a step goes out only once it has
+    lasted SETTLE seconds, and at most every `every` seconds. While the agent keeps busy, it goes out again unchanged
+    after `quiet` seconds, so the game can tell a long think from a bridge that's gone. `send(step)` publishes one.
+    """
+
+    def __init__(self, send: Callable[[str], object], quiet: float = SILENCE, every: float = PROGRESS_EVERY,
+                 clock: Callable[[], float] = time.monotonic):
+        self.send = send
+        self.quiet = quiet
+        self.every = every
+        self.clock = clock
+        self.started = self.sent = clock()  # when the game last heard about it: the ack, or the answer before
+        self.alive = self.started  # the agent's last sign of life
+        self.step: str | None = None  # what it's doing, since `since`
+        self.since = self.started
+        self.shown: str | None = None  # what the game was told
+        self.tools: Counter[str] = Counter()  # the tools it called, in order
+
+    def saw(self, step: str | None = None, tool: str | None = None) -> None:
+        """A sign of life from the agent; step: what it's doing now, if it says; tool: one it calls."""
+        now = self.clock()
+        self.alive = now
+        if step and step != self.step:
+            self.step, self.since = step, now
+        if tool:
+            self.tools[tool] += 1
+        self.tick()
+
+    def tick(self) -> None:
+        """Sends the step if that's due. The agent calls this about every second while it runs."""
+        now = self.clock()
+        if now - self.sent < self.every:
+            return
+        changed = self.step not in (None, self.shown) and now - self.since >= SETTLE
+        busy = self.alive > self.sent and now - self.sent >= self.quiet
+        if changed or busy:
+            self.sent, self.shown = now, self.step
+            self.send(self.step or "")
+
+    def used(self) -> str:
+        """The tools it called, for the log: "get_auction_prices ×3, WebSearch"."""
+        return ", ".join(f"{tool} ×{n}" if n > 1 else tool for tool, n in self.tools.items()) or "none"
 
 
 # Agents -----------------------------------------------------------------------------------
@@ -357,10 +505,11 @@ def mcp_config(addons_dir: Path, player: str | None = None) -> dict:
 
 def claude_command(model: str | None = None, effort: str | None = None) -> list[str]:
     """Headless Claude Code with only the wow tools and web lookups, apart from the user's own
-    settings, MCP servers and sessions."""
+    settings, MCP servers and sessions. It streams its events as they happen, down to each piece of
+    thinking (stream-json with partial messages), so the bridge can watch it work."""
     command = [
         "claude", "-p",
-        "--output-format", "json",
+        "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         "--mcp-config", "{mcp_config}", "--strict-mcp-config",
         "--setting-sources", "project",  # the agent runs in an empty folder, so: none
         "--tools", "WebSearch,WebFetch",
@@ -428,6 +577,12 @@ def launcher_problem(command: list[str], windows: bool = WINDOWS) -> str | None:
             "environment, as WOW_MCP_SYSTEM_PROMPT and WOW_MCP_MCP_CONFIG.")
 
 
+def _option(command: list[str], option: str) -> str | None:
+    """The value an option has in a command, if it's there."""
+    i = command.index(option) if option in command else -1
+    return command[i + 1] if 0 <= i < len(command) - 1 else None
+
+
 def _with_option(command: list[str], option: str, value: str) -> list[str]:
     if option in command:
         i = command.index(option)
@@ -450,7 +605,8 @@ def with_effort(command: list[str], effort: str) -> list[str]:
 
 
 def agent_answer(out: str, err: str, returncode: int) -> str:
-    """The answer in an agent's output; a Claude Code `--output-format json` result is unwrapped."""
+    """The answer in an agent's output; a Claude Code result (`--output-format json`, or the last event of
+    stream-json) is unwrapped."""
     text = out.strip()
     with contextlib.suppress(ValueError):
         result = json.loads(text)
@@ -472,16 +628,28 @@ class CommandAgent:
     given to Claude Code's command as --model, a thinking level (one of EFFORTS) as --effort. Who
     asks goes to the wow tools, in the MCP config and the environment (memory.PLAYER_ENV), so
     their memory is that player's.
+
+    A command that streams Claude Code's events (`--output-format stream-json`) is watched as it
+    runs: each event is a sign of life, and tells `progress` the step it's on. It's stopped after
+    `silence` seconds without any. Any command is stopped after `max_time`.
     """
 
-    def __init__(self, command: list[str], addons_dir: Path, timeout: float = TIMEOUT):
+    def __init__(self, command: list[str], addons_dir: Path, silence: float = SILENCE, max_time: float = MAX_TIME):
         self.addons_dir = addons_dir
         self._asked = command  # with the placeholders, filled in for each player
         self.command, self.env = self._for(None)
-        self.timeout = timeout
+        self.silence = silence
+        self.max_time = max_time
+        self.streams = _option(command, "--output-format") == "stream-json"
         # An empty working folder, so no project's settings or CLAUDE.md apply.
         self._folder = tempfile.TemporaryDirectory(prefix="wow-mcp-bridge-")
         self._process: subprocess.Popen | None = None
+
+    @property
+    def quiet(self) -> float:
+        """The longest it goes without telling `progress` anything while all is well: an agent that doesn't
+        stream says nothing until it's done."""
+        return self.silence if self.streams else self.max_time
 
     def _for(self, player: str | None) -> tuple[list[str], dict[str, str]]:
         """The command and its environment for a question from this player."""
@@ -493,14 +661,14 @@ class CommandAgent:
         return command, {**env, memory.PLAYER_ENV: player} if player else env
 
     def __call__(self, prompt: str, model: str | None = None, player: str | None = None,
-                 effort: str | None = None) -> str:
+                 effort: str | None = None, progress: Progress | None = None) -> str:
         command, env = self._for(player) if player else (self.command, self.env)
         if model is not None:
             command = with_model(command, model)
         if effort is not None:
             command = with_effort(command, effort)
         try:
-            # Its own process group, so a timeout also stops whatever it started (MCP servers).
+            # Its own process group, so stopping it also stops whatever it started (MCP servers).
             # On Windows its output is read as UTF-8, not in the system's code page.
             platform = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP, "encoding": "utf-8", "errors": "replace"}
                         if WINDOWS else {"start_new_session": True})
@@ -512,13 +680,65 @@ class CommandAgent:
             raise AgentError(f"couldn't start {self.command[0]}: {e.strerror}") from e
         self._process = process
         try:
-            out, err = process.communicate(prompt, timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            self.cancel()
-            raise AgentTimeout(f"it took over {self.timeout:.0f} seconds") from None
+            if self.streams:
+                out, err = self._watch(process, prompt, progress or Progress(lambda step: None))
+            else:
+                try:
+                    out, err = process.communicate(prompt, timeout=self.max_time)
+                except subprocess.TimeoutExpired:
+                    self.cancel()
+                    raise AgentTimeout(f"after the {_span(self.max_time, before_noun=True)} limit") from None
         finally:
             self._process = None
         return agent_answer(out, err, process.returncode)
+
+    def _watch(self, process: subprocess.Popen, prompt: str, progress: Progress) -> tuple[str, str]:
+        """Runs a streaming agent to its end: its result event (or "") and what it said on stderr. Any output is a
+        sign of life, and the events say what it's doing (progress). Stopped after `silence` seconds without any
+        output, and at `max_time`."""
+        output: queue.Queue[tuple[str, str | None]] = queue.Queue()
+
+        def read(pipe, name: str) -> None:
+            with contextlib.suppress(OSError, ValueError):  # closed under it when it's stopped
+                for line in pipe:
+                    output.put((name, line))
+            output.put((name, None))
+
+        def write() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                process.stdin.write(prompt)
+                process.stdin.close()
+
+        for target, args in ((write, ()), (read, (process.stdout, "out")), (read, (process.stderr, "err"))):
+            threading.Thread(target=target, args=args, name="wow-mcp-bridge-agent-io", daemon=True).start()
+        started = alive = time.monotonic()
+        result, errors, reading = "", [], 2
+        while reading:
+            with contextlib.suppress(queue.Empty):
+                name, line = output.get(timeout=TICK)
+                alive = time.monotonic()
+                if line is None:
+                    reading -= 1
+                elif name == "err":
+                    errors.append(line)
+                    progress.saw()
+                else:
+                    event = None
+                    with contextlib.suppress(ValueError):
+                        event = json.loads(line)
+                    if isinstance(event, dict) and event.get("type") == "result":
+                        result = line
+                    progress.saw(*event_step(event))
+            now = time.monotonic()
+            if now - alive > self.silence:
+                self.cancel()
+                raise AgentSilent(f"no response from the model for {_span(self.silence)}")
+            if now - started > self.max_time:
+                self.cancel()
+                raise AgentTimeout(f"after the {_span(self.max_time, before_noun=True)} limit")
+            progress.tick()
+        process.wait()
+        return result, "".join(errors)
 
     def cancel(self) -> None:
         """Stop the agent that's running, if any, and everything it started."""
@@ -550,10 +770,17 @@ class Bridge:
     def __init__(self, addons_dir: Path, agent: Agent, publish: Callable[..., int] = publish_message,
                  sender: str = SENDER, history: History | None = None,
                  background: Sequence[Callable[[threading.Event], None]] = (),
-                 models: bool = False, model: str | None = None, effort: str | None = None):
+                 models: bool = False, model: str | None = None, effort: str | None = None,
+                 notify: Callable[..., int] = publish_status, quiet: float = SILENCE,
+                 clock: Callable[[], float] = time.monotonic):
         self.out_dir = addons_dir / ADDON / "out"
         self.agent = agent
         self.publish = publish
+        self.notify = notify  # tells the game how a question is coming along (publish_status)
+        # The longest the agent goes without a sign of life while all is well (CommandAgent.quiet): the game is
+        # told, and progress is sent at least that often.
+        self.quiet = quiet
+        self.clock = clock  # for timing answers
         self.sender = sender
         self.models = models  # the agent is Claude Code, so the player can pick its model and thinking level
         self.model = model  # the one it answers with otherwise (--model), if known
@@ -588,12 +815,13 @@ class Bridge:
     def accept(self, post: stream.Post) -> None:
         if post.error:
             log.warning("%s", post.error)
-            self.say("Your question arrived garbled. Please ask again.")
+            self.say("Your question arrived garbled. Please ask again.", question=post.key)
             return
         item = Question.from_post(post.value) or Reset.from_post(post.value)
         if isinstance(item, Reset):
             log.info("%s starts a fresh conversation", item.player or "the player")
         elif item:
+            item = replace(item, post=post.key)
             # memory.read_log reads this line and the answer's back (import-logs): keep their wording.
             log.info("%s asks%s: %s", item.player or "the player", f" ({item.model})" if item.model else "", item.text)
             if item.effort:  # a line of its own, so the one above keeps its wording
@@ -607,7 +835,11 @@ class Bridge:
             if isinstance(item, Reset):  # the game already said it's done
                 self.history.clear(item.player)
             else:
-                self.say("I'm still busy with your earlier questions. Please ask again in a minute.")
+                self.say("I'm still busy with your earlier questions. Please ask again in a minute.",
+                         question=item.post)
+            return
+        if isinstance(item, Question):  # right away, so the game knows the bridge is up
+            self.tell(item, "ack")
 
     def _work(self) -> None:
         while not self.stop.is_set():
@@ -629,15 +861,19 @@ class Bridge:
             log.info("ignoring the thinking level picked in game (%s): --agent thinks its own way", effort)
             effort = None
         answer = ""  # stays empty if the agent fails: failures don't become part of the conversation
+        progress = Progress(lambda step: self.tell(question, "progress", step), self.quiet, clock=self.clock)
         try:
             # The conversation is the same whichever model answers, however hard it thinks.
             prompt = question.prompt(self.history.recent(question.player), self.history.clock(),
                                      self.notes.about(question.player) if question.player else ())
-            answer = self.agent(prompt, model, question.player, effort)
+            answer = self.agent(prompt, model, question.player, effort, progress)
             text = answer or "I have no answer to that."
+        except AgentSilent as e:  # memory.FAILED knows these log lines: what follows isn't an answer
+            log.error("agent timed out: %s", e)
+            text = f"Sorry, I stopped: {e}."
         except AgentTimeout as e:
             log.error("agent timed out: %s", e)
-            text = f"Sorry, I gave up: {e}. Try asking something narrower."
+            text = f"Sorry, I stopped {e}. Try asking something narrower."
         except AgentError as e:
             log.error("agent failed: %s", e)
             text = f"Sorry, I couldn't answer that: {e}"
@@ -653,9 +889,10 @@ class Bridge:
                                  (model or self.model) if self.models else None)
             except OSError as e:
                 log.warning("couldn't archive this exchange: %s", e)
+        log.info("took %s; tools used: %s", _clock(self.clock() - progress.started), progress.used())
         log.info("answer: %s", text)
         # One message (the game prints it one chat line per line), so an answer costs one slot.
-        self.say("\n".join(chat_lines(text)), self.signed(model, effort))
+        self.say("\n".join(chat_lines(text)), self.signed(model, effort), question.post)
 
     def signed(self, model: str | None, effort: str | None = None) -> str:
         """Who an answer is from: e.g. "Claude Sonnet" when the sonnet model answered it, "Claude Sonnet · high"
@@ -667,16 +904,26 @@ class Bridge:
         signed = f"{self.sender} {name}" if name else self.sender
         return f"{signed} · {level}" if level else signed
 
-    def say(self, text: str, sender: str | None = None) -> None:
+    def say(self, text: str, sender: str | None = None, question: tuple[int, int] | None = None) -> None:
+        """A reply, to the question that came in post `question` if it's known."""
         try:
             # A reply: the game shows it in the conversation, in its AI chat tab. It also tells the
             # game's picker what answers, and how hard it thinks, when the player picks none.
             default = self.model if self.models and self.model in MODELS else ""
             effort = self.effort if self.models and self.effort in EFFORTS else ""
             self.publish(text, style="chat", sender=sender or self.sender, reply=True, default_model=default,
-                         default_effort=effort)
+                         default_effort=effort, question=question)
         except Exception:
             log.exception("couldn't show this in game: %s", text)
+
+    def tell(self, question: Question, status: str, text: str = "") -> None:
+        """A note to the game about a question it waits for, for its status line (never shown as a message):
+        "ack" when it arrives, "progress" with the step the agent is on. Each says how long the bridge may then
+        stay quiet while all is well."""
+        try:
+            self.notify(status, text, question=question.post, quiet=self.quiet)
+        except Exception:
+            log.exception("couldn't tell the game how its question is coming along (%s %s)", status, text)
 
 
 def claim(addon_dir: Path):
@@ -724,8 +971,13 @@ def main() -> None:
     parser.add_argument("--effort", choices=EFFORTS,
                         help="how hard the Claude Code agent thinks when the player hasn't picked a level in game "
                         "(default: Claude Code's own)")
-    parser.add_argument("--timeout", type=float, default=TIMEOUT,
-                        help="seconds an answer may take (default: %(default)s)")
+    parser.add_argument("--timeout", type=float, default=SILENCE, metavar="SECONDS",
+                        help="stop an answer when Claude Code has shown no sign of life (thinking, tool calls, "
+                        "writing) for this long; while it works, it may take as long as it needs "
+                        "(default: %(default)s)")
+    parser.add_argument("--max-time", type=float, default=MAX_TIME, metavar="SECONDS",
+                        help="stop any answer that takes longer than this, however busy; the only limit for --agent "
+                        "(default: %(default)s)")
     parser.add_argument("--history", type=int, default=HISTORY, metavar="N",
                         help="earlier exchanges with the player to include in each prompt, so follow-up questions "
                         "work; 0 for none (default: %(default)s)")
@@ -743,6 +995,8 @@ def main() -> None:
         parser.error("--effort only applies to the default agent")
     if args.history < 0 or args.history_minutes < 0:
         parser.error("--history and --history-minutes can't be negative")
+    if args.timeout <= 0 or args.max_time <= 0:
+        parser.error("--timeout and --max-time must be more than 0")
     addons_dir = Path(args.addons_dir).expanduser()
     if not (addons_dir / ADDON / "out").is_dir():
         sys.exit(f"{ADDON} isn't installed in {addons_dir}. Run wow-mcp-install first.")
@@ -752,7 +1006,7 @@ def main() -> None:
     command = resolve_command(asked)
     if not command:
         sys.exit(f"Agent command not found: {args.agent or asked[0]}")
-    agent = CommandAgent(command, addons_dir, args.timeout)
+    agent = CommandAgent(command, addons_dir, args.timeout, args.max_time)
     if problem := launcher_problem(agent.command):
         sys.exit(problem)
     from wow_mcp.tools import messages
@@ -765,7 +1019,7 @@ def main() -> None:
     history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
     background = auction_refresh(addons_dir, args.no_auction_refresh)
     bridge = Bridge(addons_dir, agent, history=history, background=background, models=not args.agent, model=args.model,
-                    effort=args.effort)
+                    effort=args.effort, quiet=agent.quiet)
     signal.signal(signal.SIGTERM, lambda *_: bridge.stop.set())
     if args.agent:
         log.info("Answering /ai questions from %s with %s", addons_dir, command[0])
@@ -773,6 +1027,12 @@ def main() -> None:
         log.info("Answering /ai questions from %s with Claude Code: %s, or the model the player picks (%s); thinking: "
                  "%s, or the level the player picks (%s)", addons_dir, args.model or "its default model",
                  ", ".join(MODELS), args.effort or "its default level", ", ".join(EFFORTS))
+    if agent.streams:
+        log.info("An answer is stopped after %s without a sign of life, and at the %s limit", _span(args.timeout),
+                 _span(args.max_time, before_noun=True))
+    else:
+        log.info("An answer is stopped at the %s limit (the agent's output isn't watched as it runs)",
+                 _span(args.max_time, before_noun=True))
     try:
         bridge.serve()
     except KeyboardInterrupt:

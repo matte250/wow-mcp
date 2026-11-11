@@ -15,18 +15,21 @@ import pytest
 from wow_mcp import bridge, item_text, memory, stream
 from wow_mcp.app import transport
 from wow_mcp.bridge import (
-    MAX_WAITING, SYSTEM_PROMPT, AgentError, AgentTimeout, Bridge, CommandAgent, chat_lines, claude_command,
+    MAX_WAITING, SYSTEM_PROMPT, AgentError, AgentSilent, AgentTimeout, Bridge, CommandAgent, Progress, chat_lines,
+    claude_command,
 )
 from wow_mcp.tools import messages, player
 
 
-def publish_per_contract(text, style="chat", sender="Claude", reply=False, default_model=None, default_effort=None):
+def publish_per_contract(text, style="chat", sender="Claude", reply=False, default_model=None, default_effort=None,
+                         question=None):
     """Stands in for tools/messages.py: the `messages` payload as docs/PLAN.md (W7) defines it."""
 
     def change(state, seq):
         message = {"id": seq, "text": text, "style": style, "from": sender, **({"reply": True} if reply else {}),
                    **({"defaultModel": default_model} if reply and default_model is not None else {}),
-                   **({"defaultEffort": default_effort} if reply and default_effort is not None else {})}
+                   **({"defaultEffort": default_effort} if reply and default_effort is not None else {}),
+                   **({"session": question[0], "post": question[1]} if reply and question else {})}
         state["messages"] = [*state.get("messages", []), message][-10:]
 
     return transport().publish(change)
@@ -107,7 +110,13 @@ function client.LoadAddon()
     local ns = loadAddon()
     local receive = WowMCP_Receive
     WowMCP_Receive = function(payload)
-        for _, m in ipairs(payload.messages or {}) do Log(string.format("message %d %s: %s", m.id, m.from, m.text)) end
+        for _, m in ipairs(payload.messages or {}) do
+            if m.status then
+                Log(string.format("status %d %s %s/%s: %s", m.id, m.status, m.session, m.post, m.text))
+            else
+                Log(string.format("message %d %s: %s", m.id, m.from, m.text))
+            end
+        end
         return receive(payload)
     end
     return ns
@@ -130,7 +139,7 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     prompts, busy = [], []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         busy.append(prompt)
         assert len(busy) == 1, "one question at a time"
         prompts.append(prompt)
@@ -157,11 +166,19 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     assert "chat: |cff33ff99WowMCP|r Asking… what now?" in lines
     received = [line.split(" ", 2)[2] for line in dict.fromkeys(lines) if line.startswith("message ")]
     assert received == ["Claude: You're in Durotar, at 50, 50.", "Claude: Go and see Gornek."]
-    # One message per answer (one live-update slot); the game prints it line by line.
+    # Each question is acknowledged as it arrives, by the post it came in: a note for the AI tab's status
+    # line, never a chat line (and no warning that the bridge is down).
+    acks = {line.split(":")[0].split()[3] for line in lines if line.startswith("status ") and " ack " in line}
+    session = next(iter(acks)).split("/")[0]
+    assert acks == {f"{session}/1", f"{session}/2"}
+    assert [line for line in dict.fromkeys(lines) if line.startswith("chat: ") and "Claude" in line] == [
+        "chat: |cff33ff99[Claude]|r You're in Durotar, at 50, 50.", "chat: |cff33ff99[Claude]|r Go and see Gornek."]
+    assert not any("wow-mcp-bridge" in line for line in lines)
+    # One message per answer (one live-update slot), naming its question; the game prints it line by line.
     state = json.loads((addons / "WowMCP" / "server-state.json").read_text())
-    assert [(m["text"], m["style"], m["reply"]) for m in state["messages"]] == [
-        ("You're in Durotar, at 50, 50.", "chat", True),
-        ("Go and see Gornek.\n- He's in the den.\n- Then come back.", "chat", True),
+    assert [(m["text"], m["style"], m["reply"], m["post"]) for m in state["messages"] if not m.get("status")] == [
+        ("You're in Durotar, at 50, 50.", "chat", True, 1),
+        ("Go and see Gornek.\n- He's in the den.\n- Then come back.", "chat", True, 2),
     ]
 
 
@@ -171,7 +188,7 @@ def test_new_conversation_in_game_end_to_end(live_game, addons, tmp_path, monkey
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     prompts = []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         prompts.append(prompt)
         return f"Answer {len(prompts)}."
 
@@ -193,9 +210,10 @@ def test_new_conversation_in_game_end_to_end(live_game, addons, tmp_path, monkey
         "Thorgrim asks, in game: what now?",
     ]
     assert "chat: |cff33ff99WowMCP|r Starting a fresh conversation." in log.read_text().splitlines()
-    # The reset itself sends nothing back (no live-update slot spent).
+    # The reset itself sends nothing back (no live-update slot spent), unlike a question (its ack).
     state = json.loads((addons / "WowMCP" / "server-state.json").read_text())
-    assert [m["text"] for m in state["messages"]] == ["Answer 1.", "Answer 2.", "Answer 3."]
+    assert [m["text"] for m in state["messages"] if not m.get("status")] == ["Answer 1.", "Answer 2.", "Answer 3."]
+    assert [m["post"] for m in state["messages"] if m.get("status") == "ack"] == [1, 2, 4]
     saved = json.loads((addons / "WowMCP" / "bridge-history.json").read_text())
     assert [(e["question"], e["answer"]) for e in saved["Thorgrim"]] == [("what now?", "Answer 3.")]
 
@@ -204,7 +222,7 @@ def test_follow_ups_see_the_conversation(addons):
     now = [1_000_000.0]
     prompts = []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         prompts.append(prompt)
         return f"Answer {len(prompts)}:\n\n- **Karolek**   is in The Drag."
 
@@ -267,10 +285,10 @@ def test_history_keeps_only_the_recent_part(tmp_path):
 
 def test_failed_answers_are_not_remembered(addons):
     prompts, said = [], []
-    outcomes = [AgentError("not logged in"), AgentTimeout("it took over 180 seconds"), KeyError("broken"), "",
+    outcomes = [AgentError("not logged in"), AgentTimeout("after the 30-minute limit"), KeyError("broken"), "",
                 "It's in Orgrimmar.", "Go west."]
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         prompts.append(prompt)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -285,7 +303,7 @@ def test_failed_answers_are_not_remembered(addons):
     assert prompts[5] == earlier(("where is it?", 0, "It's in Orgrimmar.")) + "Thorgrim asks, in game: and then?"
 
     # Nor is an answer the player never sees because the bridge is stopping.
-    b.agent = lambda prompt, model, asker, effort: "Too late."
+    b.agent = lambda prompt, model, asker, effort, progress: "Too late."
     b.stop.set()
     b.answer(bridge.Question("one more?", "Thorgrim"))
     assert [e.answer for e in b.history.recent("Thorgrim")] == ["It's in Orgrimmar.", "Go west."]
@@ -294,7 +312,7 @@ def test_failed_answers_are_not_remembered(addons):
 def test_history_survives_a_restart(addons):
     prompts = []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         prompts.append(prompt)
         return "Karolek, in The Drag."
 
@@ -316,7 +334,7 @@ def test_new_conversation(addons, running):
     """A reset waits its turn behind the questions asked before it."""
     prompts, started, release = [], threading.Event(), threading.Event()
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         prompts.append(prompt)
         started.set()
         release.wait(5)
@@ -361,6 +379,13 @@ def test_chat_command(run_client):
                 if line:find(text, 1, true) then return true end
             end
         end
+        local function Count(text)
+            local n = 0
+            for _, line in ipairs(client.chat) do
+                if line:find(text, 1, true) then n = n + 1 end
+            end
+            return n
+        end
 
         client.Type("/ai")
         assert(Said("/ai <question>") and Said("/ai new - start a fresh conversation") and #posted == 0, "usage")
@@ -371,18 +396,28 @@ def test_chat_command(run_client):
         assert(posted[1].question == "who buys [Linen Cloth] (item 2589)?" and posted[1].player == "Thorgrim")
         assert(Said("Asking… who buys " .. link .. "?"))
 
-        -- No update at all for a while: the bridge may not be running.
-        client.Wait(170)
-        assert(not Said("Still no answer"))
-        client.Wait(12)
-        assert(Said("Still no answer"))
+        -- Nothing at all from the bridge for 15 seconds: it may not be running. Said once.
+        client.Wait(28)
+        assert(not Said("wow-mcp-bridge"))
+        client.Wait(4)
+        assert(Said("No answer from wow-mcp-bridge. Is it running?"))
+        client.Wait(100)
+        assert(Count("wow-mcp-bridge") == 1 and not Said("Thinking"))
 
-        -- Any update in the meantime (the answer, or markers) means it is.
+        -- Any update in the meantime (the bridge's notes, an answer, markers) means it is. Then nothing for longer
+        -- than the bridge may stay quiet while it works (120 s, and a margin): it seems to have stopped.
         wipe(client.chat)
         client.Type("/ai where am I?")
         ns.run.seq = ns.run.seq + 1
         client.Wait(200)
-        assert(not Said("Still no answer"))
+        assert(not Said("wow-mcp-bridge") and not Said("stopped"))
+        client.Wait(170)
+        assert(Said("The AI seems to have stopped responding."))
+
+        -- Answers (here, from a bridge that doesn't say which question): nothing is due any more.
+        ns.AIChat.Answer("First.", "chat", "Claude")
+        ns.AIChat.Answer("Second.", "chat", "Claude")
+        assert(Said("[Claude]|r Second."))
 
         -- Without live updates, the answer can't show until /reload.
         ns.run.liveProblem = "game sound is turned off"
@@ -402,8 +437,8 @@ def test_chat_command(run_client):
         ns.run.liveProblem = nil
         client.Type("/ask  NeW ")
         assert(#posted == 6 and posted[6].reset == true)
-        client.Wait(200)
-        assert(not Said("Still no answer"))
+        client.Wait(400)
+        assert(not Said("wow-mcp-bridge") and not Said("stopped"))
 
         -- A question that only starts with "new" is a question.
         client.Type("/ai new quests near me?")
@@ -415,7 +450,7 @@ def test_chat_command(run_client):
 def test_questions_wait_their_turn(addons, running):
     said, busy, started, release = [], [], threading.Event(), threading.Event()
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         busy.append(prompt)
         assert len(busy) == 1, "one question at a time"
         started.set()
@@ -437,14 +472,14 @@ def test_questions_wait_their_turn(addons, running):
 def test_problems_are_reported_in_game(addons, tmp_path):
     said = []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         raise AgentError("the agent exited with status 1: not logged in")
 
     b = Bridge(addons, agent, publish=lambda text, style, sender, reply, **_: said.append((sender, text)))
     b.answer(bridge.Question("where am I?"))
     b.accept(stream.Post(1, 1, end=0, error="post 1 arrived damaged"))
     b.accept(stream.Post(1, 2, end=0, value={"not": "a question"}))
-    b.agent = lambda prompt, model, asker, effort: {}["broken"]
+    b.agent = lambda prompt, model, asker, effort, progress: {}["broken"]
     b.answer(bridge.Question("where am I?"))
     assert said == [
         ("Claude", "Sorry, I couldn't answer that: the agent exited with status 1: not logged in"),
@@ -452,18 +487,19 @@ def test_problems_are_reported_in_game(addons, tmp_path):
         ("Claude", "Sorry, I couldn't answer that: 'broken'"),
     ]
 
-    # A stuck agent is stopped, together with what it started (e.g. its MCP servers).
+    # A stuck agent is stopped at the time limit, together with what it started (e.g. its MCP servers). This
+    # one doesn't stream (--agent), so the time limit is all it has.
     child = tmp_path / "child.pid"
     stuck = (
         "import subprocess, time\n"
         f"open({str(child)!r}, 'w').write(str(subprocess.Popen(['sleep', '60']).pid))\n"
         "time.sleep(60)\n"
     )
-    b.agent = CommandAgent([sys.executable, "-c", stuck], addons, timeout=1)
+    b.agent = CommandAgent([sys.executable, "-c", stuck], addons, silence=0.1, max_time=1)
     started = time.monotonic()
     b.answer(bridge.Question("where am I?"))
-    assert time.monotonic() - started < 8
-    assert said[-1] == ("Claude", "Sorry, I gave up: it took over 1 seconds. Try asking something narrower.")
+    assert 1 <= time.monotonic() - started < 8
+    assert said[-1] == ("Claude", "Sorry, I stopped after the 1-second limit. Try asking something narrower.")
     wait_for(lambda: gone(int(child.read_text())), seconds=5)
 
 
@@ -479,11 +515,11 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
 
 
 def test_agent_command(addons):
-    agent = CommandAgent([sys.executable, "-c", FAKE_AGENT, "{system_prompt}", "{mcp_config}"], addons, timeout=20)
+    agent = CommandAgent([sys.executable, "-c", FAKE_AGENT, "{system_prompt}", "{mcp_config}"], addons, max_time=20)
     assert agent("Where?") == f"Where? in {addons}, {SYSTEM_PROMPT[:30]}"
 
     def run(code):
-        return CommandAgent([sys.executable, "-c", code], addons, timeout=20)("Where?")
+        return CommandAgent([sys.executable, "-c", code], addons, max_time=20)("Where?")
 
     assert run("print('  just text  ')") == "just text"
     with pytest.raises(AgentError, match="status 1: not logged in"):
@@ -504,12 +540,15 @@ def test_default_agent_is_claude_code_with_the_wow_tools(addons):
     assert option("--allowedTools") == "mcp__wow,WebSearch,WebFetch"
     assert option("--disallowedTools") == "mcp__wow__show_message"
     assert option("--append-system-prompt") == SYSTEM_PROMPT
-    assert option("--output-format") == "json"
+    # Every event as it happens, down to each piece of thinking, so it's watched while it works.
+    assert option("--output-format") == "stream-json" and {"--verbose", "--include-partial-messages"} <= set(command)
+    agent = CommandAgent(claude_command(), addons, silence=90, max_time=600)
+    assert agent.streams and agent.quiet == 90
     assert option("--model") == "sonnet"
     assert "--model" not in claude_command()
     assert "--effort" not in command and claude_command("sonnet", "high")[-4:] == ["--model", "sonnet", "--effort", "high"]
     assert claude_command(effort="max")[-2:] == ["--effort", "max"] and "--model" not in claude_command(effort="max")
-    assert isinstance(AgentTimeout("x"), AgentError)
+    assert isinstance(AgentTimeout("x"), AgentError) and isinstance(AgentSilent("x"), AgentTimeout)
 
 
 def test_models_picked_in_game_are_checked(caplog):
@@ -530,11 +569,11 @@ def test_answers_come_from_the_picked_model(addons, caplog):
     caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
     asked, said = [], []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         asked.append((prompt.rsplit(": ", 1)[1], model))
         return f"Answer {len(asked)}."
 
-    def publish(text, style, sender, reply, default_model, default_effort):
+    def publish(text, style, sender, reply, default_model, default_effort, **_):
         said.append((sender, text, default_model))
 
     # Claude Code started with --model opus: a pick goes to the agent and signs the answer; without one,
@@ -579,7 +618,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "re
 def test_claude_code_runs_the_picked_model(addons, tmp_path):
     """--model on the command line is the picked model, else the bridge's own; never anything else from the game."""
     command = [sys.executable, "-c", ARGS_AGENT, *claude_command("opus")[1:]]
-    agent = CommandAgent(command, addons, timeout=20)
+    agent = CommandAgent(command, addons, max_time=20)
 
     def models(*args):
         argv = json.loads(agent("Where?", *args))
@@ -588,14 +627,14 @@ def test_claude_code_runs_the_picked_model(addons, tmp_path):
     assert models() == ["opus"] and models(None) == ["opus"]
     assert models("haiku") == ["haiku"] and models("fable") == ["fable"]
     assert models() == ["opus"]  # a pick lasts one question
-    assert CommandAgent([sys.executable, "-c", ARGS_AGENT, *claude_command()[1:]], addons, timeout=20)("Where?", "sonnet")
+    assert CommandAgent([sys.executable, "-c", ARGS_AGENT, *claude_command()[1:]], addons)("Where?", "sonnet")
     with pytest.raises(ValueError, match="not a model the player can pick"):
         agent("Where?", "sonnet --dangerously-skip-permissions")
     assert bridge.with_model(["claude", "-p"], "sonnet") == ["claude", "-p", "--model", "sonnet"]
 
     # From a post to the command line: an unknown model is dropped on the way, so the bridge's own runs.
     ran = []
-    b = Bridge(addons, lambda prompt, model, asker, effort: ran.append(json.loads(agent(prompt, model))) or "ok",
+    b = Bridge(addons, lambda prompt, model, asker, effort, _: ran.append(json.loads(agent(prompt, model))) or "ok",
                publish=lambda text, style, sender, reply, **_: None, history=bridge.History(None),
                models=True, model="opus")
     for model in ("haiku", "--dangerously-skip-permissions", "rm -rf ~"):
@@ -612,7 +651,7 @@ def test_model_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeypatc
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     asked = []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         asked.append((prompt, model))
         return f"Answer {len(asked)}."
 
@@ -658,11 +697,11 @@ def test_answers_think_as_picked(addons, caplog):
     caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
     asked, said = [], []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         asked.append((prompt.rsplit(": ", 1)[1], model, effort))
         return f"Answer {len(asked)}."
 
-    def publish(text, style, sender, reply, default_model, default_effort):
+    def publish(text, style, sender, reply, default_model, default_effort, **_):
         said.append((sender, text, default_effort))
 
     # Claude Code started with --effort high: a pick goes to the agent and signs the answer, after the
@@ -701,7 +740,7 @@ def test_claude_code_thinks_at_the_picked_level(addons, caplog):
     """--effort on the command line is the picked level, else the bridge's own (none: Claude Code's); never
     anything else from the game."""
     command = [sys.executable, "-c", ARGS_AGENT, *claude_command("opus", "high")[1:]]
-    agent = CommandAgent(command, addons, timeout=20)
+    agent = CommandAgent(command, addons, max_time=20)
 
     def efforts(*args, **kwargs):
         argv = json.loads(agent("Where?", *args, **kwargs))
@@ -710,7 +749,7 @@ def test_claude_code_thinks_at_the_picked_level(addons, caplog):
     assert efforts() == ["high"] and efforts(effort=None) == ["high"]
     assert efforts(effort="max") == ["max"] and efforts("haiku", "Thorgrim", "low") == ["low"]
     assert efforts() == ["high"]  # a pick lasts one question
-    own = CommandAgent([sys.executable, "-c", ARGS_AGENT, *claude_command()[1:]], addons, timeout=20)
+    own = CommandAgent([sys.executable, "-c", ARGS_AGENT, *claude_command()[1:]], addons, max_time=20)
     assert "--effort" not in json.loads(own("Where?"))
     assert json.loads(own("Where?", effort="xhigh"))[-2:] == ["--effort", "xhigh"]
     with pytest.raises(ValueError, match="not a thinking level the player can pick"):
@@ -722,7 +761,7 @@ def test_claude_code_thinks_at_the_picked_level(addons, caplog):
     # From a post to the command line: an unknown level is dropped on the way, so the bridge's own runs.
     caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
     ran = []
-    b = Bridge(addons, lambda prompt, model, asker, effort: ran.append(json.loads(agent(prompt, model, asker, effort)))
+    b = Bridge(addons, lambda prompt, model, asker, effort, _: ran.append(json.loads(agent(prompt, model, asker, effort)))
                or "ok", publish=lambda text, style, sender, reply, **_: None, history=bridge.History(None),
                models=True, model="opus", effort="high")
     for effort in ("max", "--dangerously-skip-permissions", "high; rm -rf ~", "default"):
@@ -757,7 +796,7 @@ def test_thinking_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeyp
     monkeypatch.setattr(messages, "publish_message", publish_per_contract, raising=False)
     asked = []
 
-    def agent(prompt, model, asker, effort):
+    def agent(prompt, model, asker, effort, progress):
         asked.append((prompt, model, effort))
         return f"Answer {len(asked)}."
 
@@ -781,6 +820,237 @@ def test_thinking_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeyp
     assert "chat: |cff33ff99[Claude Sonnet · medium]|r Answer 2." in lines
     # The first answer told the game what the bridge's own level is.
     assert "chat: |cff33ff99WowMCP|r The AI now thinks at the level the bridge was started with (Medium)." in lines
+
+
+def test_progress_keeps_to_the_slot_budget():
+    """Each update to the game costs a live-update slot: a step goes out once it has lasted a few seconds, at most
+    every 40 s, and only when it changed; while the agent keeps busy, it goes again unchanged after `quiet`
+    seconds, so the game knows the bridge is there. A typical answer costs an ack, a few of these and the answer."""
+    now, sent = [0.0], []
+    progress = Progress(lambda step: sent.append((now[0], step)), quiet=120, every=40, clock=lambda: now[0])
+
+    def busy(seconds, step=None, tool=None):
+        """The agent at work: it says it's on `step` (calling `tool`), then a sign of life every second (thinking
+        streams one about every 1.3 s)."""
+        progress.saw(step, tool)
+        for _ in range(seconds):
+            now[0] += 1
+            progress.saw()
+
+    busy(30, "checking where you are", "get_player_location")
+    busy(2, "checking auction prices", "get_auction_prices")
+    busy(28, None, "get_auction_prices")
+    busy(2, "searching the web", "WebSearch")  # too short to be told
+    busy(130, bridge.THINKING)
+    for _ in range(100):  # silent: no news to keep up
+        now[0] += 1
+        progress.tick()
+    busy(3, bridge.WRITING)  # the answer comes before it's worth a slot
+    assert sent == [(40, "checking auction prices"), (80, bridge.THINKING), (200, bridge.THINKING)]
+    assert progress.used() == "get_player_location, get_auction_prices ×2, WebSearch"
+    assert Progress(lambda step: None).used() == "none"
+
+    # Steps, by Claude Code's stream-json events (with --include-partial-messages): content as it starts.
+    def started(kind, **block):
+        return {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+                                                  "content_block": {"type": kind, **block}}}
+
+    assert bridge.event_step(started("thinking", thinking="")) == (bridge.THINKING, None)
+    assert bridge.event_step(started("text", text="")) == (bridge.WRITING, None)
+    assert bridge.event_step(started("tool_use", name="mcp__wow__get_auction_prices")) == (
+        "checking auction prices", "get_auction_prices")
+    assert bridge.event_step(started("tool_use", name="mcp__wow__get_item_details"))[0] == "looking up items"
+    assert bridge.event_step(started("tool_use", name="WebSearch")) == ("searching the web", "WebSearch")
+    assert bridge.event_step(started("tool_use", name="mcp__wow__list_reminders"))[0] == "looking at your game"
+    assert bridge.event_step(started("tool_use", name="mcp__wow__set_reminder"))[0] == "updating your game"
+    assert bridge.event_step(started("tool_use", name="Task"))[0] == "using its tools"
+    for other in ({"type": "system", "subtype": "thinking_tokens"}, {"type": "stream_event", "event": {
+            "type": "content_block_delta", "delta": {"type": "thinking_delta"}}}, {"type": "result"}, None, [], "x"):
+        assert bridge.event_step(other) == (None, None)
+
+
+# Stands in for Claude Code streaming its events (stream-json): prints each of argv[1]'s [delay, output] after its
+# delay (output: an event, a raw line, {"stderr": line}, or an exit status). Its pid goes into argv[4].
+STREAMING_AGENT = """
+import json, os, sys, time
+sys.stdin.read()
+open(sys.argv[4], "w").write(str(os.getpid()))
+for delay, out in json.loads(sys.argv[1]):
+    time.sleep(delay)
+    if isinstance(out, int):
+        sys.exit(out)
+    if isinstance(out, dict) and "stderr" in out:
+        print(out["stderr"], file=sys.stderr, flush=True)
+    else:
+        print(out if isinstance(out, str) else json.dumps(out), flush=True)
+"""
+INIT = {"type": "system", "subtype": "init", "tools": ["WebSearch"]}
+THOUGHT = {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                             "delta": {"type": "thinking_delta", "estimated_tokens": 50}}}
+
+
+def started(kind, **block):
+    return {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+                                              "content_block": {"type": kind, **block}}}
+
+
+def result(text, error=False):
+    return {"type": "result", "subtype": "error_during_execution" if error else "success", "is_error": error,
+            "result": text}
+
+
+@pytest.fixture
+def streaming(addons, tmp_path):
+    """A CommandAgent running STREAMING_AGENT on a schedule; its pid file is .pid on the agent."""
+    made = []
+
+    def make(schedule, **limits):
+        pid = tmp_path / f"agent{len(made)}.pid"
+        agent = CommandAgent([sys.executable, "-c", STREAMING_AGENT, json.dumps(schedule), "--output-format",
+                              "stream-json", str(pid)], addons, **limits)
+        agent.pid = pid
+        made.append(agent)
+        return agent
+
+    return make
+
+
+def test_a_busy_agent_takes_as_long_as_it_needs(streaming, monkeypatch):
+    """Claude Code is watched by its events, not the clock: a run several times longer than the silence it's
+    allowed ends with its answer, as long as events keep coming. Each tells the game's status line what it's doing."""
+    monkeypatch.setattr(bridge, "SETTLE", 0)
+    thinking = [[0.1, THOUGHT]] * 8
+    agent = streaming([[0.05, INIT], [0.1, started("thinking", thinking="")], *thinking,
+                       [0.1, started("tool_use", name="mcp__wow__get_auction_prices", input={})],
+                       [0.3, {"type": "user", "message": {"content": [{"type": "tool_result"}]}}],
+                       [0.1, "a line that isn't an event"], [0.1, {"stderr": "a warning"}],
+                       [0.1, started("thinking", thinking="")], *thinking, [0.1, started("text", text="")],
+                       [0.05, result("Buy {item:2589:Linen Cloth}.")]], silence=0.8, max_time=30)
+    assert agent.streams and agent.quiet == 0.8
+    sent = []
+    progress = Progress(sent.append, every=0)
+    began = time.monotonic()
+    assert agent("Any flips?", progress=progress) == "Buy {item:2589:Linen Cloth}."
+    assert time.monotonic() - began > 3 * agent.silence
+    assert sent == [bridge.THINKING, "checking auction prices", bridge.THINKING, bridge.WRITING]
+    assert progress.used() == "get_auction_prices"
+
+
+def test_a_silent_agent_is_stopped(streaming, addons):
+    """No event at all for --timeout seconds: the agent is stopped, and the answer says why, without telling the
+    player to ask something narrower (it wasn't the length)."""
+    agent = streaming([[0.05, INIT], [0.1, started("thinking", thinking="")], [0.1, THOUGHT], [30, THOUGHT]],
+                      silence=0.5, max_time=30)
+    began = time.monotonic()
+    with pytest.raises(AgentSilent, match="^no response from the model for 0.5 seconds$"):
+        agent("Any flips?")
+    assert time.monotonic() - began < 5
+    wait_for(lambda: gone(int(agent.pid.read_text())), seconds=5)
+
+    said = []
+    b = Bridge(addons, streaming([[0.05, INIT], [30, THOUGHT]], silence=0.3),
+               publish=lambda text, style, sender, reply, **_: said.append(text), notify=lambda *a, **k: 0)
+    b.answer(bridge.Question("Any flips?", "Thorgrim"))
+    assert said == ["Sorry, I stopped: no response from the model for 0.3 seconds."]
+    assert bridge._span(120) == "2 minutes" and bridge._span(60) == "1 minute" and bridge._span(90) == "90 seconds"
+
+
+def test_a_runaway_agent_is_stopped_at_the_time_limit(streaming, addons):
+    """However busy, an answer stops at --max-time; then asking something narrower may help."""
+    agent = streaming([[0.05, INIT], *[[0.05, THOUGHT]] * 600], silence=0.5, max_time=1)
+    began = time.monotonic()
+    with pytest.raises(AgentTimeout, match="^after the 1-second limit$") as stopped:
+        agent("Any flips?")
+    assert not isinstance(stopped.value, AgentSilent) and time.monotonic() - began < 5
+    wait_for(lambda: gone(int(agent.pid.read_text())), seconds=5)
+    assert bridge._span(30 * 60, before_noun=True) == "30-minute"
+
+    said = []
+    b = Bridge(addons, streaming([[0.05, INIT], *[[0.05, THOUGHT]] * 600], max_time=0.5),
+               publish=lambda text, style, sender, reply, **_: said.append(text), notify=lambda *a, **k: 0)
+    b.answer(bridge.Question("Any flips?", "Thorgrim"))
+    assert said == ["Sorry, I stopped after the 0.5-second limit. Try asking something narrower."]
+
+
+def test_streaming_agent_results_and_errors(streaming):
+    """The answer is the stream's result event; errors come as an error result, or as an exit status with what it
+    said on stderr. A run without an answer is an empty one (the bridge then says it has none)."""
+    assert streaming([[0, INIT], [0, result("first")], [0, result("Final.")]])("q") == "Final."
+    with pytest.raises(AgentError, match="^API Error: overloaded$"):
+        streaming([[0, INIT], [0, result("API Error: overloaded", error=True)]])("q")
+    with pytest.raises(AgentError, match="^error_max_turns$"):
+        streaming([[0, {"type": "result", "subtype": "error_max_turns", "is_error": True}]])("q")
+    with pytest.raises(AgentError, match="^the agent exited with status 3: not logged in$"):
+        streaming([[0, INIT], [0, {"stderr": "starting"}], [0, {"stderr": "not logged in"}], [0, 3]])("q")
+    assert streaming([[0, INIT], [0, result("")]])("q") == ""
+    assert streaming([[0, INIT]])("q") == ""
+
+
+def test_other_agents_only_have_the_time_limit(addons):
+    """An agent of the player's own (--agent) prints only its answer, so silence says nothing about it: it has the
+    whole --max-time, and the game is told to expect no news for that long."""
+    agent = CommandAgent([sys.executable, "-c", "import time; time.sleep(1); print('Done.')"], addons, silence=0.2,
+                         max_time=20)
+    assert not agent.streams and agent.quiet == 20
+    assert agent("q") == "Done."
+
+
+def test_the_game_hears_how_its_question_comes_along(addons, caplog):
+    """An ack as soon as a question arrives, then the steps as the agent says (within the slot budget), then the
+    answer: each about the post the question came in. The log keeps its wording for memory.read_log, with a line
+    on how long each answer took and the tools it used."""
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    now, notes, said = [0.0], [], []
+
+    def agent(prompt, model, asker, effort, progress):
+        if "stuck" in prompt:
+            raise AgentSilent("no response from the model for 2 minutes")
+        for step, tool, seconds in (("checking auction prices", "get_auction_prices", 50),
+                                    (bridge.THINKING, None, 200)):
+            progress.saw(step, tool)
+            for _ in range(seconds):
+                now[0] += 1
+                progress.saw()
+        return "Buy low, sell high."
+
+    def publish(text, style, sender, reply, question=None, **_):
+        said.append((text, question))
+
+    b = Bridge(addons, agent, publish=publish, history=bridge.History(None), clock=lambda: now[0],
+               notify=lambda status, text, question, quiet: notes.append((status, text, question, quiet)))
+    b.accept(stream.Post(5, 7, end=0, value={"question": "any flips?", "player": "Thorgrim"}))
+    assert notes == [("ack", "", (5, 7), bridge.SILENCE)]
+    b.answer(b.questions.get_nowait())
+    assert [(status, text) for status, text, question, _ in notes[1:] if question == (5, 7)] == [
+        ("progress", "checking auction prices"), ("progress", bridge.THINKING), ("progress", bridge.THINKING)]
+    assert said == [("Buy low, sell high.", (5, 7))]
+    b.accept(stream.Post(5, 8, end=0, value={"question": "stuck?", "player": "Thorgrim"}))
+    b.answer(b.questions.get_nowait())
+    assert said[-1] == ("Sorry, I stopped: no response from the model for 2 minutes.", (5, 8))
+
+    assert "took 4:10; tools used: get_auction_prices" in caplog.messages
+    assert "took 0:00; tools used: none" in caplog.messages
+    logged = "\n".join(f"2026-11-11 13:27:01,360 {r.levelname} {r.getMessage()}" for r in caplog.records)
+    assert [(e["question"], e["answer"]) for e in memory.read_log(logged, time.time())] == [
+        ("any flips?", "Buy low, sell high.")]
+
+    # A garbled post and a full queue are answered by post too; resets aren't acknowledged (nothing comes back).
+    notes.clear()
+    b.accept(stream.Post(5, 9, end=0, error="post 9 arrived damaged"))
+    b.accept(stream.Post(5, 10, end=0, value={"reset": True, "player": "Thorgrim"}))
+    assert said[-1] == ("Your question arrived garbled. Please ask again.", (5, 9)) and notes == []
+    for i in range(MAX_WAITING):
+        b.accept(stream.Post(5, 11 + i, end=0, value={"question": f"q{i}", "player": "Thorgrim"}))
+    assert said[-1] == ("I'm still busy with your earlier questions. Please ask again in a minute.", (5, 15))
+    assert [question for _, _, question, _ in notes] == [(5, 11), (5, 12), (5, 13), (5, 14)]
+
+
+def test_bridge_time_limit_options(addons, monkeypatch, capsys):
+    for args in (["--timeout", "0"], ["--max-time", "-5"]):
+        monkeypatch.setattr(sys, "argv", ["wow-mcp-bridge", "--addons-dir", str(addons), *args])
+        with pytest.raises(SystemExit):
+            bridge.main()
+        assert "--timeout and --max-time must be more than 0" in capsys.readouterr().err
 
 
 def test_chat_lines():
