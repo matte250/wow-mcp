@@ -3,8 +3,8 @@
 -- The game only lists recipes while a profession window is open, so each profession is cached
 -- per character whenever its window opens or changes. Recipes learned since are caught as they're
 -- learned and kept per character until a profession window lists them. Vendors are cached for all
--- characters when their window opens, with the player's position then: newest first, at most
--- MAX_VENDORS. All of it lives in WowMCPDB.knowledge.
+-- characters when their window opens, with the player's position then and what each item binds to:
+-- newest first, at most MAX_VENDORS. All of it lives in WowMCPDB.knowledge.
 
 local _, ns = ...
 
@@ -265,6 +265,13 @@ local function OtherCost(index)
 	return #parts > 0 and table.concat(parts, ", ") or nil
 end
 
+-- What an item binds to (Enum.ItemBind), if the client has its data; asking makes it load for the rescan.
+local function BindType(itemID)
+	if not itemID then return nil end
+	local ok, name, _, _, _, _, _, _, _, _, _, _, _, _, bind = pcall(C_Item.GetItemInfo, itemID)
+	if ok and name and type(bind) == "number" then return bind end
+end
+
 local function MerchantItems()
 	local items = {}
 	for i = 1, GetMerchantNumItems() do
@@ -275,6 +282,7 @@ local function MerchantItems()
 			if info.numAvailable >= 0 then item.stock = info.numAvailable end -- -1: unlimited
 			if not info.isPurchasable then item.locked = true end
 			if info.hasExtendedCost and GetMerchantItemCostInfo(i) > 0 then item.cost = OtherCost(i) end
+			item.bind = BindType(item.id)
 			items[#items + 1] = item
 		end
 	end

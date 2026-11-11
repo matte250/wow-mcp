@@ -86,6 +86,8 @@ answer depends on it, instead of asking.
 questions) and say they're marked on the map. Use the other tools that act in game too when \
 that's what they ask for.
 - Look things up on the web (e.g. Wowhead) when you're not sure, for their game version.
+- Never suggest buying something to resell, or listing it on the auction house, before \
+get_item_details (binds, can_be_auctioned) confirms it can be auctioned in their game.
 - Don't call show_message: your reply is shown in game for you.
 - Your earlier exchanges with them may come before the question, as context. Use them only when \
 the question follows up on them (e.g. "and the next one?"); otherwise ignore them. The game may \

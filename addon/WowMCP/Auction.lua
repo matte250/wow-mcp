@@ -829,7 +829,7 @@ local function Place(places, where)
 	return places[key]
 end
 
--- A price for get_auction_prices.
+-- A price for get_auction_prices. scanned: some full scan saw it listed (last only has a price that had a buyout).
 local function Answer(realm, itemID, places, why)
 	local e = Known(realm, itemID)
 	if not e then return nil end
@@ -838,7 +838,7 @@ local function Answer(realm, itemID, places, why)
 	return {
 		item = itemID, name = e.name or ItemName(itemID), price = e.price, listed = e.listed, n = e.n,
 		tiers = tiers[1] and tiers or nil, bidOnly = e.bidOnly, commodity = e.commodity, at = e.at, src = e.src,
-		place = Place(places, e), last = e.last, why = why,
+		place = Place(places, e), last = e.last, why = why, scanned = realm.scan[itemID] and true or nil,
 	}
 end
 
@@ -855,7 +855,9 @@ local function Section()
 	end
 	local latest, scan = CurrentScan(realm), nil
 	if latest then
-		scan = { at = latest.at, items = latest.items, listings = latest.listings, place = Place(places, latest) }
+		-- first and scans: how far back the full scans go, for items none of them saw listed.
+		scan = { at = latest.at, items = latest.items, listings = latest.listings, place = Place(places, latest),
+			first = realm.scans[1] and realm.scans[1].at, scans = realm.current }
 	end
 	local placeList = {}
 	for i, p in ipairs(places) do placeList[i] = p end

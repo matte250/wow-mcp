@@ -15,10 +15,12 @@ from wow_mcp.tools import items
 
 
 def details(item_id, status="ok", name=None, quality=None, item_level=None, required_level=None, slot=None,
-            type=None, subtype=None, armor=None, stats=None, tooltip=(), shown_in_red=(), error=None):
+            type=None, subtype=None, armor=None, stats=None, tooltip=(), shown_in_red=(), binds=None,
+            can_be_auctioned=None, held_bound=None, error=None):
     return {"item_id": item_id, "status": status, "name": name, "quality": quality, "item_level": item_level,
             "required_level": required_level, "slot": slot, "type": type, "subtype": subtype, "armor": armor,
-            "stats": stats, "tooltip": list(tooltip), "shown_in_red": list(shown_in_red), "error": error}
+            "stats": stats, "tooltip": list(tooltip), "shown_in_red": list(shown_in_red), "binds": binds,
+            "can_be_auctioned": can_be_auctioned, "held_bound": held_bound, "error": error}
 
 
 GLOVES = details(
@@ -26,19 +28,19 @@ GLOVES = details(
     type="Armor", subtype="Leather", armor=49, stats={"agility": 6, "attack power": 10, "strength": 4},
     tooltip=["Toughened Leather Gloves", "Binds when equipped", "Hands\tLeather", "49 Armor", "+4 Strength",
              "+6 Agility", "Requires Level 25", "Equip: +10 Attack Power.", "Sell Price: 5s 12c"],
-    shown_in_red=["Requires Level 25"],
+    shown_in_red=["Requires Level 25"], binds="on equip", can_be_auctioned=True,
 )
 TUNIC = details(
     4243, name="Fine Leather Tunic", quality="uncommon", item_level=17, required_level=12, slot="chest",
     type="Armor", subtype="Leather", armor=59, stats={"stamina": 3},
     tooltip=["Fine Leather Tunic", "Chest\tLeather", "59 Armor", "+3 Stamina", "Requires Level 12",
-             "Sell Price: 2s 20c"],
+             "Sell Price: 2s 20c"], binds="no", can_be_auctioned=True,
 )
 AXE = details(
     12282, name="Worn Battleaxe", quality="common", item_level=2, slot="two-hand", type="Weapon",
     subtype="Two-Handed Axes", stats={"damage per second": 3.1},
     tooltip=["Worn Battleaxe", "Two-Hand\tTwo-Handed Axes", "7 - 11 Damage\tSpeed 2.90", "(3.1 damage per second)",
-             "Sell Price: 9c"],
+             "Sell Price: 9c"], binds="no", can_be_auctioned=True,
 )
 
 # The player is in a fight when the next update arrives: it's applied when the fight ends, 20 s later.
@@ -176,7 +178,41 @@ def test_addon_lookups(run_client):
         -- Later updates carry the same lookup along; that doesn't start it over.
         WowMCP_Receive({ seq = 7, itemLookup = { id = 6, items = { 999999 } } })
         assert(Ask().items[1].status == "unknown")
+
+        -- The bind type (Enum.ItemBind), and how many the player has, how many of them soulbound.
+        Lookup(8, { 2589, 7613, 3164 })
+        local cloth, pattern, heart = table.unpack(Ask().items)
+        assert(cloth.bind == 0 and cloth.held == 7 and cloth.heldBound == 0)
+        assert(pattern.bind == 1 and pattern.held == nil and pattern.heldBound == nil)
+        assert(heart.bind == 0 and heart.held == 1 and heart.heldBound == 0)
     """)
+
+
+def test_what_items_bind_to(live_game):
+    # The player wore their Raider's Legguards, which bind when equipped, and one of two pairs of the gloves (the
+    # other is in the bank, as last seen). The pattern in their bags bound when they bought it.
+    setup = """
+        client.items[9789].bind = "Binds when equipped"
+        client.bags[0].slots[4].bound = true
+        client.bags[1].slots[1] = { id = 4253, bound = true }
+        client.bags[1].slots[2] = { id = 7613 }
+        WowMCPDB = { bank = { [UnitName("player") .. "-" .. GetRealmName()] = { time = 1700000000, bags = {
+            { bag = 6, size = 24, items = { { slot = 1, id = 4253, quality = 2 } } } } } } }
+    """
+    with live_game(setup):
+        result = get_item_details([7613, 7114, 7560, 5085, 5350, 9789, 4253, 2589])
+    found = {i.item_id: (i.binds, i.can_be_auctioned, i.held_bound) for i in result.items}
+    assert found == {
+        7613: ("on pickup", False, True),
+        7114: ("on pickup", False, None),
+        7560: ("on pickup", False, None),
+        5085: ("quest item", False, None),
+        5350: ("no", False, None),  # conjured
+        9789: ("on equip", False, True),
+        4253: ("on equip", True, False),
+        2589: ("no", True, False),
+    }
+    assert "Binds when picked up" in result.items[0].tooltip and "Conjured Item" in result.items[4].tooltip
 
 
 @pytest.fixture
@@ -265,6 +301,44 @@ def test_reply_quirks(fake_game):
     assert (failed.status, failed.error) == ("error", "secret value")
     assert (new.status, new.slot, new.type, new.stats) == ("ok", "newthing", None, {"frost resistance": 5})
     assert (missing.status, missing.error) == ("error", "The game didn't report this item.")
+
+
+def test_binds_from_the_tooltip(fake_game):
+    """An addon loaded before it sent the bind type: the tooltip's binding line says. Lines that keep an item off
+    the auction house whatever it binds to; the player's own copies bound already."""
+    def item(n, bind=None, *lines, **more):
+        return {"id": n, "name": f"Item {n}", "lines": [{"left": text} for text in (f"Item {n}", *lines)],
+                **({"bind": bind} if bind is not None else {}), **more}
+
+    fake_game["answer"] = lambda lookup: {"lookup": lookup["id"], "items": [
+        item(1, None, "Binds when picked up"),
+        item(2, None, "Quest Item"),
+        item(3, None, "|cffffffffBinds when equipped|r"),
+        item(4, None, "Soulbound", "Binds when equipped"),
+        item(5, None, "Warbound"),
+        item(6, 0, "Conjured Item"),
+        item(7, 8),
+        item(8, 3, "Binds when used", held=4, heldBound=4),
+        item(9, 2, held=3, heldBound=1),
+        item(10, 6),  # Enum.ItemBind's unused values
+        item(11),
+        {"id": 12, "status": "loading", "held": 2},
+    ]}
+    result = get_item_details(list(range(1, 13)))
+    assert [(i.binds, i.can_be_auctioned, i.held_bound) for i in result.items] == [
+        ("on pickup", False, None),
+        ("quest item", False, None),
+        ("on equip", True, None),
+        ("on equip", False, None),
+        ("warband", False, None),
+        ("no", False, None),
+        ("warband", False, None),
+        ("on use", False, True),
+        ("on equip", True, False),
+        (None, None, None),
+        (None, None, None),
+        (None, None, False),
+    ]
 
 
 def test_item_ids_are_checked():

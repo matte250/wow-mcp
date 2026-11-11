@@ -9,7 +9,7 @@ ask again a moment later: the IDs are already in the game, so that costs no slot
 
 import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Annotated, Any, Literal, get_args
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -51,6 +51,26 @@ EQUIP_SLOTS = {
 # and hyperlinks are formatting.
 ESCAPE = re.compile(r"\|(\||n|c[0-9a-fA-F]{8}|cn[^:|]*:|r|T[^|]*\|t|A[^|]*\|a|H[^|]*\|h|h)")
 
+Binds = Literal["no", "on pickup", "on equip", "on use", "quest item", "to account", "warband",
+                "warband until equipped"]
+# Enum.ItemBind, GetItemInfo's 14th value (5 and 6 are unused).
+BIND_TYPES: dict[int, Binds] = {0: "no", 1: "on pickup", 2: "on equip", 3: "on use", 4: "quest item",
+                                7: "to account", 8: "warband", 9: "warband until equipped"}
+# The same as tooltip lines (enUS), for an addon loaded before it sent the bind type.
+BIND_LINES: dict[str, Binds] = {
+    "Binds when picked up": "on pickup", "Binds when equipped": "on equip", "Binds when used": "on use",
+    "Quest Item": "quest item", "Binds to account": "to account", "Account Bound": "to account",
+    "Binds to Blizzard account": "warband", "Blizzard Account Bound": "warband", "Binds to Warband": "warband",
+    "Warbound": "warband", "Warbound until equipped": "warband until equipped",
+}
+TRADABLE: set[Binds] = {"no", "on equip", "on use"}
+# Lines that keep an item off the auction house whatever it binds to.
+UNSELLABLE_LINES = {"Soulbound", "Conjured Item"}
+BINDS = (
+    "What the item binds to in this game (it can differ from other WoW versions): no, on pickup (soulbound as soon "
+    "as it's looted or bought), on equip, on use, quest item, to account, warband, warband until equipped."
+)
+
 
 class ItemDetails(BaseModel):
     item_id: int
@@ -77,6 +97,17 @@ class ItemDetails(BaseModel):
     shown_in_red: list[str] = Field(
         description="Tooltip lines the game shows in red: what the player doesn't meet, e.g. a level, class, "
         "skill, or an armor or weapon type they can't use."
+    )
+    binds: Binds | None = Field(description=BINDS + " Null: not known.")
+    can_be_auctioned: bool | None = Field(
+        description="Whether it can go up for auction: false if it binds on pickup, is a quest item, binds to the "
+        "account or warband, or is conjured. If it binds on equip or use: true, unless the player's own copies are "
+        "all bound already (held_bound; new copies could still be sold). Null: not known."
+    )
+    held_bound: bool | None = Field(
+        description="The player has this item (bags, or bank as last seen): true if all their copies are soulbound "
+        "already (e.g. one they've worn), so theirs can't be auctioned or traded; false if at least one isn't. Null: "
+        "they have none."
     )
     error: str | None
 
@@ -108,6 +139,20 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def binding(bind_type: Any, tooltip: Iterable[str] = (),
+            held_bound: bool | None = None) -> tuple[Binds | None, bool | None]:
+    """What an item binds to, from the game's bind type (Enum.ItemBind) or else its tooltip lines, and whether it can
+    be auctioned. held_bound: the player's own copies are all soulbound. None where it's not known."""
+    lines = list(tooltip)
+    binds = BIND_TYPES.get(bind_type) if isinstance(bind_type, (int, float)) else None
+    binds = binds or next((BIND_LINES[line] for line in lines if line in BIND_LINES), None)
+    if UNSELLABLE_LINES.intersection(lines):
+        return binds, False
+    if binds is None:
+        return None, None
+    return binds, binds in TRADABLE and not held_bound
+
+
 def _details(item_id: int, raw: Any) -> ItemDetails:
     if not isinstance(raw, dict):
         raw = {"status": "error", "error": "The game didn't report this item."}
@@ -117,6 +162,10 @@ def _details(item_id: int, raw: Any) -> ItemDetails:
             tooltip.append(text)
             if line.get("red"):
                 red.append(text)
+    held, held_bound = raw.get("held"), None
+    if isinstance(held, int) and held > 0:
+        held_bound = (raw.get("heldBound") or 0) >= held
+    binds, auctionable = binding(raw.get("bind"), tooltip, held_bound)
     status = raw.get("status", "ok")
     slot = _text(raw.get("slot"))
     return ItemDetails(
@@ -133,6 +182,9 @@ def _details(item_id: int, raw: Any) -> ItemDetails:
         stats=stats(raw.get("stats")),
         tooltip=tooltip,
         shown_in_red=red,
+        binds=binds,
+        can_be_auctioned=auctionable,
+        held_bound=held_bound,
         error=raw.get("error") or (None if status in STATUSES else f"unexpected status {status!r}"),
     )
 
@@ -211,8 +263,9 @@ async def get_item_details(
     ],
 ) -> ItemDetailsList:
     """Get items' details from the game itself, for any item ID, also ones the player doesn't have: the tooltip
-    lines as the game shows them, stats, armor, item level, quality, slot, required level, and which lines the
-    game shows in red (requirements the player doesn't meet). Use it for gear comparisons and "what does this
-    item do" instead of website data, which can be wrong for this game version. An ID gives the plain item: for
-    a random-suffix item ("of the Bear") the player has, use the stats from get_inventory."""
+    lines as the game shows them, stats, armor, item level, quality, slot, required level, which lines the
+    game shows in red (requirements the player doesn't meet), what it binds to and whether it can be auctioned.
+    Use it for gear comparisons, "what does this item do" and "can I sell or trade this" instead of website data,
+    which can be wrong for this game version. An ID gives the plain item: for a random-suffix item ("of the
+    Bear") the player has, use the stats from get_inventory."""
     return await look_up(item_ids)

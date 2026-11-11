@@ -379,8 +379,8 @@ local function Lines(data)
 	return lines
 end
 
--- { id, status, name, quality, ilvl, minLevel, type, subtype, slot, stats, armor, lines }.
--- status is left out when the item's there, else "loading" or "unknown".
+-- { id, status, name, quality, ilvl, minLevel, type, subtype, slot, stats, armor, bind, lines }; bind is the
+-- Enum.ItemBind value. status is left out when the item's there, else "loading" or "unknown".
 local function Lookup(itemID)
 	local item = { id = itemID }
 	-- Class names and equip slot come from the client's static data, loaded or not.
@@ -388,7 +388,7 @@ local function Lookup(itemID)
 	item.type, item.subtype = itemType, subType
 	if equipLoc ~= "" then item.slot = equipLoc end
 
-	local name, link, quality, level, minLevel, _, _, _, _, _, _, class = C_Item.GetItemInfo(itemID)
+	local name, link, quality, level, minLevel, _, _, _, _, _, _, class, _, bind = C_Item.GetItemInfo(itemID)
 	local lines = name and Lines(C_TooltipInfo.GetItemByID(itemID))
 	for _, line in ipairs(lines or {}) do
 		if line.left == RETRIEVING_ITEM_INFO then lines = nil break end
@@ -403,7 +403,7 @@ local function Lookup(itemID)
 		return item
 	end
 
-	item.name, item.quality, item.lines = name, quality, lines
+	item.name, item.quality, item.lines, item.bind = name, quality, lines, bind
 	if minLevel and minLevel > 1 then item.minLevel = minLevel end
 	if class == WEAPON or class == ARMOR then item.ilvl = level end
 	item.stats, item.armor = TakeArmor(Stats(link or ("item:" .. itemID)))
@@ -413,12 +413,39 @@ local function Lookup(itemID)
 	return item
 end
 
+-- { [itemID] = { n, bound } }: how many the player has in their bags and bank (as last seen), and how many of
+-- those are soulbound, which the auction house won't take even if the item only binds when equipped.
+local function Held()
+	local held = {}
+	local function Add(itemID, count, bound)
+		local h = held[itemID] or { n = 0, bound = 0 }
+		held[itemID] = h
+		h.n = h.n + (count or 1)
+		if bound then h.bound = h.bound + (count or 1) end
+	end
+	for bag = Enum.BagIndex.Backpack, Enum.BagIndex.ReagentBag do
+		for slot = 1, C_Container.GetContainerNumSlots(bag) do
+			local info = C_Container.GetContainerItemInfo(bag, slot)
+			if info and info.itemID then Add(info.itemID, info.stackCount, info.isBound) end
+		end
+	end
+	local bank = WowMCPDB.bank and WowMCPDB.bank[Character()]
+	for _, container in ipairs(bank and bank.bags or {}) do
+		for _, item in ipairs(container.items or {}) do Add(item.id, item.count, item.bound) end
+	end
+	return held
+end
+
 local function ItemDetails()
 	if not lookup then return { items = {} } end
+	local read, held = pcall(Held)
+	if not read then held = {} end
 	local items = {}
 	for _, itemID in ipairs(lookup.items) do
 		local ok, item = pcall(Lookup, itemID)
-		items[#items + 1] = ok and item or { id = itemID, status = "error", error = tostring(item) }
+		item = ok and item or { id = itemID, status = "error", error = tostring(item) }
+		if held[itemID] then item.held, item.heldBound = held[itemID].n, held[itemID].bound end
+		items[#items + 1] = item
 	end
 	return { lookup = lookup.id, items = items }
 end
