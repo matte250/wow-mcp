@@ -44,7 +44,8 @@ def _add(message: dict, question: tuple[int, int] | None) -> int:
 
 def publish_message(text: str, style: str = "chat", sender: str = "Claude", reply: bool = False,
                     default_model: str | None = None, default_effort: str | None = None,
-                    question: tuple[int, int] | None = None) -> int:
+                    question: tuple[int, int] | None = None, took: float | None = None,
+                    tokens: int | None = None) -> int:
     """Show text in the player's game and return the message's id (other features use this too).
 
     style: "chat" (printed with the sender's name), "center" (big text in the middle of the
@@ -52,8 +53,9 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude", repl
     shows in the game's AI chat tab with their question. default_model (with reply): the model
     the bridge answers with when the player hasn't picked one, "" if it doesn't know, for the
     game's model picker; default_effort likewise how hard it thinks. question (with reply): the
-    post the question came in, (session, id), so the game knows which one is answered. Messages
-    sent while the game is closed show at the next login.
+    post the question came in, (session, id), so the game knows which one is answered. took and
+    tokens (with reply): the seconds the answer took and the tokens the agent wrote for it, for a
+    line under it in the AI tab. Messages sent while the game is closed show at the next login.
     """
     if style not in STYLES:
         raise ValueError(f"style must be one of {', '.join(STYLES)}, not {style!r}")
@@ -69,24 +71,32 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude", repl
             message["defaultModel"] = default_model
         if default_effort is not None:
             message["defaultEffort"] = default_effort
+        if took is not None:
+            message["took"] = round(took)
+        if tokens is not None:
+            message["tokens"] = int(tokens)
     return _add(message, question if reply else None)
 
 
 def publish_status(status: str, text: str = "", question: tuple[int, int] | None = None,
-                   quiet: float | None = None) -> int:
+                   quiet: float | None = None, tokens: int | None = None, rate: float | None = None) -> int:
     """Tell the game how a question the player asked in game (/ai, the bridge) is coming along, for the
     AI chat tab's status line; it's never shown as a message. Returns its id.
 
     status: "ack" (the question arrived) or "progress" (text: the step the agent is on, e.g. "checking
     auction prices"; "" for none). question: the post it came in, (session, id). quiet: the most
     seconds the bridge goes without telling the game anything while it works on it; longer, and the
-    game says it seems to have stopped.
+    game says it seems to have stopped. tokens: how many the agent has written so far, if they're
+    counted; rate: how many a second lately, which the game counts on with until the next note.
     """
     if status not in STATUSES:
         raise ValueError(f"status must be one of {', '.join(STATUSES)}, not {status!r}")
     message = {"text": " ".join(text.split())[:MAX_STATUS], "status": status, "at": int(time.time())}
     if quiet is not None:
         message["quiet"] = quiet
+    if tokens is not None:
+        message["tokens"] = int(tokens)
+        message["rate"] = round(max(0.0, float(rate or 0)), 1)
     return _add(message, question)
 
 

@@ -136,10 +136,11 @@ end
 
 -- m.reply marks the bridge's answers to the player's questions: they belong to the AI conversation,
 -- which has its own chat tab (Chat.lua). They also say which model the bridge uses by default, and
--- how hard it thinks, and which question they answer (the post it came in).
+-- how hard it thinks, which question they answer (the post it came in), how long the answer took and
+-- how many tokens the AI wrote for it.
 local function Show(m, text, style)
 	if m.reply == true and ns.AIChat then
-		ns.AIChat.Answer(text, style, m.from, m.defaultModel, m.defaultEffort, m.session, m.post)
+		ns.AIChat.Answer(text, style, m.from, m.defaultModel, m.defaultEffort, m.session, m.post, m.took, m.tokens)
 	else
 		ns.ShowMessage(text, style, m.from)
 	end
