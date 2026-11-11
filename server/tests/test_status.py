@@ -166,3 +166,17 @@ def test_game_details_in_advice():
     status._check_game({"build": "b", "slotsLeft": 250, "slotProblem": "MISSING", "seq": 9}, "b", 2, found)
     assert found.restart == "the game can't find the live-update slot addons"
     assert found.reload == "the game has seen newer updates than this server sent, so it ignores new ones"
+
+
+def test_probe_runs(run_client):
+    # The research probe (/mcp probe) runs to the end without the server's helper, and saves what it saw.
+    run_client(r"""
+        client.LoadAddon()
+        client.Wait()
+        SlashCmdList.WOWMCP("probe")
+        client.Wait(8)  -- ticks of 0.5 s: the probe takes about 3 s
+        local chat = table.concat(client.chat, "\n")
+        assert(chat:find("Probe done.", 1, true) and not chat:find("Probe failed", 1, true), chat)
+        assert(#WowMCPDB.probe.sounds == 8 and #WowMCPDB.probe.fonts == 8 and #WowMCPDB.probe.textures == 8)
+        assert(WowMCPDB.probe.sounds[2][1] == "lower case")
+    """)
