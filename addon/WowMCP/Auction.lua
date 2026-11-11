@@ -18,6 +18,9 @@
 -- The upgrade finder (find_upgrades) searches all of it, plus quest rewards and vendors, for gear that beats what
 -- the player wears.
 --
+-- The player's own auctions (get_my_auctions) are kept too: what they have listed, as the auction house last listed
+-- it, and what sold or expired since, from the game's notices and the mail.
+--
 -- While the window is open, a status panel under it (at the end) shows what's going on: the full scan, the searches
 -- and how many are left, and why they wait.
 --
@@ -68,6 +71,7 @@ local scanAdded = 0 -- items new to the scan table, for the upgrade finder walki
 local lookup  -- what get_auction_prices asks for: { id, items }
 local problem
 local Notify, PanelCommand -- the status panel (at the end): Notify() whenever what it shows may have changed
+local Mine = {} -- the player's own auctions (after the lookups): Due, Ask
 
 -- WowMCPDB.auction[realm] = {
 --   items = { [item ID] = { price (cheapest, per item, copper), listed, n (auctions), tiers = { { price, count } },
@@ -615,8 +619,10 @@ local function Left()
 	return left
 end
 
+-- mine: the player's own auctions, asked for once a visit (due), and again after they post or cancel one (at: when
+-- asked, until the answer).
 local function Start()
-	visit = { priority = Priority(), searched = {}, notBefore = GetTime() + START_DELAY, count = 0 }
+	visit = { priority = Priority(), searched = {}, notBefore = GetTime() + START_DELAY, count = 0, mine = { due = true } }
 end
 
 -- /mcp prices at the auction house: the whole priority list again, recent prices too.
@@ -710,6 +716,7 @@ local function Step()
 	Prune(messages, now)
 	if math.max(#sent, #messages) >= MAX_PER_MINUTE then return end
 	if ScanAllowed() then return Replicate() end
+	if Mine.Due() then return Mine.Ask() end -- one message: while the full scan comes, or before the searches
 	if Scanning() then return end
 	local wanted = NextSearch()
 	if wanted then return Send(wanted.item) end
@@ -956,6 +963,455 @@ events:SetScript("OnEvent", function(_, event, arg1)
 		current = nil
 	end
 end)
+
+---------------------------------------------------------------------------
+-- The player's own auctions (get_my_auctions)
+---------------------------------------------------------------------------
+
+-- What the player has listed, as the auction house last listed it, and what became of it since: per character in
+-- WowMCPDB.myAuctions, for the AI (section "myAuctions" of request kind KNOWLEDGE, with the game's prices of those
+-- items and the auction house mail as last seen).
+-- The auction house only lists them when asked (C_AuctionHouse.QueryOwnedAuctions, answered by OWNED_AUCTIONS_UPDATED).
+-- Blizzard's Auctions tab asks whenever its list shows, and every answer is read, whoever asked. The addon asks too,
+-- once a visit and again after the player posts or cancels one (AUCTION_HOUSE_AUCTION_CREATED, AUCTION_CANCELED), the
+-- way it searches: only on the Browse view, when the game's throttle is ready, counted in the same pace, with the sorts
+-- the window uses for that list. On the Auctions tab an answer would clear what the player selected there and take them
+-- back to all their auctions (AuctionHouseAuctionsFrameMixin:OnEvent); that list only listens while it shows, and the
+-- rest of the window only resets its price columns' widths.
+-- Sales and expiries are noticed anywhere: the game's notice (AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION, which names
+-- the auction) and the same as a system chat line, if the server sends one too (ERR_AUCTION_SOLD_S); one sale that
+-- comes both ways counts once. Auction house mail the mailbox showed (Inventory.lua's cache) settles what's still open.
+-- In its own block: Auction.lua is near Lua's limit of 200 locals.
+do
+	local RECENT = 7 * 86400 -- ended auctions and notices are kept this long
+	local MAX_KEPT = 300
+	local MAX_NOTICES = 30
+	local MAX_SENT = 150     -- auctions in a reply, the listed ones first
+	local PAIR_WITHIN = 10   -- seconds: the notice and the chat line for one sale come this close
+	local AH_MAIL_DAYS = 30  -- auction house mail lasts this long, so its expiry says when it came (assumed)
+	local SLACK = 3600       -- seconds: how much before the list last had an auction its mail may seem to have come
+	local SOLD = Enum.AuctionStatus and Enum.AuctionStatus.Sold or 1
+	local NOTICE = Enum.AuctionHouseNotification
+		or { AuctionWon = 2, AuctionOutbid = 3, AuctionSold = 4, AuctionExpired = 5 }
+	local NOTICES = { [NOTICE.AuctionSold] = "sold", [NOTICE.AuctionExpired] = "expired",
+		[NOTICE.AuctionOutbid] = "outbid", [NOTICE.AuctionWon] = "won" } -- outbid, won: the player's own bids
+	-- Enum.AuctionHouseTimeLeftBand in seconds, should C_AuctionHouse.GetTimeLeftBandInfo not say: retail's.
+	local BANDS = { [0] = { 0, 1800 }, [1] = { 1800, 7200 }, [2] = { 7200, 43200 }, [3] = { 43200, 172800 } }
+	local OWNED_SORTS = { -- the window's defaults for that list
+		{ sortOrder = SORT.Name or 1, reverseSort = false }, { sortOrder = SORT.Price or 0, reverseSort = false },
+	}
+	local MAIL_STATUS = { sold = "sold", pending = "sold", expired = "expired", cancelled = "cancelled" }
+	local OPEN = { active = true, gone = true } -- what a notice or a mail can settle
+
+	-- The system chat lines for the same notices, as patterns capturing the item.
+	local LINES = {}
+	for kind, template in pairs({
+		sold = ERR_AUCTION_SOLD_S or "A buyer has been found for your auction of %s.",
+		expired = ERR_AUCTION_EXPIRED_S or "Your auction of %s has expired.",
+		outbid = ERR_AUCTION_OUTBID_S or "You have been outbid on %s.",
+		won = ERR_AUCTION_WON_S or "You won an auction for %s",
+	}) do
+		LINES[kind] = "^" .. (template:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0"):gsub("%%s", "(.+)")) .. "$"
+	end
+
+	local trouble -- what last went wrong, for the reply
+
+	-- WowMCPDB.myAuctions["Name-Realm"] = {
+	--   seen = when the auction house last listed them all (unix time); nil: not since the addon was installed;
+	--   auctions = { { id (auctionID), item, name, count, price (buyout per item, copper; nil: only a bid), bid (the
+	--     highest bid, for all of them), status, first, seen, expires, soonest, band, left, due, at, how, mail, mailAt,
+	--     noticed } }:
+	--     status "active", "sold-pending" (sold, its money on its way), "sold", "expired", "cancelled", or "gone" (no
+	--     longer listed, and nothing said why); first, seen: when the list first and last had it; expires: when it ends,
+	--     from the time left the list gave, which left says: "seconds" (exact) or "band" (only band, an
+	--     Enum.AuctionHouseTimeLeftBand: soonest is its start and expires its end, narrowed by each look); due: when a
+	--     sold one's money comes, if the list said; at, how: when it ended and what said so ("list", "notice", "chat",
+	--     "mail" or "cancel"); mail, mailAt: the mail that settled it, what it says and when it expires (a mail settles
+	--     one auction); noticed: a notice was about it;
+	--   notices = { { kind ("sold", "expired", "outbid" or "won"), name, at, src ("notice" or "chat"), id (the auction, if
+	--     the notice said), auction (the one it settled), was (that one's status before), paired (it came both ways) } },
+	--     newest last.
+	-- }
+	local function Key()
+		return tostring(UnitName("player")) .. "-" .. tostring(GetRealmName())
+	end
+
+	local function Saved()
+		WowMCPDB.myAuctions = WowMCPDB.myAuctions or {}
+		local saved = WowMCPDB.myAuctions[Key()] or { auctions = {}, notices = {} }
+		WowMCPDB.myAuctions[Key()] = saved
+		return saved
+	end
+
+	local function Find(saved, id)
+		for _, a in ipairs(saved.auctions) do
+			if a.id == id then return a end
+		end
+	end
+
+	local function Money(value)
+		return type(value) == "number" and value > 0 and value or nil
+	end
+
+	-- The name in an item link; nil without one.
+	local function LinkName(link)
+		local name = type(link) == "string" and link:match("|h%[(.-)%]|h")
+		return name ~= "" and name or nil
+	end
+
+	-- Whether an auction is of the item a notice or a mail names, with its random suffix ("of the Bear") or without.
+	local function Named(a, name)
+		return name ~= nil and (a.name == name or ItemName(a.item) == name)
+	end
+
+	-- When a listed auction ends, from the time left the list gave: exact in seconds, else its band.
+	local function Estimate(a, info, now)
+		if type(info.timeLeftSeconds) == "number" then
+			a.expires, a.soonest, a.left, a.band = now + info.timeLeftSeconds, nil, "seconds", nil
+			return
+		end
+		local band = info.timeLeft
+		if type(band) ~= "number" then return end
+		local ok, low, high = pcall(C_AuctionHouse.GetTimeLeftBandInfo, band)
+		if not (ok and type(low) == "number" and type(high) == "number") then
+			local b = BANDS[band] or BANDS[3]
+			low, high = b[1], b[2]
+		end
+		local soonest, latest = now + low, now + high
+		if a.left == "band" and a.soonest and a.expires then
+			-- It can't end before an earlier look's soonest, nor after its latest.
+			local s, l = math.max(soonest, a.soonest), math.min(latest, a.expires)
+			if s <= l then soonest, latest = s, l end
+		end
+		a.expires, a.soonest, a.left, a.band = latest, soonest, "band", band
+	end
+
+	-- The list as the auction house answered, whoever asked. What's no longer in it ended: a sold one's money has gone
+	-- out by mail; for the rest the list doesn't say how.
+	local function Read()
+		local saved, now = Saved(), time()
+		local listed, new = {}, {}
+		for i = 1, C_AuctionHouse.GetNumOwnedAuctions() do
+			local info = C_AuctionHouse.GetOwnedAuctionInfo(i)
+			local itemID = type(info) == "table" and type(info.itemKey) == "table" and info.itemKey.itemID
+			if type(itemID) == "number" and type(info.auctionID) == "number" then
+				local a = Find(saved, info.auctionID)
+				if not a then
+					a = { id = info.auctionID, item = itemID, first = now }
+					saved.auctions[#saved.auctions + 1] = a
+					new[#new + 1] = a
+				end
+				listed[a] = true
+				a.name = LinkName(info.itemLink) or ItemName(itemID) or a.name
+				a.count, a.price, a.bid, a.seen = info.quantity, Money(info.buyoutAmount), Money(info.bidAmount), now
+				if info.status == SOLD then
+					-- A notice may have said when it sold.
+					if a.status ~= "sold" and a.status ~= "sold-pending" then a.at, a.how = now, "list" end
+					a.status = "sold-pending"
+					if type(info.timeLeftSeconds) == "number" then a.due = now + info.timeLeftSeconds end
+				else
+					a.status, a.at, a.how = "active", nil, nil
+					Estimate(a, info, now)
+				end
+			end
+		end
+		if C_AuctionHouse.HasFullOwnedAuctionResults and not C_AuctionHouse.HasFullOwnedAuctionResults() then return end
+		saved.seen = now
+		for i = #saved.auctions, 1, -1 do
+			local a = saved.auctions[i]
+			if not listed[a] then
+				local twin
+				if a.status == "active" or a.status == "sold" then
+					-- A whole auction that sold may be listed under another ID once sold: the same auction.
+					for k, b in ipairs(new) do
+						if b.status == "sold-pending" and b.item == a.item and b.count == a.count and b.price == a.price then
+							twin = table.remove(new, k)
+							break
+						end
+					end
+				end
+				if twin then
+					twin.first, twin.noticed = a.first, a.noticed or twin.noticed
+					if a.status == "sold" then twin.at, twin.how = a.at, a.how end
+					table.remove(saved.auctions, i)
+				elseif a.status == "sold-pending" then
+					a.status = "sold" -- its money has gone out
+				elseif a.status == "active" then
+					a.status, a.at, a.how = "gone", now, "list"
+				end
+			end
+		end
+	end
+
+	-- The auction a notice is about: the one it names, else a listed one of the item it names, for a sale the cheapest
+	-- (buyers take those first), for an expiry the one ending first; else a sale the list already had as sold.
+	local function About(saved, kind, name, id)
+		local named = id and Find(saved, id)
+		if named then return named end
+		local bare = name and name:match("^(.-)%s*%(%d+%)$") -- "Linen Cloth (20)"
+		local best
+		for _, a in ipairs(saved.auctions) do
+			if a.status == "active" and (Named(a, name) or Named(a, bare)) then
+				if not best then
+					best = a
+				elseif kind == "sold" and (a.price or math.huge) < (best.price or math.huge) then
+					best = a
+				elseif kind == "expired" and (a.expires or math.huge) < (best.expires or math.huge) then
+					best = a
+				end
+			end
+		end
+		if best or kind ~= "sold" then return best end
+		for _, a in ipairs(saved.auctions) do
+			if a.status == "sold-pending" and not a.noticed and Named(a, name) then return a end
+		end
+	end
+
+	local function Settle(n, a)
+		n.auction, a.noticed = a.id, true
+		if OPEN[a.status] then
+			n.was = a.status
+			a.status, a.at, a.how = n.kind, n.at, n.src
+		end
+	end
+
+	local function Unsettle(saved, n)
+		local a = n.auction and Find(saved, n.auction)
+		if a then
+			a.noticed = nil
+			if n.was and a.status == n.kind and a.how == n.src then a.status, a.at, a.how = n.was, nil, nil end
+		end
+		n.auction, n.was = nil, nil
+	end
+
+	-- A notice (src "notice") or chat line ("chat") that an auction sold or expired, or about the player's bids. The
+	-- same one the other way within PAIR_WITHIN seconds is the same news.
+	local function Notice(kind, name, src, id)
+		local saved, now = Saved(), time()
+		name = LinkName(name) or name
+		local notices = saved.notices
+		for i = #notices, 1, -1 do
+			local n = notices[i]
+			if now - n.at > PAIR_WITHIN then break end
+			if n.kind == kind and n.name == name and n.src ~= src and not n.paired then
+				n.paired = true
+				-- Only the game's notice names the auction: a chat line that came first may have picked another.
+				local named = id and n.auction ~= id and Find(saved, id)
+				if named then
+					Unsettle(saved, n)
+					n.id, n.src = id, src
+					Settle(n, named)
+				end
+				return
+			end
+		end
+		local n = { kind = kind, name = name, at = now, src = src, id = id }
+		notices[#notices + 1] = n
+		while #notices > MAX_NOTICES do table.remove(notices, 1) end
+		if kind == "sold" or kind == "expired" then
+			local a = About(saved, kind, name, id)
+			if a then Settle(n, a) end
+		end
+	end
+
+	local function ChatLine(text)
+		if type(text) ~= "string" or (issecretvalue and issecretvalue(text)) then return end
+		for kind, pattern in pairs(LINES) do
+			local name = text:match(pattern)
+			if name then return Notice(kind, name, "chat") end
+		end
+	end
+
+	local function Ended(id, status, how)
+		local a = Find(Saved(), id)
+		if a and OPEN[a.status] then a.status, a.at, a.how = status, time(), how end
+	end
+
+	-- Auction house mail the mailbox showed (Inventory.lua's cache) settles what's still open: a sale's invoice names the
+	-- item and how many, an expired or cancelled auction's mail has it attached. Only mail that came after the list last
+	-- had the auction counts (mail says when it expires, AH_MAIL_DAYS after it came), and one mail settles one auction:
+	-- a sale at the auction's price first. Mail has no ID, so it's known again by what it says and when it expires
+	-- (each read of the inbox may put that a second off); mail alike that came together settles as many auctions.
+	local function Reconcile(saved)
+		local inbox = WowMCPDB.mail and WowMCPDB.mail[Key()]
+		if not (inbox and type(inbox.mails) == "table") then return end
+		local claimed = {}
+		for _, m in ipairs(inbox.mails) do
+			local status, expires, sale = MAIL_STATUS[m.ah], tonumber(m.expires), m.sale
+			local attached = type(m.items) == "table" and m.items[1]
+			local name = sale and sale.item or (attached and attached.name)
+			local count = sale and (sale.count or 1) or (attached and (attached.count or 1))
+			local says = table.concat({ tostring(m.ah), tostring(name or (attached and attached.id)), tostring(count),
+				tostring(sale and sale.price) }, "|")
+			local settled
+			for _, a in ipairs(saved.auctions) do
+				if not settled and a.mail == says and not claimed[a] and math.abs((a.mailAt or 0) - (expires or 0)) <= 2 then
+					settled = a
+				end
+			end
+			if settled then
+				claimed[settled] = true
+			elseif status and count and expires then
+				local came = expires - AH_MAIL_DAYS * 86400
+				local best, exact
+				for _, a in ipairs(saved.auctions) do
+					local open = OPEN[a.status] or (status == "sold" and a.status == "sold-pending")
+					local same = (attached and not sale) and a.item == attached.id or Named(a, name)
+					-- A sold one's money mail comes after the sale, which may be before the list last had it.
+					local since = a.status == "sold-pending" and (a.at or a.seen) or a.seen or 0
+					if open and same and a.count == count and not a.mail and came >= since - SLACK then
+						local price = sale and (sale.price == (a.price or 0) * count or sale.price == a.bid)
+						if not best or (price and not exact) then best, exact = a, price end
+					end
+				end
+				if best then
+					best.status, best.at, best.how, best.mail, best.mailAt = status, math.min(came, time()), "mail", says, expires
+					claimed[best] = true
+				end
+			end
+		end
+	end
+
+	-- Ended more than RECENT ago: gone. A listed one goes RECENT after it was due to end.
+	local function Prune(saved, now)
+		local kept, notices = {}, {}
+		for _, a in ipairs(saved.auctions) do
+			local last = a.status == "active" and (a.expires or a.seen) or (a.at or a.seen)
+			if now - (last or now) < RECENT then kept[#kept + 1] = a end
+		end
+		table.sort(kept, function(x, y) return (x.at or x.seen or 0) > (y.at or y.seen or 0) end)
+		for i = #kept, MAX_KEPT + 1, -1 do kept[i] = nil end
+		saved.auctions = kept
+		for _, n in ipairs(saved.notices) do
+			if now - n.at < RECENT then notices[#notices + 1] = n end
+		end
+		saved.notices = notices
+	end
+
+	-- The auction house's mail as last seen: { at, sales = { { kind (Inventory.lua's ah), name, item (attached), count,
+	-- money (attached), price, fee, deposit, eta, expires } } }; nil if the mailbox wasn't seen.
+	local function MailSales()
+		local inbox = WowMCPDB.mail and WowMCPDB.mail[Key()]
+		if not inbox then return nil end
+		local sales = {}
+		for _, m in ipairs(type(inbox.mails) == "table" and inbox.mails or {}) do
+			if MAIL_STATUS[m.ah] then
+				local attached, sale = type(m.items) == "table" and m.items[1] or {}, m.sale or {}
+				sales[#sales + 1] = { kind = m.ah, name = sale.item or attached.name, item = attached.id,
+					count = sale.count or attached.count or 1, money = m.money, price = sale.price, fee = sale.fee,
+					deposit = sale.deposit, eta = sale.eta, expires = m.expires }
+			end
+		end
+		return { at = inbox.time, sales = sales }
+	end
+
+	-- Listed first, those ending soonest first; then what ended, the latest first.
+	local function Order(x, y)
+		local xl, yl = x.status == "active", y.status == "active"
+		if xl ~= yl then return xl end
+		if xl then return (x.expires or math.huge) < (y.expires or math.huge) end
+		return (x.at or x.seen or 0) > (y.at or y.seen or 0)
+	end
+
+	-- { seen, open, reading, realm, faction, auctions, more, notices (those about no auction kept), prices (the game's,
+	-- of the listed items, as get_auction_prices has them), places, mail, problem }.
+	local function Section()
+		local saved, now = Saved(), time()
+		Reconcile(saved)
+		Prune(saved, now)
+		local sorted, list, prices, priced, places, realm = {}, {}, {}, {}, {}, Realm()
+		for _, a in ipairs(saved.auctions) do sorted[#sorted + 1] = a end
+		table.sort(sorted, Order)
+		for i = 1, math.min(#sorted, MAX_SENT) do
+			local a = sorted[i]
+			list[i] = { id = a.id, item = a.item, name = a.name or ItemName(a.item), count = a.count, price = a.price,
+				bid = a.bid, status = a.status, first = a.first, seen = a.seen, expires = a.expires, soonest = a.soonest,
+				left = a.left, due = a.due, at = a.at, how = a.how }
+			if a.status == "active" and not priced[a.item] then
+				priced[a.item] = true
+				prices[#prices + 1] = Answer(realm, a.item, places)
+			end
+		end
+		local notices, placeList = {}, {}
+		for _, n in ipairs(saved.notices) do
+			if not n.auction then notices[#notices + 1] = { kind = n.kind, name = n.name, at = n.at, src = n.src } end
+		end
+		for i, p in ipairs(places) do placeList[i] = p end
+		return {
+			seen = saved.seen, open = visit ~= nil, reading = visit and visit.mine.at and true or nil, realm = GetRealmName(),
+			faction = UnitFactionGroup("player"), auctions = list, more = #sorted > #list and #sorted - #list or nil,
+			notices = notices, prices = prices, places = placeList, mail = MailSales(), problem = trouble,
+		}
+	end
+
+	-- Asked for when Step allows a message (the Browse view, the throttle, the pace); an answer that doesn't come is
+	-- given up after TIMEOUT.
+	function Mine.Due()
+		local m = visit.mine
+		if m.at and GetTime() - m.at > TIMEOUT then m.at = nil end
+		return m.due and not m.at and C_AuctionHouse.QueryOwnedAuctions ~= nil
+	end
+
+	function Mine.Ask()
+		local context, sorts = AuctionHouseSearchContext and AuctionHouseSearchContext.AllAuctions, nil
+		if context and AuctionHouseFrame.GetSortsForContext then
+			local ok, list = pcall(AuctionHouseFrame.GetSortsForContext, AuctionHouseFrame, context)
+			sorts = ok and type(list) == "table" and list[1] and list or nil
+		end
+		visit.mine.due, visit.mine.at = false, GetTime()
+		table.insert(sent, GetTime())
+		C_AuctionHouse.QueryOwnedAuctions(sorts or OWNED_SORTS)
+		Notify()
+	end
+
+	local function Try(fn, ...)
+		local ok, err = pcall(fn, ...)
+		if not ok then trouble = tostring(err) end
+	end
+
+	local reconciling -- MAIL_INBOX_UPDATE comes in bursts
+	local frame = CreateFrame("Frame")
+	for _, event in ipairs({ "OWNED_AUCTIONS_UPDATED", "AUCTION_HOUSE_AUCTION_CREATED", "AUCTION_CANCELED",
+		"AUCTION_HOUSE_AUCTIONS_EXPIRED", "AUCTION_HOUSE_SHOW_NOTIFICATION", "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION",
+		"CHAT_MSG_SYSTEM", "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED", "MAIL_INBOX_UPDATE" }) do
+		pcall(frame.RegisterEvent, frame, event)
+	end
+	frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
+		if type(WowMCPDB) ~= "table" then return end
+		if event == "OWNED_AUCTIONS_UPDATED" then
+			Try(Read)
+			if visit then visit.mine.due, visit.mine.at = false, nil end
+			Notify()
+		elseif event == "AUCTION_HOUSE_AUCTION_CREATED" then
+			if visit then visit.mine.due = true end
+		elseif event == "AUCTION_CANCELED" then
+			if visit then visit.mine.due = true end
+			Try(Ended, arg1, "cancelled", "cancel")
+		elseif event == "AUCTION_HOUSE_AUCTIONS_EXPIRED" then
+			Try(Ended, arg1, "expired", "notice")
+		elseif event == "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION" or event == "AUCTION_HOUSE_SHOW_NOTIFICATION" then
+			-- notification, text (the item), auctionID: the formatted one only.
+			local id = type(arg3) == "number" and arg3 or nil
+			if NOTICES[arg1] and (type(arg2) == "string" or id) then
+				Try(Notice, NOTICES[arg1], type(arg2) == "string" and arg2 or nil, "notice", id)
+			end
+		elseif event == "CHAT_MSG_SYSTEM" then
+			Try(ChatLine, arg1)
+		elseif event == "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED" and visit and visit.mine.at then
+			-- The game dropped it (too many at once): asked once more, a little later.
+			visit.mine.due, visit.mine.at, visit.mine.retried = not visit.mine.retried, nil, true
+			visit.notBefore = GetTime() + TIMEOUT
+		elseif event == "MAIL_INBOX_UPDATE" and not reconciling then
+			reconciling = true
+			C_Timer.After(0, function() -- once Inventory.lua has saved the inbox
+				reconciling = nil
+				Try(function() Reconcile(Saved()) end)
+			end)
+		end
+	end)
+
+	ns.RegisterSection(ns.Kinds.KNOWLEDGE, "myAuctions", Section)
+end
 
 ---------------------------------------------------------------------------
 -- Gear upgrades (find_upgrades)
@@ -1731,6 +2187,8 @@ local function Now()
 	if finding then
 		return string.format("Looking for upgrades: %d%%", math.floor(100 * finding)), finding, COLORS.scan
 	end
+	-- A moment's work: said if the panel is there anyway, but it doesn't bring it back once faded.
+	if visit.mine.at then return "Reading your auctions…", 1, COLORS.done, true end
 	return Done(), 1, visit.problem and COLORS.problem or COLORS.done, true
 end
 
