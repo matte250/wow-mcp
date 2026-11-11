@@ -103,13 +103,19 @@ lookups). `/ai model` says which one answers; `/ai model sonnet` (or fable, opus
 one. The pick is kept per character and goes with each question. Answers are signed with the model,
 e.g. [Claude Sonnet], and the conversation carries over when you switch.
 
+**How hard it thinks:** the same picker has a Thinking group: Default (what the bridge was started
+with, or Claude Code's own), Low (fastest), Medium, High, Extra high or Max (slowest, deepest).
+`/ai thinking` (or `/ai effort`) says which; `/ai thinking high` (or low, medium, xhigh, max, default)
+picks one. It's kept per character and goes with each question; answers then name it too, e.g.
+[Claude Sonnet · high].
+
 ```sh
 cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_forever_/Interface/AddOns"
 ```
 
 To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
-`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--timeout` and `--agent` change how it answers (with `--agent`, picks are ignored).
+`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--effort` (low, medium, high, xhigh or max) how hard it thinks when you haven't picked a level; `--timeout` and `--agent` change how it answers (with `--agent`, picks are ignored).
 
 On Windows, run the same command in a terminal you leave open while you play. To start it at logon instead,
 make a Task Scheduler task that runs `uv` with the arguments
@@ -134,13 +140,13 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Plans | `show_plan` (a checklist window that guides you step by step and ticks steps off itself: items in bags or bank, quests, places, level, skill, recipes; item IDs are checked in the game before a plan is shown; hovering a step shows the models of the NPCs it names; up to ten plans at once, each under a named tab above the window with an icon for its kind: questing, your class, its profession, or general; the x on a tab archives or removes its plan, and plans you removed stop counting), `get_plan_progress`, `clear_plan` (one tab's plan, or all) |
 | Goals | `set_goals` (background goals next to the plan that track themselves and point out chances: zones and areas, a tooltip line on mobs, vendors and the auction house selling the item; a plan step can wait for one), `get_goals`, `clear_goals` |
 | Gear | `find_upgrades` (the best upgrades per slot this character can use, from the auction house's last full scan, quest rewards in the log and vendors seen: stats, required level, where to get it and what it costs, and the score change; random-suffix items priced per suffix; `item_ids` for "is X an upgrade"; auction prices brought up to date from the online snapshot when it's newer) |
-| Auction house | `get_auction_prices` (online from Blizzard's API when set up: a snapshot of your auction house at most about an hour old, plus the game's own price when that's newer; otherwise the game's full scan or a search, with its age; `history` adds the usual price (7-day median) and price history; an item that's gone says when it was last listed and at what), `watch_auction_prices` (puts items on the priority list checked at every visit) |
+| Auction house | `get_auction_prices` (online from Blizzard's API when set up: a snapshot of your auction house at most about an hour old, plus the game's own price when that's newer; otherwise the game's full scan or a search, with its age; `history` adds the usual price (7-day median) and price history; an item that's gone says when it was last listed and at what; an item never listed in all the history is flagged, since usually it can't be traded, and for items asked about the game says what it binds to), `watch_auction_prices` (puts items on the priority list checked at every visit) |
 | Routes | `show_route` (numbered stops, lines, navigator arrow; a plan's current step uses the same navigator), `clear_route` |
 | Areas | `highlight_areas` (shaded circles, e.g. where a mob or herb is), `clear_areas` |
 | Where and who | `get_player_location` (zone, coordinates, faction, race, class, level) |
 | Character | `get_character_stats` (money, XP, rested, hearthstone, /played), `get_reputations` |
-| Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession, plus recipes you learn as you learn them; each recipe's `item_id` is what it makes), `get_vendor_items` (vendors you've visited) |
-| Items | `get_inventory` (bags, equipment with durability and stats, `include_bank` for the bank as last seen, `include_mail` for the mailbox as last seen: attachments, money, COD, expiry, auction house sales and the game's new-mail notice), `get_item_details` (stats and tooltip text of any item, read from the game), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
+| Professions | `get_professions` (skill levels), `get_known_recipes` (cached when you open a profession, plus recipes you learn as you learn them; each recipe's `item_id` is what it makes), `get_vendor_items` (vendors you've visited, with what each item binds to) |
+| Items | `get_inventory` (bags, equipment with durability and stats, `include_bank` for the bank as last seen, `include_mail` for the mailbox as last seen: attachments, money, COD, expiry, auction house sales and the game's new-mail notice), `get_item_details` (stats and tooltip text of any item, read from the game, and what it binds to: whether it can be auctioned), `set_item_notes` / `clear_item_notes` (a line on item tooltips) |
 | Quests | `get_quest_status` (done / in log / ready, for given quest IDs), `get_quest_log` (objective progress, and rewards: the XP this character gets, money and items, read from the game) |
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
@@ -210,6 +216,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 |---|---|
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
 | `/ai model [default, fable, opus, sonnet, haiku]` | Which Claude model answers your `/ai` questions (kept per character); the AI tab has a picker for it too |
+| `/ai thinking [default, low, medium, high, xhigh, max]` (or `/ai effort`) | How hard the AI thinks before answering (kept per character); the AI tab's picker has it too |
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
 | `/mcp` | List the current markers |

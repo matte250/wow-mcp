@@ -60,11 +60,14 @@ startup, so after the one restart for this restructure, every feature only needs
   the bridge) go to the AI tab, made with `FCF_OpenNewWindow(name, true)` and found by name;
   `WowMCPDB.aiTab = { mode, made = { ["Name-Realm"] = true } }`. Typing in the tab goes through
   EventRegistry's chat box events plus `hooksecurefunc` only: no writes to Blizzard's chat box fields.
-  `/ai model [name]` and the AI tab's model picker (a Blizzard_Menu dropdown, or a cycling button) pick
-  the model per character (`WowMCPDB.aiTab.models`); question posts are `{ question, player, model? }`
-  with `model` one of Chat.lua's `MODELS` ids, which must match `bridge.MODELS`. The bridge passes
-  `--model` only for those, signs answers "Claude <Model>", and replies carry `defaultModel`. The agent
-  contract is `agent(prompt, model, player)`; `player` reaches the wow tools as `WOW_MCP_PLAYER`.
+  `/ai model [name]`, `/ai thinking [level]` (alias `/ai effort`) and the AI tab's picker (one Blizzard_Menu
+  dropdown with a Model and a Thinking group, or a cycling button: click for the model, shift-click for
+  the level) pick both per character (`WowMCPDB.aiTab.models`, `.efforts`). Question posts are
+  `{ question, player, model?, effort? }`; `model` is one of Chat.lua's `MODELS` ids (must match
+  `bridge.MODELS`), `effort` one of its `EFFORTS` (must match `bridge.EFFORTS`, Claude Code's `--effort`
+  levels). The bridge passes `--model`/`--effort` only for those, signs answers "Claude <Model>[ · <level>]",
+  and replies carry `defaultModel` and `defaultEffort`. The agent
+  contract is `agent(prompt, model, player, effort)`; `player` reaches the wow tools as `WOW_MCP_PLAYER`.
 - **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
   `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
   for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and
@@ -106,6 +109,11 @@ startup, so after the one restart for this restructure, every feature only needs
   forget` per player in `notes.json` (30 notes / 3,000 characters, oldest cut). `memory.read_log` reads the
   bridge's "asks"/"answer:" log lines back, so keep their wording. Guidance orders 17-18 are memory.
   Tests: conftest's autouse `no_real_memory` sets `XDG_DATA_HOME` to tmp.
+- **Binding**: `itemDetails` items carry `bind` (the `Enum.ItemBind` value) and `held` / `heldBound`;
+  `items.binding()` is the one bind mapping, shared by `get_item_details`, `get_vendor_items` and
+  `get_auction_prices`. Vendor items carry `bind` when loaded at the merchant read. Auction prices carry
+  `scanned = true` when some full scan saw the item; never-listed items asked about are looked up with
+  `items.look_up`. The trading rule is `TRADING_GUIDANCE` (order 14).
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
