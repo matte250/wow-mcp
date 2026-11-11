@@ -85,6 +85,11 @@ startup, so after the one restart for this restructure, every feature only needs
   conditions anywhere (goals use them for targets; `{goal: id}` is a condition too).
   `ns.Goals.Status` / `Items` / `AuctionPrices` / `Money` and `ns.Auction.Price` / `Cost` / `IsOpen`.
   Guidance orders 12-14 are plans, goals and buy-vs-farm.
+- **AH status panel** `WowMCPAuctionPanel` (our frame, parented to UIParent, only anchored under
+  `AuctionHouseFrame`'s bottom right): Auction.lua's internal `Notify()` schedules a redraw at most every
+  0.25 s from a timer, never per frame. `WowMCPDB.auctionPanel = { hidden }` (account-wide).
+- **Blocked actions**: Status.lua keeps the last ten ADDON_/MACRO_ACTION_BLOCKED/FORBIDDEN events (any
+  addon) with the stack in `WowMCPDB.blocked`; `get_status` reports them as `blocked_actions`.
 - **Upgrades**: auction data also has `variants = { [id] = "scan;suffix,price,listed;..." }` for gear with
   random suffixes; `ns.Inventory = { Equipment, GearStats, Lines }`; STATE `character` also has
   `classFile`, `spec`, `role`. Server: `items.ask(...)` is the publish-then-ask loop for ITEM_DETAILS

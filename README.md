@@ -124,6 +124,12 @@ your bags and bank) also gets the cheapest price points. When the last full scan
 old, those items are searched one at a time, at most 80 auction house messages a minute counting
 yours, and only on the Browse view, so it never changes what you see.
 
+While the auction house is open, a small panel under its window shows what's going on: the full scan
+(waiting for the game, reading it, how many items), the searches (e.g. `watched 5/8 · bags 7/32`, the
+item being checked, about how long is left), why they're paused (you're looking at an item or selling),
+and the upgrade finder's progress. Hover it for what's still to check, in order. It says "Prices up to
+date" for a moment, then fades out.
+
 The full scan also keeps, for gear with random suffixes ("of the Bear"), the cheapest price of each
 suffix. Upgrades are searched in game, a little per frame: the slot and armor or weapon type of every
 item from the scans, quest rewards and vendors seen, then level, stats and price, then the tooltip for
@@ -180,7 +186,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/mcp show`, `/mcp <n>`, `/mcp clear` | Open the map on them, navigate to marker n, hide them |
 | `/mcp plan [show, hide, next, prev, <n>, reset, clear]` | The plan window. Click a step to make it current; right-click it or click its box to tick or un-tick it; the wheel scrolls; − collapses |
 | `/mcp goals [show, hide, mute <n>, unmute <n>, clear [<n>, all]]` | The goals list (docks under the plan window): right-click a goal to mute it; − collapses; `clear` removes the done ones |
-| `/mcp prices` | Auction prices your AI has: the last full scan, the priority list, searches left; at the auction house, look the list up again |
+| `/mcp prices [panel on, off]` | Auction prices your AI has: the last full scan, the priority list, searches left; at the auction house, look the list up again. `panel off` hides the status panel under the auction house window (on by default) |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
 | `/mcp areas [show, clear]` | The highlighted areas |
 | `/mcp messages` | Repeat the last messages from your AI |
