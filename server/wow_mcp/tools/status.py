@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -9,7 +10,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from wow_mcp import game, install, kinds
-from wow_mcp.app import addons_dir, guidance, request, tool, transport
+from wow_mcp.app import addons_dir, as_list, guidance, request, tool, transport
 from wow_mcp.install import ADDONS_DIR_ENV
 from wow_mcp.transport import ADDON, SLOT_COUNT, slot_name
 
@@ -21,6 +22,15 @@ guidance(
     "stale), or after the addon was updated, call get_status and pass its advice on to the player.",
     order=90,
 )
+
+
+class BlockedAction(BaseModel):
+    at: datetime | None
+    kind: str = Field(description="ADDON_ACTION_BLOCKED (\"Interface action failed because of an AddOn\"), "
+                      "ADDON_ACTION_FORBIDDEN, or the MACRO_ versions.")
+    addon: str = Field(description="The addon the game blamed.")
+    function: str = Field(description="The protected function that was blocked.")
+    stack: str | None = Field(description="The Lua code path that led to the call.")
 
 
 class Status(BaseModel):
@@ -38,6 +48,9 @@ class Status(BaseModel):
     slot_count: int | None
     last_update_sent: int | None = Field(description="Number of the latest update the server sent.")
     last_update_in_game: int | None = Field(description="Number of the latest update the game has applied.")
+    blocked_actions: list[BlockedAction] = Field(
+        default_factory=list, description="The last actions the game blocked because of an addon (any addon), newest "
+        "first, with the code path. Empty when none were seen.")
 
 
 @dataclass
@@ -188,4 +201,18 @@ async def get_status() -> Status:
         slots_left=status.get("slotsLeft") if status else None,
         slot_count=status.get("slotCount") if status else None,
         last_update_sent=sent, last_update_in_game=status.get("seq") if status else None,
+        blocked_actions=_blocked(status.get("blocked")) if status else [],
     )
+
+
+def _blocked(raw) -> list[BlockedAction]:
+    actions = []
+    for b in as_list(raw):
+        if not isinstance(b, dict):
+            continue
+        at = b.get("at")
+        actions.append(BlockedAction(
+            at=datetime.fromtimestamp(at, timezone.utc) if isinstance(at, (int, float)) else None,
+            kind=str(b.get("event") or "?"), addon=str(b.get("addon") or "?"), function=str(b.get("func") or "?"),
+            stack=b.get("stack") if isinstance(b.get("stack"), str) else None))
+    return actions
