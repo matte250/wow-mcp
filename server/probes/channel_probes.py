@@ -23,6 +23,10 @@ stream   Server to game without a per-launch limit: small sounds are read once a
          reads them again each time, one file can signal again and again. Game: /mcp probe stream
 font     Server to game, bigger data: a real font (a few letters of a system font) whose letter
          widths the server rewrites on go4.wav. Run `stream` for it too. Game: /mcp probe font
+speed    How far the streamed channel stretches: what a streamed play costs, whether a streamed file
+         rewritten very short is still read afresh, and how precisely the game can time how long it
+         plays (each file's length as several bits). On each go2.wav read, rewrites the streamed
+         files to the next length in SPEED_LENGTHS. Game: /mcp probe speed
 chatlog  Game to server for what the player types: follows WoW's chat log (/chatlog in game) and
          prints each new line with the time it arrived, to see how soon the client writes it.
 """
@@ -59,6 +63,10 @@ TONE_SECONDS, TONE_LEVEL = 0.08, 0.05
 # prepared, and after go3.wav.
 STREAMS = {"big.wav": 60, "big.ogg": 60, "big.mp3": 60, "small.ogg": 2}
 RESTORED_SECONDS = 3
+SPEED_FILES = ("big.wav", "big.ogg", "big.mp3")
+# Lengths for `speed`, in seconds: short ones to see if they still stream, and 0.25 five times
+# to see how much the measured length varies.
+SPEED_LENGTHS = [0.05, 0.1, 0.15, 0.2, 0.25, 0.25, 0.25, 0.25, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0]
 REAL_FONT = "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf"
 
 
@@ -309,6 +317,46 @@ def stream(addons: Path, _args) -> None:
                 print(f"{time.monotonic() - start:7.3f}s  -> real.ttf with other widths", flush=True)
 
 
+# --- speed -------------------------------------------------------------------------------------------
+
+def speed(addons: Path, _args) -> None:
+    folder = probe_dir(addons)
+    if not (folder / "big.wav").exists():
+        sys.exit(f"No long sounds in {folder}: run `prepare` first (with WoW closed).")
+    for name in SPEED_FILES:  # as streamed at the last launch: long
+        (folder / name).write_bytes(silent(name, STREAMS[name]))
+    versions = [{name: silent(name, length) for name in SPEED_FILES} for length in SPEED_LENGTHS]
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_CLOEXEC)
+    if fd < 0 or libc.inotify_add_watch(fd, os.fsencode(folder), IN_CLOSE_NOWRITE) < 0:
+        sys.exit(f"inotify failed: {os.strerror(ctypes.get_errno())}")
+    print(f"Watching {folder}. Run /mcp probe speed in game; Ctrl+C to stop.", flush=True)
+    start, step, reads = None, 0, {}
+    while True:
+        data = os.read(fd, 64 * 1024)
+        at = 0
+        while at < len(data):
+            _wd, mask, _cookie, size = struct.unpack_from("iIII", data, at)
+            name = data[at + 16:at + 16 + size].rstrip(b"\0").decode()
+            at += 16 + size
+            if not mask & IN_CLOSE_NOWRITE or not name:
+                continue
+            now = time.monotonic()
+            start = start or now
+            reads[name] = reads.get(name, 0) + 1
+            if name != "go2.wav":
+                continue
+            if step < len(SPEED_LENGTHS):
+                for file_name, content in versions[step].items():
+                    (folder / file_name).write_bytes(content)
+                print(f"{time.monotonic() - start:7.3f}s  step {step + 1}: files now {SPEED_LENGTHS[step]} s long "
+                      f"(reads so far: {', '.join(f'{k} {v}' for k, v in sorted(reads.items()))})", flush=True)
+            else:
+                print(f"{now - start:7.3f}s  done (reads: {', '.join(f'{k} {v}' for k, v in sorted(reads.items()))})",
+                      flush=True)
+            step += 1
+
+
 # --- chatlog ----------------------------------------------------------------------------------------
 
 def chatlog(addons: Path, args) -> None:
@@ -330,14 +378,14 @@ def chatlog(addons: Path, args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["prepare", "files", "stream", "listen", "chatlog"])
+    parser.add_argument("command", choices=["prepare", "files", "stream", "speed", "listen", "chatlog"])
     parser.add_argument("--addons-dir", type=Path, default=os.environ.get(install.ADDONS_DIR_ENV))
     parser.add_argument("--seconds", type=float, default=120)
     parser.add_argument("--snr", type=float, default=8.0, help="listen: how far above the noise counts as a tone")
     args = parser.parse_args()
     if not args.addons_dir:
         sys.exit(f"Pass --addons-dir or set {install.ADDONS_DIR_ENV}.")
-    {"prepare": prepare, "files": files, "stream": stream, "listen": listen, "chatlog": chatlog}[args.command](
+    {"prepare": prepare, "files": files, "stream": stream, "speed": speed, "listen": listen, "chatlog": chatlog}[args.command](
         Path(args.addons_dir), args)
 
 

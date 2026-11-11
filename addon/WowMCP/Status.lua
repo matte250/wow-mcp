@@ -49,6 +49,7 @@ ns.RegisterSection(ns.Kinds.STATUS, "status", Status)
 --   audio  short quiet tones the server hears in WoW's own audio stream (no file opens)
 --   stream long sounds read afresh on every play? (one file, no per-launch limit)
 --   font   a real font whose letter widths the server rewrites (bigger data)
+--   speed  what a streamed play costs, and how precisely its length can be timed
 ---------------------------------------------------------------------------
 
 do
@@ -272,12 +273,88 @@ do
 		end))
 	end
 
-	local PROBES = { files = Files, audio = Audio, stream = Stream, font = Font }
-	ns.RegisterCommand("probe", "/mcp probe [files, audio, stream, font] - research into other channels (needs the server's probe helper)",
+	-- speed -----------------------------------------------------------------------------------------
+	-- How far streamed sounds stretch as a channel: what one play costs (against a cached sound), and
+	-- how precisely the game times a streamed sound the server rewrote to a given length.
+
+	local SPEED_FILES = { "big.wav", "big.ogg", "big.mp3" }
+	local SPEED_STEPS = 14 -- channel_probes.py's SPEED_LENGTHS
+	local clock = GetTimePreciseSec or GetTime
+
+	local function Cost(path, times)
+		local total = 0
+		for _ = 1, times do
+			local start = debugprofilestop()
+			local handle = Play(path)
+			total = total + (debugprofilestop() - start)
+			if handle then StopSound(handle) end
+		end
+		return total / times -- milliseconds per play
+	end
+
+	local function Speed()
+		local results = Keep("speed", { cost = {}, steps = {} })
+		for _, f in ipairs(SPEED_FILES) do results.cost[f] = Cost(DIR .. f, 10) end
+		results.cost["s2.wav (cached)"] = Cost(DIR .. "s2.wav", 10)
+		local parts = {}
+		for f, ms in pairs(results.cost) do parts[#parts + 1] = string.format("%s %.3f ms", f, ms) end
+		table.sort(parts)
+		ns.Print("Probe speed: one play costs " .. table.concat(parts, ", "))
+		ns.Print("Timing " .. SPEED_STEPS .. " lengths (about 25 s)…")
+		local step = 0
+		local Next
+		Next = Safely(function()
+			step = step + 1
+			if step > SPEED_STEPS then
+				for i, row in ipairs(results.steps) do ns.Print(string.format("step %d: %s", i, table.concat(row, ", "))) end
+				ns.Print("Probe done. /reload writes the results to disk.")
+				return
+			end
+			Play(DIR .. "go2.wav") -- the server rewrites the files to the next length
+			C_Timer.After(0.3, Safely(function()
+				local handles, started, lasted = {}, {}, {}
+				for i, f in ipairs(SPEED_FILES) do
+					started[i] = clock()
+					handles[i] = Play(DIR .. f)
+				end
+				timer = timer or CreateFrame("Frame")
+				timer:SetScript("OnUpdate", Safely(function()
+					local done = true
+					for i in ipairs(SPEED_FILES) do
+						if not lasted[i] then
+							if not handles[i] then
+								lasted[i] = "no handle"
+							elseif not C_Sound.IsPlaying(handles[i]) then
+								lasted[i] = string.format("%.0f ms", (clock() - started[i]) * 1000)
+							else
+								done = false
+							end
+						end
+					end
+					if not done and clock() - started[1] < 3 then return end
+					timer:SetScript("OnUpdate", nil)
+					local row = {}
+					for i, f in ipairs(SPEED_FILES) do
+						if not lasted[i] then
+							StopSound(handles[i])
+							lasted[i] = "over 3 s"
+						end
+						row[i] = f .. " " .. lasted[i]
+					end
+					results.steps[step] = row
+					C_Timer.After(0.2, Next)
+				end))
+			end))
+		end)
+		Next()
+	end
+
+	local PROBES = { files = Files, audio = Audio, stream = Stream, font = Font, speed = Speed }
+	ns.RegisterCommand("probe", "/mcp probe [files, audio, stream, font, speed] - research into other channels (needs the server's probe helper)",
 		function(rest)
 			local probe = PROBES[strtrim(tostring(rest or "")):lower()]
 			if not probe then
-				ns.Print("/mcp probe files, audio, stream or font (each needs its server half running)")
+				ns.Print("/mcp probe files, audio, stream, font or speed (each needs its server half running)")
 				return
 			end
 			Safely(probe)()
