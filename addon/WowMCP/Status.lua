@@ -42,26 +42,31 @@ end
 ns.RegisterSection(ns.Kinds.STATUS, "status", Status)
 
 ---------------------------------------------------------------------------
--- /mcp probe: research for a server-to-game channel without per-launch limits (see
--- server/probes/cache_probe.py, which prepares probe/ and changes its files when go.wav is opened).
--- Does the game remember a file per path as written, or per file? s1 and s2 are valid sounds;
--- after go.wav, s1 is empty. A spelling that reads afresh finds s1 silent; s2 shows the spelling
--- reaches the file at all. The font and texture get new versions too: do other spellings load them?
+-- /mcp probe <name>: research into other channels between the server and the game. Each probe has
+-- a server half in server/probes/channel_probes.py (see there); results print in chat and are kept
+-- in WowMCPDB.probes[name] (a /reload writes them to disk).
+--   files  does the game remember a file per path as written? (fewer files, no per-launch limit)
+--   pad    a virtual gamepad's spare axes as numbers (no files at all)
+--   audio  short quiet tones the server hears in WoW's own audio stream (no file opens)
 ---------------------------------------------------------------------------
 
 do
 	local DIR = "Interface\\AddOns\\WowMCP\\probe\\"
-	local GLYPHS = { "A", "B", "K", "L", "M" }
-	local SPELLINGS = {
-		{ "as written", function(p) return p end },
-		{ "lower case", string.lower },
-		{ "upper case", string.upper },
-		{ "forward slashes", function(p) return (p:gsub("\\", "/")) end },
-		{ "with .\\", function(p) return (p:gsub("\\([^\\]+)$", "\\.\\%1")) end },
-		{ "with ..\\probe\\", function(p) return (p:gsub("\\probe\\", "\\probe\\..\\probe\\")) end },
-		{ "doubled \\", function(p) return (p:gsub("^Interface\\", "Interface\\\\")) end },
-		{ "one capital", function(p) return (p:gsub("\\(%l)([^\\]*)$", function(a, b) return "\\" .. a:upper() .. b end)) end },
-	}
+
+	-- A step that fails says so: an error in a timer would otherwise go unseen.
+	local function Safely(fn)
+		return function(...)
+			local ok, err = pcall(fn, ...)
+			if not ok then ns.Print("Probe failed: " .. tostring(err)) end
+		end
+	end
+
+	local function Keep(name, results)
+		WowMCPDB.probes = type(WowMCPDB.probes) == "table" and WowMCPDB.probes or {}
+		results.at = time()
+		WowMCPDB.probes[name] = results
+		return results
+	end
 
 	local function Play(path)
 		local ok, willPlay, handle = pcall(PlaySoundFile, path, "Master")
@@ -74,6 +79,22 @@ do
 		StopSound(handle)
 		return playing and "PLAYS" or "silent"
 	end
+
+	-- files ----------------------------------------------------------------------------------------
+	-- s1 and s2 are valid sounds; after go.wav, s1 is empty. A spelling that reads afresh finds s1
+	-- silent; s2 shows the spelling reaches the file at all. The font and texture get new versions too.
+
+	local GLYPHS = { "A", "B", "K", "L", "M" }
+	local SPELLINGS = {
+		{ "as written", function(p) return p end },
+		{ "lower case", string.lower },
+		{ "upper case", string.upper },
+		{ "forward slashes", function(p) return (p:gsub("\\", "/")) end },
+		{ "with .\\", function(p) return (p:gsub("\\([^\\]+)$", "\\.\\%1")) end },
+		{ "with ..\\probe\\", function(p) return (p:gsub("\\probe\\", "\\probe\\..\\probe\\")) end },
+		{ "doubled \\", function(p) return (p:gsub("^Interface\\", "Interface\\\\")) end },
+		{ "one capital", function(p) return (p:gsub("\\(%l)([^\\]*)$", function(a, b) return "\\" .. a:upper() .. b end)) end },
+	}
 
 	local text = UIParent:CreateFontString(nil, "ARTWORK")
 	text:SetAlpha(0)
@@ -102,24 +123,15 @@ do
 			text:GetUnboundedStringWidth())
 	end
 
-	-- A step that fails says so: an error in a timer would otherwise go unseen.
-	local function Safely(fn)
-		return function()
-			local ok, err = pcall(fn)
-			if not ok then ns.Print("Probe failed: " .. tostring(err)) end
-		end
-	end
-
-	local function Run()
-		local results = { at = time(), sounds = {}, fonts = {}, textures = {} }
-		WowMCPDB.probe = results
-		ns.Print("Probe: playing and loading the probe files…")
+	local function Files()
+		local results = Keep("files", { sounds = {}, fonts = {}, textures = {} })
+		ns.Print("Probe files: playing and loading the probe files…")
 		local first = { s1 = Play(DIR .. "s1.wav"), s2 = Play(DIR .. "s2.wav") }
 		results.fontBefore = Widths(DIR .. "f.ttf")
 		results.textureBefore = Texture(DIR .. "t.tga")
 		C_Timer.After(0.6, Safely(function()
 			results.before = { s1 = Playing(first.s1), s2 = Playing(first.s2) }
-			Play(DIR .. "go.wav") -- the helper sees this open and changes the files
+			Play(DIR .. "go.wav") -- the server half sees this open and changes the files
 			C_Timer.After(1.5, Safely(function()
 				local handles = {}
 				for i, s in ipairs(SPELLINGS) do
@@ -137,14 +149,107 @@ do
 					for _, f in ipairs(results.fonts) do ns.Print("Font " .. f[1] .. ": " .. f[2]) end
 					ns.Print("Texture before: " .. results.textureBefore)
 					for _, t in ipairs(results.textures) do ns.Print("Texture " .. t[1] .. ": " .. t[2]) end
-					ns.Print("Probe done. Saved in WowMCPDB.probe; /reload writes it to disk.")
+					ns.Print("Probe done. /reload writes the results to disk.")
 				end))
 			end))
 		end))
 	end
 
-	ns.RegisterCommand("probe", "/mcp probe - research: how the game remembers files (needs the server's probe helper)", function()
-		local ok, err = pcall(Run)
-		if not ok then ns.Print("Probe failed: " .. tostring(err)) end
-	end)
+	-- pad -------------------------------------------------------------------------------------------
+	-- Every controller the game sees, and the distinct values each raw axis took while the server half
+	-- stepped one. Gamepad support is on only for the probe.
+
+	local PAD_SECONDS = 15
+	local watcher = CreateFrame("Frame")
+
+	local function Pad()
+		if not (C_GamePad and C_GamePad.GetAllDeviceIDs and C_CVar) then
+			ns.Print("Probe pad: this client has no gamepad functions.")
+			return
+		end
+		local results = Keep("pad", { devices = {} })
+		local was = C_CVar.GetCVar("GamePadEnable")
+		if was ~= "1" then C_CVar.SetCVar("GamePadEnable", "1") end
+		ns.Print(string.format("Probe pad: gamepad support on for %d seconds (was %s). Stand still somewhere safe…",
+			PAD_SECONDS, tostring(was)))
+		local seen, stop = {}, GetTime() + PAD_SECONDS
+		watcher:SetScript("OnUpdate", Safely(function()
+			for _, id in ipairs(C_GamePad.GetAllDeviceIDs() or {}) do
+				local ok, raw = pcall(C_GamePad.GetDeviceRawState, id)
+				if ok and raw then
+					local d = seen[id] or { id = id, name = raw.name, vendor = raw.vendorID, product = raw.productID, axes = {} }
+					seen[id] = d
+					for i, v in ipairs(raw.rawAxes or {}) do
+						local a = d.axes[i] or { values = {}, n = 0 }
+						d.axes[i] = a
+						local key = string.format("%.6f", v)
+						if not a.values[key] then a.values[key], a.n = true, a.n + 1 end
+					end
+				end
+			end
+			if GetTime() < stop then return end
+			watcher:SetScript("OnUpdate", nil)
+			if was ~= "1" then C_CVar.SetCVar("GamePadEnable", was or "0") end
+			local okActive, active = pcall(C_GamePad.GetActiveDeviceID)
+			results.active = okActive and active or nil
+			local any = false
+			for _, d in pairs(seen) do
+				any = true
+				local moving = {}
+				for i, a in pairs(d.axes) do
+					if a.n > 1 then
+						local values = {}
+						for v in pairs(a.values) do values[#values + 1] = tonumber(v) end
+						table.sort(values)
+						a.list = values
+						local shown = {}
+						for k = 1, math.min(#values, 8) do shown[k] = string.format("%.5f", values[k]) end
+						moving[#moving + 1] = string.format("axis %d: %d values (%s%s)", i, #values, table.concat(shown, ", "),
+							#values > 8 and ", …" or "")
+					end
+					a.values = nil
+				end
+				table.insert(results.devices, d)
+				ns.Print(string.format("Device %s: %s (vendor %s, product %s), %d axes", tostring(d.id), tostring(d.name),
+					tostring(d.vendor), tostring(d.product), #d.axes))
+				for _, line in ipairs(moving) do ns.Print("  " .. line) end
+				if #moving == 0 then ns.Print("  no axis moved") end
+			end
+			if not any then ns.Print("No controllers seen.") end
+			ns.Print(string.format("Active device: %s. Gamepad support back to %s. Probe done.", tostring(results.active), tostring(was)))
+		end))
+	end
+
+	-- audio -----------------------------------------------------------------------------------------
+	-- A known sequence of short tones; the server half says which it heard, and when.
+
+	local SEQUENCE = { "a", "b", "a", "a", "b", "c", "b", "a" }
+
+	local function Audio()
+		local results = Keep("audio", { played = {} })
+		ns.Print("Probe audio: playing 8 short tones (two very high, one quiet beep)…")
+		local start = GetTime()
+		for i, t in ipairs(SEQUENCE) do
+			C_Timer.After(0.4 * i, Safely(function()
+				local handle = Play(DIR .. "tone_" .. t .. ".wav")
+				results.played[i] = { t, GetTime() - start, handle and true or false }
+				if i == #SEQUENCE then
+					local list = {}
+					for _, p in ipairs(results.played) do list[#list + 1] = string.format("%s %.2fs%s", p[1], p[2], p[3] and "" or " (no handle)") end
+					ns.Print("Played: " .. table.concat(list, ", ") .. ". Probe done.")
+				end
+			end))
+		end
+	end
+
+	local PROBES = { files = Files, pad = Pad, audio = Audio }
+	ns.RegisterCommand("probe", "/mcp probe [files, pad, audio] - research into other channels (needs the server's probe helper)",
+		function(rest)
+			local probe = PROBES[strtrim(tostring(rest or "")):lower()]
+			if not probe then
+				ns.Print("/mcp probe files, /mcp probe pad or /mcp probe audio (each needs its server half running)")
+				return
+			end
+			Safely(probe)()
+		end)
 end
