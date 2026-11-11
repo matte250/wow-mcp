@@ -7,7 +7,8 @@ chat tab. Questions are answered one at a time.
 
 Each agent starts from zero, so the player's recent exchanges go into the prompt, which makes
 follow-up questions work. They're kept in a file (History), so a restart keeps the conversation;
-/ai new starts a fresh one.
+/ai new starts a fresh one. Every exchange also goes into the archive for good, which the agent
+searches for older ones, and its notes about the player come with every prompt (memory.py).
 
 The default agent is headless Claude Code (`claude -p`) with this MCP server and web lookups,
 run apart from the user's own Claude Code settings. Any other command works too (--agent): it
@@ -42,11 +43,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from wow_mcp import item_text, locking, stream
+from wow_mcp import item_text, locking, memory, stream
 from wow_mcp.install import ADDONS_DIR_ENV
 from wow_mcp.transport import ADDON, write_atomic
 
 log = logging.getLogger("wow_mcp.bridge")
+LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"  # memory.read_log reads it back
 
 AGENT_ENV = "WOW_MCP_BRIDGE_AGENT"
 SENDER = "Claude"
@@ -82,6 +84,12 @@ that's what they ask for.
 - Your earlier exchanges with them may come before the question, as context. Use them only when \
 the question follows up on them (e.g. "and the next one?"); otherwise ignore them. The game may \
 have changed since, so look again when that matters.
+- Those are only the last few. search_conversations finds anything from your earlier conversations, \
+also on earlier days: when they refer to one ("remember…", "like we said", "yesterday") or seem to \
+continue a project, search it before answering. Never say you can't remember or see an earlier \
+conversation without having searched.
+- What you know about them (your notes) may come first. Save lasting facts and decisions with \
+remember, and update or forget notes that are wrong.
 - Don't ask them questions back: make a sensible assumption and say what you assumed. They can \
 correct you with another /ai."""
 
@@ -94,7 +102,8 @@ class AgentTimeout(AgentError):
     pass
 
 
-Agent = Callable[[str, str | None], str]  # (prompt, model) -> answer; model None: its own; raises AgentError
+# (prompt, model, player) -> answer; model None: its own; player: who asks, for its tools; raises AgentError
+Agent = Callable[[str, str | None, str | None], str]
 
 
 def _player(post: dict) -> str | None:
@@ -137,17 +146,24 @@ class Question:
         text = " ".join(value["question"].split())[:MAX_QUESTION]
         return cls(text, _player(value), _model(value)) if text else None
 
-    def prompt(self, earlier: Sequence[Exchange] = (), now: float | None = None) -> str:
-        """The agent's prompt: the question, after the player's earlier exchanges (oldest first)."""
-        asks = f"{self.player or 'The player'} asks, in game: {self.text}"
-        if not earlier:
-            return asks
-        now = time.time() if now is None else now
-        lines = [(f"Earlier exchanges with {self.player or 'the player'}, oldest first. Context only: use them if "
-                  "the question below follows up on them, otherwise ignore them.")]
-        for exchange in earlier:
-            lines += [f"Q ({_ago(now - exchange.at)}): {exchange.question}", f"A: {exchange.answer}"]
-        return "\n".join(lines) + "\n\n" + asks
+    def prompt(self, earlier: Sequence[Exchange] = (), now: float | None = None,
+               notes: Sequence[memory.Note] = ()) -> str:
+        """The agent's prompt: the question, after the agent's notes about the player and their earlier
+        exchanges (oldest first)."""
+        parts = []
+        if notes:
+            lines = [(f"What you know about {self.player or 'the player'} (your notes from earlier conversations, "
+                      "oldest first):")]
+            lines += [f"- #{n.id} ({time.strftime('%Y-%m-%d', time.localtime(n.at))}): {n.text}" for n in notes]
+            parts.append("\n".join(lines))
+        if earlier:
+            now = time.time() if now is None else now
+            lines = [(f"Earlier exchanges with {self.player or 'the player'}, oldest first. Context only: use them if "
+                      "the question below follows up on them, otherwise ignore them.")]
+            for exchange in earlier:
+                lines += [f"Q ({_ago(now - exchange.at)}): {exchange.question}", f"A: {exchange.answer}"]
+            parts.append("\n".join(lines))
+        return "\n\n".join([*parts, f"{self.player or 'The player'} asks, in game: {self.text}"])
 
 
 @dataclass(frozen=True)
@@ -312,10 +328,11 @@ def publish_message(text: str, style: str = "chat", sender: str = SENDER, reply:
 # Agents -----------------------------------------------------------------------------------
 
 
-def mcp_config(addons_dir: Path) -> dict:
-    """An MCP config with this server, run by the bridge's own Python."""
-    server = {"type": "stdio", "command": sys.executable, "args": ["-m", "wow_mcp.server"],
-              "env": {ADDONS_DIR_ENV: str(addons_dir)}}
+def mcp_config(addons_dir: Path, player: str | None = None) -> dict:
+    """An MCP config with this server, run by the bridge's own Python; it tells the memory tools who
+    asks (`player`)."""
+    env = {ADDONS_DIR_ENV: str(addons_dir), **({memory.PLAYER_ENV: player} if player else {})}
+    server = {"type": "stdio", "command": sys.executable, "args": ["-m", "wow_mcp.server"], "env": env}
     return {"mcpServers": {"wow": server}}
 
 
@@ -418,21 +435,32 @@ class CommandAgent:
 
     In the command, {system_prompt} and {mcp_config} (JSON) are filled in; both are also in its
     environment, as WOW_MCP_SYSTEM_PROMPT and WOW_MCP_MCP_CONFIG. A model (one of MODELS) is
-    given to Claude Code's command as --model.
+    given to Claude Code's command as --model. Who asks goes to the wow tools, in the MCP config
+    and the environment (memory.PLAYER_ENV), so their memory is that player's.
     """
 
     def __init__(self, command: list[str], addons_dir: Path, timeout: float = TIMEOUT):
-        config = json.dumps(mcp_config(addons_dir))
-        self.command = [arg.replace("{system_prompt}", SYSTEM_PROMPT).replace("{mcp_config}", config) for arg in command]
-        self.env = {**os.environ, ADDONS_DIR_ENV: str(addons_dir),
-                    "WOW_MCP_SYSTEM_PROMPT": SYSTEM_PROMPT, "WOW_MCP_MCP_CONFIG": config}
+        self.addons_dir = addons_dir
+        self._asked = command  # with the placeholders, filled in for each player
+        self.command, self.env = self._for(None)
         self.timeout = timeout
         # An empty working folder, so no project's settings or CLAUDE.md apply.
         self._folder = tempfile.TemporaryDirectory(prefix="wow-mcp-bridge-")
         self._process: subprocess.Popen | None = None
 
-    def __call__(self, prompt: str, model: str | None = None) -> str:
-        command = self.command if model is None else with_model(self.command, model)
+    def _for(self, player: str | None) -> tuple[list[str], dict[str, str]]:
+        """The command and its environment for a question from this player."""
+        config = json.dumps(mcp_config(self.addons_dir, player))
+        command = [arg.replace("{system_prompt}", SYSTEM_PROMPT).replace("{mcp_config}", config) for arg in self._asked]
+        env = {**os.environ, ADDONS_DIR_ENV: str(self.addons_dir),
+               "WOW_MCP_SYSTEM_PROMPT": SYSTEM_PROMPT, "WOW_MCP_MCP_CONFIG": config}
+        env.pop(memory.PLAYER_ENV, None)
+        return command, {**env, memory.PLAYER_ENV: player} if player else env
+
+    def __call__(self, prompt: str, model: str | None = None, player: str | None = None) -> str:
+        command, env = self._for(player) if player else (self.command, self.env)
+        if model is not None:
+            command = with_model(command, model)
         try:
             # Its own process group, so a timeout also stops whatever it started (MCP servers).
             # On Windows its output is read as UTF-8, not in the system's code page.
@@ -440,7 +468,7 @@ class CommandAgent:
                         if WINDOWS else {"start_new_session": True})
             process = subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=self.env, cwd=self._folder.name, **platform,
+                text=True, env=env, cwd=self._folder.name, **platform,
             )
         except OSError as e:
             raise AgentError(f"couldn't start {self.command[0]}: {e.strerror}") from e
@@ -492,6 +520,9 @@ class Bridge:
         self.models = models  # the agent is Claude Code, so the player can pick its model
         self.model = model  # the one it answers with otherwise (--model), if known
         self.history = History(addons_dir / ADDON / HISTORY_FILE) if history is None else history
+        # Long-term memory, apart from the game's folder: every exchange, and the agent's notes.
+        self.archive = memory.Archive()
+        self.notes = memory.Notes()
         self.background = background  # jobs that run until `stop` (the online auction refresh)
         # Resets wait their turn too: a question asked before /ai new belongs to the old conversation.
         self.questions: queue.Queue[Question | Reset] = queue.Queue(MAX_WAITING)
@@ -524,6 +555,7 @@ class Bridge:
         if isinstance(item, Reset):
             log.info("%s starts a fresh conversation", item.player or "the player")
         elif item:
+            # memory.read_log reads this line and the answer's back (import-logs): keep their wording.
             log.info("%s asks%s: %s", item.player or "the player", f" ({item.model})" if item.model else "", item.text)
         else:
             log.warning("ignoring a post that isn't a question: %r", post.value)
@@ -555,7 +587,9 @@ class Bridge:
         answer = ""  # stays empty if the agent fails: failures don't become part of the conversation
         try:
             # The conversation is the same whichever model answers.
-            answer = self.agent(question.prompt(self.history.recent(question.player), self.history.clock()), model)
+            prompt = question.prompt(self.history.recent(question.player), self.history.clock(),
+                                     self.notes.about(question.player) if question.player else ())
+            answer = self.agent(prompt, model, question.player)
             text = answer or "I have no answer to that."
         except AgentTimeout as e:
             log.error("agent timed out: %s", e)
@@ -570,6 +604,11 @@ class Bridge:
             return
         if answer:
             self.history.add(question.player, question.text, answer)
+            try:
+                self.archive.add(question.player, question.text, answer.strip(), self.history.clock(),
+                                 (model or self.model) if self.models else None)
+            except OSError as e:
+                log.warning("couldn't archive this exchange: %s", e)
         log.info("answer: %s", text)
         # One message (the game prints it one chat line per line), so an answer costs one slot.
         self.say("\n".join(chat_lines(text)), self.signed(model))
@@ -665,7 +704,7 @@ def main() -> None:
     if not hasattr(messages, "publish_message"):
         sys.exit("Can't show answers in game: tools/messages.py has no publish_message.")
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     logging.getLogger("httpx2").setLevel(logging.WARNING)  # a line per request otherwise
     history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
     background = auction_refresh(addons_dir, args.no_auction_refresh)
