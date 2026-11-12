@@ -1037,12 +1037,19 @@ class Bridge:
                 item = self.questions.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if isinstance(item, Reset):
-                self.history.clear(item.player)
-            elif isinstance(item, Refresh):
-                self.refresh(item)
-            else:
-                self.answer(item)
+            # One question that goes wrong mustn't stop the answers: the player hears why, and the next one is taken.
+            try:
+                if isinstance(item, Reset):
+                    self.history.clear(item.player)
+                elif isinstance(item, Refresh):
+                    self.refresh(item)
+                else:
+                    self.answer(item)
+            except Exception as e:
+                log.exception("couldn't handle %r", item)
+                if not isinstance(item, Reset) and not getattr(item, "auto", False):
+                    self.say(f"Sorry, something went wrong on my side ({type(e).__name__}: {e}). Please ask again.",
+                             question=item.post)
 
     def answer(self, question: Question) -> None:
         model, effort = question.model, question.effort
@@ -1205,7 +1212,7 @@ class Bridge:
             send = lambda step, **counts: None  # noqa: E731 (quiet: no live-update slots)
         else:
             send = lambda step, **counts: self.tell(item, "progress", step, **counts)  # noqa: E731
-        progress = Progress(send, self.quiet, clock=self.clock, tokens=Tokens(self.clock) if self.tokens else None)
+        progress = Progress(send, self.quiet, clock=self.clock, tokens=Tokens() if self.tokens else None)
         try:
             prompt = replace(item, name=name, player=player).prompt(
                 found["refresh"], self.notes.about(player) if player else ())

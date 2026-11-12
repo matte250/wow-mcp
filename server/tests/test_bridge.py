@@ -1617,3 +1617,49 @@ end)
     lines = log.read_text(encoding="utf-8").splitlines()
     assert "chat: |cff33ff99[Claude Sonnet]|r 2 of your auctions are undercut." in lines
     assert not any("wow-mcp-bridge" in line for line in lines)
+
+
+def test_a_refresh_counts_tokens_too(addons):
+    # A bridge that counts the tokens Claude Code writes (as it does in game) sets up the count for a refresh as for a
+    # question: a mismatch there once stopped the bridge answering at all.
+    keep()
+    said = []
+
+    def agent(prompt, model, asker, effort, progress):
+        return "Updated."
+
+    b = Bridge(addons, agent, publish=lambda text, **kw: said.append(text), notify=lambda *a, **kw: None,
+               history=bridge.History(None), tokens=True)
+    b.accept(refresh_post(1))
+    b.refresh(b.questions.get_nowait())
+    assert said == ["Updated."]
+
+
+def test_one_failure_doesnt_stop_the_answers(addons, caplog):
+    # Something going wrong with one question or refresh: the player hears so, and the next is answered.
+    keep()
+    said = []
+
+    def agent(prompt, model, asker, effort, progress):
+        return "Here."
+
+    b = Bridge(addons, agent, publish=lambda text, **kw: said.append((text, kw["question"])),
+               notify=lambda *a, **kw: None, history=bridge.History(None))
+
+    def broken(item):
+        raise TypeError("a bug")
+
+    b.refresh = broken
+    b.accept(refresh_post(1))
+    b.accept(question(2, "hello?"))
+    worker = threading.Thread(target=b._work)
+    worker.start()
+    deadline = time.time() + 10
+    while len(said) < 2 and time.time() < deadline:
+        time.sleep(0.05)
+    b.stop.set()
+    worker.join(5)
+    assert said[0][0] == "Sorry, something went wrong on my side (TypeError: a bug). Please ask again." and \
+        said[0][1] == (77, 1), said
+    assert said[1] == ("Here.", (1, 2)), said
+    assert "couldn't handle" in caplog.text
