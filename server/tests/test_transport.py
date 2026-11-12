@@ -167,6 +167,10 @@ def test_without_receipts_the_server_moves_on(addons, monkeypatch):
     monkeypatch.setattr(t, "listening", lambda: True)
     took = []
     with FakeGame(t.addon_dir, confirm=False) as game:
+        # On Windows the first receiver starts the folder's watcher process, which takes about half a second and
+        # isn't part of the wait for a receipt: start it before timing.
+        with stream.Receiver(t.bell.out_dir):
+            pass
         for n in range(4):
             began = time.monotonic()
             assert not t.send([bell.data(n)])
