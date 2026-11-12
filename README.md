@@ -132,7 +132,8 @@ conversation. It also keeps notes about each character (preferences, projects, p
 there, and every question comes with them. `/ai new` starts a fresh conversation; the archive and notes
 stay. `--history` and `--history-minutes` change the short-term part (`--history 0` turns it off).
 `cd server && uv run wow-mcp-memory import-logs <logs>` adds exchanges from old bridge logs. Only one
-bridge can answer for a game at a time; a second one refuses to start. Its log lines start with the time.
+bridge can answer for a game at a time; a second one refuses to start. Its log lines start with the time. A Refresh click on a named
+visual costs like a question; a refresh on its own costs one slot (`--no-visual-refresh` stops those).
 
 ## Tools
 
@@ -224,6 +225,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
 | `/ai model [default, fable, opus, sonnet, haiku]` | Which Claude model answers your `/ai` questions (kept per character); the AI tab has a picker for it too |
 | `/ai thinking [default, low, medium, high, xhigh, max]` (or `/ai effort`) | How hard the AI thinks before answering (kept per character); the AI tab's picker has it too |
+| `/mcp visuals <name>`, `recent`, `refresh [<name>]`, `remove <name>` | The tables and lists your AI keeps, each under a tab at the window's top: one click switches, a dot marks one that changed while you looked at another; Refresh has your AI rebuild one; the x on a tab asks before removing it |
 | `/mcp visuals [show, hide, clear, <n>]` (or `/mcp table`) | The window of tables and lists from your AI. Click a header to sort (right-click: as it came); the wheel scrolls; drag the corner to resize |
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |

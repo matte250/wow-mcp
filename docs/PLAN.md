@@ -30,6 +30,7 @@ only by the integrator, who merges the workstreams one by one.
 | W23 | Long-term memory: conversation archive, search, notes | – | `memory.py`, `tools/memory.py`, `bridge.py` | data `~/.local/share/wow-mcp/` (`conversations.jsonl`, `notes.json`) |
 | W24 | The player's own auctions | `Auction.lua` (after the lookups, own do-block) | `tools/my_auctions.py` | KNOWLEDGE section `myAuctions` |
 | W25 | Visuals: tables, lists, texts in a window | `Messages.lua` (own do-block) | `tools/visuals.py` | payload key `visuals` |
+| W26 | Named visuals: kept under tabs, refreshed by the bridge | `Messages.lua` (visuals do-block) | `tools/visuals.py`, `bridge.py` | payload key `visuals` (`named`), stream posts `{refresh}`, `{remove}` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -134,8 +135,14 @@ startup, so after the one restart for this restructure, every feature only needs
 - **Visuals**: payload `visuals = { id, list = { { id, title, subtitle, at, blocks } } }`, last 5, at most 64 KB
   together. A block is `{ type, heading, … }`; a table row is one string with cells separated by `\n`. Block
   types are `BLOCK_TYPES` in tools/visuals.py plus `BLOCKS[type] = { parse, prepare, width, least?, draw }` in
-  Messages.lua: a new type (bars, lines next) is one of each. Guidance order 67. Messages.lua's main chunk is at
-  135 of Lua's 200 locals.
+  Messages.lua: a new type (bars, lines next) is one of each. Guidance order 67.
+  `named` (only when there are any) = `{ id, name, title, subtitle, at, blocks, refresh?, every? (minutes), player?,
+  auto? }`; names match in any case; never dropped (10, 24 KB each, 96 KB together). `auto` marks a version from
+  the bridge's own refresh (`visuals.background(addons_dir, name)` → `WowMCP/visuals-background.json`): no focus,
+  a dot. `WowMCPDB.visualWindow` gains `tab`, `updated`, `refreshing`; also `WowMCPDB.namedViews` and
+  `visualRemoved`. Posts `{ refresh = name, player, model?, effort? }` and `{ remove = name, player }`. Bridge:
+  `Refresh`, `refresh_due()` every 60 s, `--no-visual-refresh`. Guidance order 68. Messages.lua's main chunk is
+  at 158 of Lua's 200 locals.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
