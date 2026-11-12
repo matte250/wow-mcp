@@ -915,18 +915,33 @@ class Refresh:
         name = " ".join(value["refresh"].split())[:MAX_QUESTION]
         return cls(name, _player(value), _model(value), _effort(value)) if name else None
 
-    def prompt(self, instructions: str, notes: Sequence[memory.Note] = ()) -> str:
-        """The agent's prompt: the visual's refresh instructions, after the agent's notes about the player."""
+    def prompt(self, instructions: str, notes: Sequence[memory.Note] = (), layout: str = "",
+               curated: str | None = None) -> str:
+        """The agent's prompt: the visual's refresh instructions, after the agent's notes about the player; the layout
+        it keeps (tools/visuals.py's describe_layout), and how free it is with the content: a curated view shows
+        every entry of the player's list `curated`, an automatic one is rebuilt freely."""
         parts = []
+        who = self.player or "the player"
         if notes:
-            lines = [(f"What you know about {self.player or 'the player'} (your notes from earlier conversations, "
-                      "oldest first):")]
+            lines = [f"What you know about {who} (your notes from earlier conversations, oldest first):"]
             lines += [f"- #{n.id} ({time.strftime('%Y-%m-%d', time.localtime(n.at))}): {n.text}" for n in notes]
             parts.append("\n".join(lines))
         instructions = instructions.strip()
         if not instructions.endswith((".", "!", "?")):
             instructions += "."
-        task = f"Update the visual named {self.name!r}: {instructions} Use the visualize tool with name={self.name!r}."
+        if curated:
+            kind = (f"It's a curated view of {who}'s list {curated!r}: call get_list with name={curated!r} and show "
+                    "every entry on it with its current state (a list not made yet is empty). Never drop an entry, "
+                    "not even one that isn't worth it right now: mark it and say why. New candidates you find go only "
+                    f"in its Suggestions block, as suggestions for {who} to approve; change the list only when "
+                    f"{who} asks.")
+        else:
+            kind = "It's an automatic view: rebuild what's in it freely from live data."
+        if layout:
+            kind += (f" Keep its layout exactly: {layout}. The same blocks and columns in the same order; only the "
+                     "rows and values, list items, texts, subtitle and totals change.")
+        task = (f"Update the visual named {self.name!r}: {instructions} {kind} Use the visualize tool with "
+                f"name={self.name!r}.")
         if self.auto:
             task += " This runs on its own, on a timer, and nobody reads your reply: keep it to a few words."
         else:
@@ -1217,7 +1232,8 @@ class Bridge:
         progress = Progress(send, self.quiet, clock=self.clock, tokens=Tokens() if self.tokens else None)
         try:
             prompt = replace(item, name=name, player=player).prompt(
-                found["refresh"], self.notes.about(player) if player else ())
+                found["refresh"], self.notes.about(player) if player else (),
+                visuals.describe_layout(visuals.layout(found.get("blocks"))), found.get("list"))
             with visuals.background(self.addons_dir, name) if item.auto else contextlib.nullcontext():
                 text = self.agent(prompt, model, player, effort, progress) or f"Refreshed {name}."
         except AgentTimeout as e:

@@ -1390,6 +1390,10 @@ def test_bridge_refuses_a_launcher_that_would_garble_the_prompt(addons, tmp_path
 
 TRACKER = "Call get_my_auctions and show my active listings with undercut status"
 TEXT = [{"type": "text", "text": "x"}]
+# What a refresh of an automatic visual made of TEXT is told about its content and layout.
+AUTOMATIC = ("It's an automatic view: rebuild what's in it freely from live data. Keep its layout exactly: 1) a text "
+             "without a heading. The same blocks and columns in the same order; only the rows and values, list items, "
+             "texts, subtitle and totals change.")
 
 
 def keep(name="Auction tracker", refresh=TRACKER, every=None, title="My auctions"):
@@ -1428,8 +1432,8 @@ def test_a_refresh_click_runs_the_visuals_instructions(addons, caplog):
     b.refresh(item)
     assert asked == [(
         "Thorgrim clicked Refresh on a visual in game. Update the visual named 'Auction tracker': "
-        f"{TRACKER}. Use the visualize tool with name='Auction tracker'. Then reply in one short sentence: what "
-        "changed, or what stands out.",
+        f"{TRACKER}. {AUTOMATIC} Use the visualize tool with name='Auction tracker'. Then reply in one short "
+        "sentence: what changed, or what stands out.",
         "sonnet", "Thorgrim", "high",
     )]
     assert said == [("3 of your 8 auctions are undercut.", "Claude Sonnet · high", (77, 1))]
@@ -1446,6 +1450,48 @@ def test_a_refresh_click_runs_the_visuals_instructions(addons, caplog):
     other.accept(refresh_post(2, model="haiku", effort="low"))
     other.refresh(other.questions.get_nowait())
     assert asked[-1][1:] == (None, "Thorgrim", None)
+
+
+def test_a_curated_view_is_refreshed_from_its_list_in_its_layout(addons):
+    """A view of the player's list (visualize's list) shows every entry on it, and new candidates only as suggestions;
+    every refresh keeps the layout it was made with."""
+    from wow_mcp.tools import visuals
+
+    flips = "Show the items of my list 'Good flips' with their profit now"
+    columns = [{"name": "Item", "type": "item"}, {"name": "Profit", "type": "money"},
+               {"name": "Change", "type": "delta", "unit": "percent"}, {"name": "Note", "align": "center"}]
+    visuals.visualize("Good flips", [
+        {"type": "table", "heading": "On my list", "columns": columns, "rows": [[18731, 4500, 12, "x"]]},
+        {"type": "list", "heading": "Suggestions", "items": [{"text": "None right now"}], "value_type": "money"},
+    ], name="Good flips", refresh=flips, list="Good flips")
+    asked = []
+
+    def agent(prompt, model, asker, effort, progress):
+        asked.append(prompt)
+        return "Simple Wood is flooded now."
+
+    b = Bridge(addons, agent, publish=lambda text, **kw: None, notify=lambda *a, **kw: None,
+               history=bridge.History(None))
+    b.refresh(bridge.Refresh("good flips", "Thorgrim"))
+    assert asked == [
+        f"Thorgrim clicked Refresh on a visual in game. Update the visual named 'Good flips': {flips}. It's a curated "
+        "view of Thorgrim's list 'Good flips': call get_list with name='Good flips' and show every entry on it with "
+        "its current state (a list not made yet is empty). Never drop an entry, not even one that isn't worth it "
+        "right now: mark it and say why. New candidates you find go only in its Suggestions block, as suggestions "
+        "for Thorgrim to approve; change the list only when Thorgrim asks. Keep its layout exactly: 1) a table "
+        "headed 'On my list', columns 'Item' (item), 'Profit' (money), 'Change' (delta, in percent), 'Note' (text, "
+        "align center); 2) a list headed 'Suggestions', values of type money. The same blocks and columns in the "
+        "same order; only the rows and values, list items, texts, subtitle and totals change. Use the visualize tool "
+        "with name='Good flips'. Then reply in one short sentence: what changed, or what stands out."
+    ]
+    # Made automatic again (list=''), it's rebuilt freely, in the same layout.
+    visuals.visualize("Good flips", [
+        {"type": "table", "heading": "On my list", "columns": columns, "rows": [[4470, 300, -5, None]]},
+        {"type": "list", "heading": "Suggestions", "items": [{"text": "x", "value": 1}], "value_type": "money"},
+    ], name="Good flips", list="")
+    b.refresh(bridge.Refresh("Good flips", "Thorgrim"))
+    assert "It's an automatic view: rebuild what's in it freely from live data. Keep its layout exactly: 1) a table" \
+        in asked[1] and "get_list" not in asked[1]
 
 
 def test_refreshes_keep_out_of_the_questions_log_lines(addons, caplog):
@@ -1544,7 +1590,7 @@ def test_visuals_refresh_on_their_own_while_the_game_runs(addons, monkeypatch, c
                                                                              "low")
     b.refresh(item)
     prompt, model, asker, effort, marked = asked[0]
-    assert prompt == (f"Update the visual named 'Auction tracker': {TRACKER}. Use the visualize tool with "
+    assert prompt == (f"Update the visual named 'Auction tracker': {TRACKER}. {AUTOMATIC} Use the visualize tool with "
                       "name='Auction tracker'. This runs on its own, on a timer, and nobody reads your reply: keep it "
                       "to a few words.")
     assert (model, asker, effort, marked) == ("haiku", "Thorgrim", "low", True) and not mark.exists()
