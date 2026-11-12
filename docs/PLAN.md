@@ -31,6 +31,7 @@ only by the integrator, who merges the workstreams one by one.
 | W24 | The player's own auctions | `Auction.lua` (after the lookups, own do-block) | `tools/my_auctions.py` | KNOWLEDGE section `myAuctions` |
 | W25 | Visuals: tables, lists, texts in a window | `Messages.lua` (own do-block) | `tools/visuals.py` | payload key `visuals` |
 | W26 | Named visuals: kept under tabs, refreshed by the bridge | `Messages.lua` (visuals do-block) | `tools/visuals.py`, `bridge.py` | payload key `visuals` (`named`), stream posts `{refresh}`, `{remove}` |
+| W27 | Auction history: own sales, expiries, wins, listings, kept for good | – | `tools/auction_history.py` | KNOWLEDGE section `myAuctions`, ITEMS section `mail`; data `~/.local/share/wow-mcp/auction-history.jsonl` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -145,6 +146,12 @@ startup, so after the one restart for this restructure, every feature only needs
   `visualRemoved`. Posts `{ refresh = name, player, model?, effort? }` and `{ remove = name, player }`. Bridge:
   `Refresh`, `refresh_due()` every 60 s, `--no-visual-refresh`. Guidance order 68. Messages.lua's main chunk is
   at 158 of Lua's 200 locals.
+- **Auction history** (`tools/auction_history.py`): each call merges `myAuctions` (KNOWLEDGE) and `mail` (ITEMS) into
+  `auction-history.jsonl` in `memory.data_dir()`, append-only, one record per line: `{player, kind (sold, expired,
+  cancelled, won, listed), at, item, name, count, price (all of them)}` plus its source: `auction` (key id + kind),
+  `mail` (key kind, invoice name or attached item ID, count, price, expiry within 2 s) or `notice` (key kind, name,
+  time). Reading joins an auction's record, its mail and the notice into one event (same kind, item and count, within
+  a day). No verdicts: the AI combines it with vendor and auction prices. Guidance order 14.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,

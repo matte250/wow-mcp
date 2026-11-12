@@ -410,6 +410,8 @@ WOW_TOOLS = "mcp__wow__"  # how Claude Code names the wow tools
 STEPS = {
     "get_auction_prices": "checking auction prices",
     "watch_auction_prices": "checking auction prices",
+    "get_my_auctions": "checking auction prices",
+    "get_auction_history": "checking auction prices",
     "find_upgrades": "looking for upgrades",
     "get_item_details": "looking up items",
     "get_inventory": "looking in your bags",
