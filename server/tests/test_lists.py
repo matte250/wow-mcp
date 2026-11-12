@@ -233,7 +233,7 @@ def test_agents_are_told_whose_lists_they_are():
         assert said in lists.GUIDANCE, said
     for said in ("curated view of a list", "list=<the list's name>", "refresh instructions that name the list",
                  "Every refresh then reads the list afresh", "derived data (results, trackers, reports) stay automatic",
-                 "if you can't tell which they want, ask", "in the same layout", "'Good flips'",
+                 "if you can't tell which they want, ask (in game: make it automatic", "in the same layout", "'Good flips'",
                  "with list='Good flips'", "Make it with the view, so its layout has it",
                  "profit after the auction house's cut", "the cheapest vendor and where it is", "how many are listed",
                  "get_auction_history", "never dropped", "separate 'Suggestions' block",

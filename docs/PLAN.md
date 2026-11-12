@@ -33,6 +33,7 @@ only by the integrator, who merges the workstreams one by one.
 | W26 | Named visuals: kept under tabs, refreshed by the bridge | `Messages.lua` (visuals do-block) | `tools/visuals.py`, `bridge.py` | payload key `visuals` (`named`), stream posts `{refresh}`, `{remove}` |
 | W27 | Auction history: own sales, expiries, wins, listings, kept for good | – | `tools/auction_history.py` | KNOWLEDGE section `myAuctions`, ITEMS section `mail`; data `~/.local/share/wow-mcp/auction-history.jsonl` |
 | W28 | Spells and talents, spell details | `Player.lua` (own do-block) | `tools/spells.py` | REPUTATION sections `spellbook`, `talents`; payload key `spellLookup`, ITEM_DETAILS section `spellDetails` |
+| W29 | Lists the player owns; curated and automatic named views; fixed layouts | – | `tools/lists.py`, `tools/visuals.py`, `bridge.py` | data `~/.local/share/wow-mcp/lists.json`; named visual keys `list`, layout from blocks |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -153,6 +154,8 @@ startup, so after the one restart for this restructure, every feature only needs
   `mail` (key kind, invoice name or attached item ID, count, price, expiry within 2 s) or `notice` (key kind, name,
   time). Reading joins an auction's record, its mail and the notice into one event (same kind, item and count, within
   a day). No verdicts: the AI combines it with vendor and auction prices. Guidance order 14.
+- **Lists** (`tools/lists.py`): `lists.json` in `memory.data_dir()` = `{player: [{name, description, at, entries}]}`, each entry `{item?, label?, note?, at, why?}`; at most 200 entries a list. Names match in any case. Tools take `player` (the bridge's asker) like the memory tools. Reading a list returns `RULE`: show every entry, change entries only when the player asks. Guidance order 69 (lists, then curated views).
+- **Named visual kinds and layouts**: a named visual is automatic unless it has `list` (the name of a list of the player's, ≤ 40 characters): then it's curated, and `Refresh.prompt(instructions, notes, layout, curated)` tells the refresh to show that list's entries, every one. The layout is derived from the blocks, not stored: `layout(blocks)` = each block's type and heading, a table's columns (name, type, unit, alignment), a list's value type; `describe_layout` words it for prompts. A new version of a named visual in another layout is refused unless `change_layout=true` (only when the player asks). Guidance order 68.
 - **Spells and talents**: REPUTATION sections `spellbook` = `{ class, level, tabs = { { name, kind, spells = { { id,
   name, rank, passive, cd, lower, learn } } } }, problem }` and `talents` = `{ class, level, spec, role, unspent,
   spent, group, groups, trees = { { name, spent, talents = { { name, spell, rank, max, tier, needs, after, open,

@@ -130,7 +130,8 @@ conversation without having searched.
 - What you know about them (your notes) may come first. Save lasting facts and decisions with \
 remember, and update or forget notes that are wrong.
 - Don't ask them questions back: make a sensible assumption and say what you assumed. They can \
-correct you with another /ai."""
+correct you with another /ai. Suggesting is fine (e.g. entries for one of their lists): they approve \
+with another /ai, and only then do you make the change."""
 
 
 class AgentError(Exception):
