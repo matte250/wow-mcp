@@ -1822,6 +1822,7 @@ do
 		local post, session = ns.Stream.Post({ refresh = v.name, player = UnitName("player"),
 			model = (store.models or {})[me], effort = (store.efforts or {})[me] })
 		ByName("refreshing")[v.name] = { at = time(), id = v.id, post = post, session = session }
+		if ns.AIChat and ns.AIChat.Expect then ns.AIChat.Expect(post, session) end -- its notes come on the bell
 		v.missed = nil
 		if ns.run and ns.run.liveProblem then
 			ns.Print("Live updates are off (" .. ns.run.liveProblem .. "), so its new version only shows after /reload.")

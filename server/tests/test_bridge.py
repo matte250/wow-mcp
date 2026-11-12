@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -1550,7 +1551,9 @@ def test_visuals_refresh_on_their_own_while_the_game_runs(addons, monkeypatch, c
     assert said == [] and notes == [], "no live-update slots but its own"
     assert visuals.find_named(transport().load_state(), "Auction tracker")["auto"] is True
     assert "refreshing the visual 'Auction tracker' on its own: every 30 min, last updated " in caplog.text
-    assert "refresh of the visual 'Auction tracker' (on its own) took 0:00; tools used: none" in caplog.text
+    # How long it took depends on the game's receipt for the new version, which nothing sends here.
+    assert re.search(r"refresh of the visual 'Auction tracker' \(on its own\) took \d+:\d\d; tools used: none",
+                     caplog.text), caplog.text
 
     # Next due 30 minutes after its new version. A failed one is tried again an interval later, not sooner.
     updated = time.time()

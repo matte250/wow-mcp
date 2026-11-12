@@ -353,6 +353,10 @@ function AIChat.Status(m)
 		end
 		q.tokens, q.rate, q.counted = m.tokens, q.rate or 0, now
 	end
+	-- A visual being refreshed shows the news in its own window too (Messages.lua).
+	if ns.Visuals and ns.Visuals.Heard then
+		ns.Visuals.Heard({ status = m.status, post = q.post, session = q.session, text = q.step or "" })
+	end
 	Update()
 end
 
@@ -551,6 +555,16 @@ local function Ask(input)
 		return
 	end
 	if #pending == 0 then seq = ns.run.seq end -- data from before doesn't say the bridge has this one
+	table.insert(pending, { session = session, post = post, asked = GetTime() })
+	untilRedraw = STATUS_EVERY
+	ticker:SetScript("OnUpdate", Tick)
+	Update(true)
+end
+
+-- A post the bridge answers like a question though it wasn't typed: a named visual's Refresh (Messages.lua).
+-- Its notes on the bell and its reply then find it like a question's, and the status line shows meanwhile.
+function AIChat.Expect(post, session)
+	if #pending == 0 then seq = ns.run.seq end
 	table.insert(pending, { session = session, post = post, asked = GetTime() })
 	untilRedraw = STATUS_EVERY
 	ticker:SetScript("OnUpdate", Tick)
