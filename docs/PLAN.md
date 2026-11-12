@@ -32,6 +32,7 @@ only by the integrator, who merges the workstreams one by one.
 | W25 | Visuals: tables, lists, texts in a window | `Messages.lua` (own do-block) | `tools/visuals.py` | payload key `visuals` |
 | W26 | Named visuals: kept under tabs, refreshed by the bridge | `Messages.lua` (visuals do-block) | `tools/visuals.py`, `bridge.py` | payload key `visuals` (`named`), stream posts `{refresh}`, `{remove}` |
 | W27 | Auction history: own sales, expiries, wins, listings, kept for good | – | `tools/auction_history.py` | KNOWLEDGE section `myAuctions`, ITEMS section `mail`; data `~/.local/share/wow-mcp/auction-history.jsonl` |
+| W28 | Spells and talents, spell details | `Player.lua` (own do-block) | `tools/spells.py` | REPUTATION sections `spellbook`, `talents`; payload key `spellLookup`, ITEM_DETAILS section `spellDetails` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -152,6 +153,13 @@ startup, so after the one restart for this restructure, every feature only needs
   `mail` (key kind, invoice name or attached item ID, count, price, expiry within 2 s) or `notice` (key kind, name,
   time). Reading joins an auction's record, its mail and the notice into one event (same kind, item and count, within
   a day). No verdicts: the AI combines it with vendor and auction prices. Guidance order 14.
+- **Spells and talents**: REPUTATION sections `spellbook` = `{ class, level, tabs = { { name, kind, spells = { { id,
+  name, rank, passive, cd, lower, learn } } } }, problem }` and `talents` = `{ class, level, spec, role, unspent,
+  spent, group, groups, trees = { { name, spent, talents = { { name, spell, rank, max, tier, needs, after, open,
+  pending, choices } } } }, none, problem }`. They're on REPUTATION so STATE, asked before most answers, doesn't
+  carry them. Payload `spellLookup = { id, at, spells }` (at most 20); ITEM_DETAILS section `spellDetails`, answered
+  for 120 s, reused by the server for 90 s. Forever's talents are C_Traits, the class's trees as groups of one tree.
+  Guidance order 48.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
