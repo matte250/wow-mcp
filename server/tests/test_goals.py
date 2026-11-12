@@ -129,7 +129,7 @@ def test_goal_tracks_itself_and_completes(game):
         client.LoadAddon()
         client.Wait()
         client.Publish(HIDES)
-        client.Wait(4)
+        client.Wait(5) -- the goal, and its first look at the zone a tick later
         assert(has("New goal: 6 Medium Hide (Medium Hide 0/6)"), chat())
 
         -- The window: on its own (there's no plan), one row with the count.

@@ -72,14 +72,16 @@ startup, so after the one restart for this restructure, every feature only needs
   and replies carry `defaultModel` and `defaultEffort`. The agent
   contract is `agent(prompt, model, player, effort, progress)` (`progress.saw(step, tool)` on each sign of life, `progress.read(event)` for each of Claude Code's stream-json events (steps and tokens, `bridge.Tokens`), `progress.tick()` about every second, `bridge.Progress`); `player` reaches the wow tools as `WOW_MCP_PLAYER`.
 - **/ai progress**: the bridge acks each question and sends progress with `publish_status(status, text,
-  question, quiet)`: `messages` entries `{ id, status = "ack" | "progress", text, session, post, quiet, at }`,
-  routed to `ns.AIChat.Status(m)`, never shown as messages; replies carry `session`/`post`, and a question's
-  notes are dropped when its newer note or answer is added. `ns.Stream.Post(value)` returns `post, session`.
-  Stub chat windows have `RemoveMessagesByPredicate` and `TransformMessages`. Status entries also carry
-  `tokens` and `rate` when the agent streams Claude Code's events (`Bridge(tokens=agent.streams)`; the ack's
-  `tokens` is 0); between updates the game runs the count on at `rate` for up to 40 s (Chat.lua's
-  `GUESS_FOR` = `bridge.PROGRESS_EVERY`). Answers carry `took` (seconds) and `tokens` (the result's exact
-  count); the AI tab adds a grey "took M:SS · ↓ N tokens" line.
+  question, quiet, tokens)`, one frame of the bell each, no slot: ACK `{ question = post id mod 16, quiet }`
+  and PROGRESS `{ step, tokens }`, which names no question (it's about the oldest one the bridge has acked: it
+  answers in turn; the bridge sends none for a question from before the game's last /reload). Core.lua passes
+  them to `ns.AIChat.Status(m)` (`m.status` "ack" | "progress", `m.question`, `m.quiet`, `m.step` = the step's
+  number, `m.tokens`). Steps are numbered by `bridge.STEP_CODES`, which Chat.lua's `STEPS` lists in the same
+  order (a new step goes at the end of both). Progress goes every 1.5 s at most (`bridge.PROGRESS_EVERY`) when
+  the step or the count changed; between notes the game runs the count on at the pace of its last two notes for
+  up to 5 s (Chat.lua's `GUESS_FOR`). `ns.Stream.Post(value)` returns `post, session`. Stub chat windows have
+  `RemoveMessagesByPredicate` and `TransformMessages`. Answers carry `took` (seconds) and `tokens` (the
+  result's exact count); the AI tab adds a grey "took M:SS · ↓ N tokens" line.
 - **Items in AI text**: `ns.ItemText(text)` escapes AI text for display outside chat and shows
   `{item:<id>}` / `{item:<id>:<name>}` as icon plus game name in quality colour; `ns.RenderItems(text)`
   for text that's already escaped, `ns.ItemIcon(id)` for just the icon. `ns.Print` and
@@ -152,8 +154,17 @@ startup, so after the one restart for this restructure, every feature only needs
   account-wide, the time of the last full scan request. `ns.Auction.Price(id)` returns `src`
   ("scan"/"search") and `last` (`{price, listed, at}`) when the item isn't listed now. Container
   items carry `bound = true` when soulbound.
-- **Core state** (read only): `ns.run` (`live`, `liveProblem`, `seq`, `req`), `ns.SlotsLeft()`,
+- **Core state** (read only): `ns.run` (`live`, `liveProblem`, `verified`, `frame`, `seq`, `req`), `ns.SlotsLeft()`,
   `ns.SLOT_COUNT`, and `ns.BUILD` (from `Build.lua`, which the installer generates).
+- **The bell** (`wow_mcp/bell.py` the format, `transport.py` the writing, Core.lua the reading): 24 files of
+  `bell/` (`00.wav`-`23.wav`) between the markers `lead.wav` and `seal.wav`, each valid (a hard link to
+  `on.wav`, 8 s of silence the client streams) or empty; `off.wav` stays empty for the login self-test. A frame
+  is 3 bits of type, 16 of payload and a CRC-5 over them and the parity: DATA (new payload seq), REQUEST (kind,
+  id), ACK and PROGRESS (above), TEST (the handshake), LONG and MORE (a message of up to 4095 bytes, two to a
+  frame). The game confirms each frame it takes with a receipt over the stream (`WM\3`, `stream.find_receipts`),
+  and while the game runs (`Transport.listening`) the writer waits for it before the next frame. Small data that
+  needn't wait for a slot: `transport().send(bell.long(kind, bytes))` and in game `ns.RegisterLong(kind, fn)`,
+  kinds 0-15 (none used yet). `bell-state.json` keeps when the game last confirmed a frame, for `get_status`.
 - **Sending to the server**: `ns.Stream.Send(id, value)` (replies; Requests.lua does this for you).
 - **Cost**: replies are JSON, then zlib, then streamed at about 1.5 ms of frame time per frame. Keep
   sections reasonably small. A few KB compressed is fine (about a second); avoid tens of KB.
@@ -172,18 +183,26 @@ startup, so after the one restart for this restructure, every feature only needs
   models that include `game: str = version`, so agents know which version the data is for.
 - **Sending to the game**: `transport().publish(lambda state, seq: state.update(<key>=...))`. Only
   touch your own payload key. `state` is the full persistent state, so you can read your key's
-  previous value to merge. Each publish uses one of 300 slots per UI session.
+  previous value to merge. Each publish uses one of 300 slots per UI session, and a frame of the bell:
+  while the game runs, it returns once the game has confirmed that (about 0.5 s, up to 3 s when the game
+  was idle).
   The payload is rendered as Lua by `transport.to_lua`: dict keys must be Lua identifiers. For
   maps keyed by numbers (e.g. item IDs), send a list of records (`[{"item": 123, "text": ...}]`).
 - `kinds.py` has the kind numbers (must match `Requests.lua`): STATE 0, QUESTS 1, ITEMS 2,
-  REPUTATION 3, TRAVEL 4, KNOWLEDGE 5, STATUS 6, ITEM_DETAILS 7. All eight are taken, so new data
-  goes in as a section of an existing kind (usually `STATE`).
+  REPUTATION 3, TRAVEL 4, KNOWLEDGE 5, STATUS 6, ITEM_DETAILS 7. All eight are taken (a REQUEST frame has 3
+  bits for the kind), so new data goes in as a section of an existing kind (usually `STATE`).
 - `install.addon_build()` is the build ID of the addon source in the repo. The installer writes
   the same ID into the installed `Build.lua`.
 
 ### Tests (`server/tests/`)
 - Add the game APIs your feature needs to `stub/apis/<feature>.lua`. All files there are loaded
   automatically. Mimic the real client's behaviour, including its quirks.
+- Stub sounds behave as the client's (`stub/apis/sound.lua`): long ones streamed on every play, short ones kept for
+  the launch, empty ones silent, only files found at startup playable (`client.Launch()` restarts); `client.reads`
+  lists what the client read from disk. The bell steps once per stub tick of 0.5 s (`client.framesPerTick = 2`
+  gives the game's 0.25 s) and needs a look at `seal.wav` and then the frame, so a frame is taken on the third tick
+  of the `client.Wait()` after `client.Publish`, and an effect a ticker shows needs one tick more. `client.Publish`
+  first waits for the last frame to be taken (`client.Settle()`), as the server does.
 - Stub items can have an `icon` (file ID); `ITEM_QUALITY_COLORS` and `C_Item.GetItemIconByID` exist.
   Font strings measure text as shown: colour codes and link data take no room, an inline texture is 12 px.
 - Fixtures (`conftest.py`):
@@ -336,7 +355,7 @@ restricted content. Wrap anything doubtful in `pcall`.
   classic-era data as an explicit fallback. Research which sources cover Forever.
 
 ### W14 Status / version tool
-- Section `status` on kind STATUS: `{ build = ns.BUILD, live, liveProblem, slotsLeft, slotCount,
+- Section `status` on kind STATUS: `{ build = ns.BUILD, live, liveProblem, verified, slotsLeft, slotCount,
   seq, req }`.
 - Tool `get_status()`: the in-game build compared with the installed `Build.lua` and with
   `install.addon_build()`. The advice is "/reload" (installed is newer than what's loaded),
@@ -365,6 +384,6 @@ commits its work there.
    with the player, one feature at a time.
 3. Update `README.md` (tools table, in-game commands) for each merged feature.
 4. Shared files: `Core.lua`, `Requests.lua`, `Map.lua`, `Map.xml`, `WowMCP.toc`, `app.py`, `kinds.py`,
-   `transport.py`, `install.py`, `server.py`, `conftest.py`, `stub/client.lua`, the existing
+   `bell.py`, `transport.py`, `install.py`, `server.py`, `conftest.py`, `stub/client.lua`, the existing
    `stub/apis/*.lua` files (except `quests.lua`, which W3 owns), `pyproject.toml`, `README.md`. If a workstream needs a change here, it
    reports it instead of making it.

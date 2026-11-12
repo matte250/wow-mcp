@@ -1,6 +1,7 @@
 """Map markers and the game's waypoint, delivered live through the slots (Map.lua, tools/map.py)."""
 
-from wow_mcp.transport import Transport, SILENT_WAV, bell_path
+from wow_mcp import bell
+from wow_mcp.transport import Transport
 
 
 def test_live_update_and_clear(run_client):
@@ -219,18 +220,17 @@ def test_live_updates_off_when_sound_disabled(run_client):
     """)
 
 
-def test_signal_with_stale_slot_moves_on(addons, run_client):
-    # A raised signal whose slot doesn't carry newer data (only possible if the client
-    # cached that signal file earlier in the same process) must not stall the channel.
-    transport = Transport(addons)
-    bell_path(transport.addon_dir, "sig", 1).write_bytes(SILENT_WAV)
+def test_new_data_frame_with_stale_slot_moves_on(addons, run_client):
+    # A frame saying there's new data whose slot carries nothing newer (here: the bell says #1, the slots
+    # still have #0) spends one slot and doesn't stall the channel.
+    Transport(addons).bell.write(bell.data(1))
     run_client(r"""
         local ns = client.LoadAddon()
         client.Wait()
-        assert(client.loaded.WowMCP_S001 and ns.run.seq == 0, "stale signal spends one slot")
+        assert(client.loaded.WowMCP_S001 and ns.run.seq == 0, "stale data spends one slot")
         client.Wait()
         assert(not client.loaded.WowMCP_S002, "and only one")
-        -- The update on the spent signal index waits for the next one, which carries the full state.
+        -- The next updates come through, each with the full state.
         client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"}]}')
         client.Wait()
         client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"},{"zone":"Orgrimmar","x":1,"y":1,"label":"Gate"}]}')

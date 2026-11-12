@@ -1,6 +1,6 @@
--- WowMCP requests: what the server can ask the game for. Request n asks for kind n % 8
--- (Core.lua's req/ doorbell). Each feature registers the sections it contributes to a kind,
--- and the reply is { [section] = value, ... }, sent with Stream.lua.
+-- WowMCP requests: what the server can ask the game for. A REQUEST frame of the bell (Core.lua)
+-- carries the kind and the request's id. Each feature registers the sections it contributes to a
+-- kind, and the reply is { [section] = value, ... }, sent with Stream.lua under that id.
 
 local _, ns = ...
 

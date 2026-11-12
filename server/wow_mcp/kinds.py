@@ -1,5 +1,5 @@
-"""What a request asks the game for. Request n asks for kind n % COUNT; must match the
-addon's Requests.lua."""
+"""What a request asks the game for: a REQUEST frame of the bell (bell.py) carries the kind in 3 bits. Must
+match the addon's Requests.lua."""
 
 COUNT = 8
 

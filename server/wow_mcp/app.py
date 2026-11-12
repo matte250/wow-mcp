@@ -91,7 +91,8 @@ def transport() -> Transport:
     return _transport
 
 
-# The addon notices a request within about a second; replies then stream at a few KB/s.
+# The addon takes a request within about 2.5 s (transport.RECEIPT_WAIT) and starts its reply right after;
+# replies then stream at a few KB/s.
 START_TIMEOUT = 4.0
 IDLE_TIMEOUT = 2.0
 
@@ -110,7 +111,7 @@ async def request(kind: int) -> tuple[dict, str]:
     for attempt in range(2):
         try:
             with stream.Receiver(transport().addon_dir / "out") as receiver:
-                n = transport().request(kind)
+                n = await asyncio.to_thread(transport().request, kind, receiver)
                 reply = await asyncio.to_thread(receiver.receive, n, START_TIMEOUT, IDLE_TIMEOUT)
             if isinstance(reply, dict):
                 return reply, now.installed.describe()
