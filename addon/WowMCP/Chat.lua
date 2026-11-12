@@ -55,6 +55,7 @@ local STEPS = {
 	"checking your professions", "checking your recipes", "checking vendors", "checking flight paths",
 	"checking reputations", "remembering earlier conversations", "marking the map", "marking a route",
 	"marking areas", "making a plan", "making a table or list", "searching the web", "reading a web page",
+	"looking up NPCs", "looking up objects", "looking up quests",
 }
 
 -- Links shift-clicked into the question become text the agent can read:
