@@ -86,7 +86,7 @@ def test_items_the_player_doesnt_have(live_game, replies):
     assert [i.model_dump() for i in result.items] == [GLOVES, TUNIC, details(999999, "unknown"), AXE]
     assert again == result and len(replies) == asked + 1
     assert items.transport().load_state() == {
-        "seq": 1, "req": 8 * asked + 7, "itemLookup": {"id": 1, "items": [4253, 4243, 999999, 12282]}}
+        "seq": 1, "req": asked + 1, "itemLookup": {"id": 1, "items": [4253, 4243, 999999, 12282]}}
 
 
 def test_item_that_loads_on_a_retry(live_game, replies):

@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from wow_mcp import app, game, install
+from wow_mcp import app, game, install, transport
 from wow_mcp.tools import status
 from wow_mcp.transport import slot_name
 
@@ -28,9 +28,9 @@ def test_up_to_date(live_game):
     assert result.model_dump() == {
         "game": FOREVER, "ok": True, "advice": [], "game_answered": True, "game_problem": None,
         "repo_build": build, "installed_build": build, "loaded_build": build,
-        "live_updates": True, "live_problem": None, "slots_left": 300, "slot_count": 300,
+        "live_updates": True, "live_problem": None, "live_verified": False, "slots_left": 300, "slot_count": 300,
         "last_update_sent": 0, "last_update_in_game": 0, "blocked_actions": [],
-    }
+    }, "the first request after login answers before the handshake (test_bell)"
 
 
 def test_blocked_actions_are_reported(live_game):
@@ -99,12 +99,15 @@ def test_game_not_answering(addons, monkeypatch):
     assert result.advice == [] and result.installed_build == result.repo_build == build
     assert result.last_update_sent == 0 and result.loaded_build is None and result.slots_left is None
 
-    # Running, but the addon doesn't answer (e.g. live updates off, or the addon not loaded).
+    # Running, but the addon doesn't answer (e.g. live updates off, or the addon not loaded): it didn't confirm the
+    # request's frame either.
     monkeypatch.setattr(game, "running_folders", lambda proc=None: {"_forever_"})
-    monkeypatch.setattr(app, "START_TIMEOUT", 0.3)
+    monkeypatch.setattr(transport, "RECEIPT_WAIT", 0.3)
     result = get_status()
     assert result.game_problem.startswith("The game didn't answer.")
-    assert len(result.advice) == 1 and result.advice[0].startswith("Ask the player to type /mcp status in game.")
+    assert len(result.advice) == 1 and result.advice[0].startswith(
+        "The game hasn't confirmed a live update yet (it reads them by playing silent sound files, so game sound must "
+        "be on). Ask the player to type /mcp status in game.")
 
     # Slot addons missing on disk too: install first, then restart.
     shutil.rmtree(addons / slot_name(7))

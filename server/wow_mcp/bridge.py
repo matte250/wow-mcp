@@ -6,14 +6,15 @@ player's chat as a message (tools/messages.py), marked as a reply so the game sh
 chat tab. Questions are answered one at a time.
 
 An answer may take as long as it needs while the agent visibly works. The game hears that each
-question arrived (an ack, right away) and, now and then, what the agent is doing (Progress), for
-the AI tab's status line; it can tell from them that the bridge is up. Claude Code streams its
-events (stream-json), and every one of them is a sign of life: it's stopped only after --timeout
-seconds without any, or when it reaches --max-time, a guard against runaways. Other agents
-(--agent) print only their answer, so --max-time is all they have.
+question arrived (an ack, right away) and, every second or two, what the agent is doing (Progress),
+for the AI tab's status line; it can tell from them that the bridge is up. These notes are frames of
+the bell (bell.py), so they cost no live-update slot. Claude Code streams its events (stream-json),
+and every one of them is a sign of life: it's stopped only after --timeout seconds without any, or
+when it reaches --max-time, a guard against runaways. Other agents (--agent) print only their
+answer, so --max-time is all they have.
 
 Claude Code's events also say how many tokens it writes (Tokens), so each note to the game carries
-the count so far and the pace, which the game runs on between notes, and the answer the final count.
+the count so far, and the answer the final count.
 
 Each agent starts from zero, so the player's recent exchanges go into the prompt, which makes
 follow-up questions work. They're kept in a file (History), so a restart keeps the conversation;
@@ -72,14 +73,12 @@ SENDER = "Claude"
 # about 5 s for a web search or fetch. The slowest tools wait on the network for up to a minute (an auction snapshot).
 SILENCE = 120.0
 MAX_TIME = 30 * 60.0  # seconds any answer may take, however busy (--max-time): only a guard against runaways
-PROGRESS_EVERY = 40.0  # seconds at least between progress updates to the game: each costs a live-update slot
-SETTLE = 5.0  # seconds a step must last before the game is told about it, so short ones don't spend slots
+# Seconds at least between progress updates to the game. Each is a frame of the bell, which takes the game about
+# half a second to read, so this leaves the bell free about half the time for the tools' own frames.
+PROGRESS_EVERY = 1.5
+SETTLE = 1.0  # seconds a step must last before the game is told about it, so the line doesn't flicker
 TICK = 1.0  # seconds between looks at a running agent
 CHARS_PER_TOKEN = 4  # text and tool calls still streaming are counted by their length, at about this many a token
-RATE_WINDOW = 10.0  # seconds of writing the pace sent to the game is measured over
-# Seconds without a new token after which the agent isn't writing (a tool runs), so its pace is 0. Measured live
-# (2.1.322): thinking streams an estimate at least every 3.3 s.
-PAUSE = 5.0
 MAX_WAITING = 5  # questions queued behind the one being answered
 MAX_QUESTION = 500
 LINE_WIDTH = 250  # characters per chat message
@@ -378,11 +377,11 @@ def publish_message(text: str, style: str = "chat", sender: str = SENDER, reply:
 
 
 def publish_status(status: str, text: str = "", question: tuple[int, int] | None = None,
-                   quiet: float | None = None, tokens: int | None = None, rate: float | None = None) -> int:
+                   quiet: float | None = None, tokens: int | None = None) -> bool:
     """Tell the game how a question is coming along, for the AI tab's status line (tools/messages.py)."""
     from wow_mcp.tools.messages import publish_status as publish
 
-    return publish(status, text, question=question, quiet=quiet, tokens=tokens, rate=rate)
+    return publish(status, text, question=question, quiet=quiet, tokens=tokens)
 
 
 def _span(seconds: float, before_noun: bool = False) -> str:
@@ -428,14 +427,32 @@ STEPS = {
 }
 
 
+LOOKING, UPDATING, OTHER_TOOLS = "looking at your game", "updating your game", "using its tools"
+# Every step as the bell carries it (bell.PROGRESS, 5 bits): its number is its place here, 0 for none. Chat.lua's
+# STEPS has the same list; a new step goes at the end of both.
+STEP_CODES = (
+    "", THINKING, WRITING, LOOKING, UPDATING, OTHER_TOOLS,
+    "checking auction prices", "looking for upgrades", "looking up items", "looking in your bags",
+    "checking where you are", "looking at your character", "reading your quest log", "checking your quests",
+    "checking your professions", "checking your recipes", "checking vendors", "checking flight paths",
+    "checking reputations", "remembering earlier conversations", "marking the map", "marking a route",
+    "marking areas", "making a plan", "making a table or list", "searching the web", "reading a web page",
+)
+
+
+def step_code(step: str) -> int:
+    """A step's number for the bell; a step missing from STEP_CODES shows as using its tools."""
+    return STEP_CODES.index(step) if step in STEP_CODES else STEP_CODES.index(OTHER_TOOLS)
+
+
 def tool_step(name: str) -> str:
     """What the status line says while the agent calls a tool, by Claude Code's name for it."""
     short = name.removeprefix(WOW_TOOLS)
     if short in STEPS:
         return STEPS[short]
     if name.startswith(WOW_TOOLS):
-        return "looking at your game" if short.startswith(("get_", "list_", "search_")) else "updating your game"
-    return "using its tools"
+        return LOOKING if short.startswith(("get_", "list_", "search_")) else UPDATING
+    return OTHER_TOOLS
 
 
 def event_step(event: object) -> tuple[str | None, str | None]:
@@ -487,14 +504,10 @@ class Tokens:
     then a system thinking_tokens event); only the first counts.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic):
-        self.clock = clock
-        self.started = clock()
+    def __init__(self):
         self.final: int | None = None  # the result's count
         self._messages: dict[str, list] = {}  # by message id: [estimate, exact count once it's in]
         self._current = ""  # the message streaming, for events that don't say theirs
-        # (when, tokens estimated by then), over the last RATE_WINDOW: the pace, which exact counts coming in don't move.
-        self._written: list[tuple[float, float]] = [(self.started, 0.0)]
 
     def see(self, event: object) -> None:
         """One of Claude Code's stream-json events; most say nothing about tokens."""
@@ -518,10 +531,6 @@ class Tokens:
             message[1] = count
         elif kind == "content_block_delta" and (tokens := _delta_tokens(inner.get("delta"))):
             message[0] += tokens
-            now = self.clock()
-            self._written.append((now, self._written[-1][1] + tokens))
-            while len(self._written) > 2 and self._written[1][0] <= now - RATE_WINDOW:
-                self._written.pop(0)
 
     @property
     def total(self) -> int:
@@ -529,26 +538,17 @@ class Tokens:
             return self.final
         return sum(exact if exact is not None else round(estimate) for estimate, exact in self._messages.values())
 
-    def rate(self) -> float:
-        """Tokens a second it has written lately (over RATE_WINDOW); 0 once it has written none for PAUSE seconds."""
-        now = self.clock()
-        last, written = self._written[-1]
-        if now - last > PAUSE:
-            return 0.0
-        before = next((w for t, w in reversed(self._written) if t <= now - RATE_WINDOW), self._written[0][1])
-        span = min(RATE_WINDOW, now - self.started)
-        return (written - before) / span if span > 0 else 0.0
-
 
 class Progress:
     """Tells the game how an answer is coming along, for the AI tab's status line: the step the agent is on (e.g.
-    "checking auction prices"), as the agent says (CommandAgent, from Claude Code's events).
+    "checking auction prices"), as the agent says (CommandAgent, from Claude Code's events), and with `tokens` (the
+    agent streams Claude Code's events) how many it has written so far.
 
-    Each update costs one of the game's live-update slots (300 per UI session), so a step goes out only once it has
-    lasted SETTLE seconds, and at most every `every` seconds. While the agent keeps busy, it goes out again unchanged
-    after `quiet` seconds, so the game can tell a long think from a bridge that's gone. `send(step)` publishes one;
-    with `tokens` (the agent streams Claude Code's events), `send(step, tokens=..., rate=...)`, the count so far and
-    the pace, which the game runs on until the next one.
+    Each update is a frame of the bell, so it costs no live-update slot, but it holds the bell for about half a
+    second: an update goes out when the step or the count changed, at most every `every` seconds, and a step only
+    once it has lasted SETTLE seconds. While the agent keeps busy without news, it goes out again unchanged after
+    `quiet` seconds, so the game can tell a long tool call from a bridge that's gone. `send(step)` publishes one;
+    with `tokens`, `send(step, tokens=...)`.
     """
 
     def __init__(self, send: Callable[..., object], quiet: float = SILENCE, every: float = PROGRESS_EVERY,
@@ -564,6 +564,7 @@ class Progress:
         self.shown: str | None = None  # what the game was told
         self.tools: Counter[str] = Counter()  # the tools it called, in order
         self.tokens = tokens  # what it has written so far
+        self.written = 0 if tokens is not None else None  # the count the game was told (the ack's: none yet)
 
     def read(self, event: object) -> None:
         """One of Claude Code's stream-json events (None for other output): a sign of life, which may say what the agent
@@ -583,18 +584,20 @@ class Progress:
         self.tick()
 
     def tick(self) -> None:
-        """Sends the step if that's due. The agent calls this about every second while it runs."""
+        """Sends the step and the count if that's due. The agent calls this about every second while it runs."""
         now = self.clock()
         if now - self.sent < self.every:
             return
-        changed = self.step not in (None, self.shown) and now - self.since >= SETTLE
+        step = self.step if now - self.since >= SETTLE else self.shown  # one too new to show waits
+        written = self.tokens.total if self.tokens is not None else None
+        changed = step not in (None, self.shown) or written != self.written
         busy = self.alive > self.sent and now - self.sent >= self.quiet
         if changed or busy:
-            self.sent, self.shown = now, self.step
+            self.sent, self.shown, self.written = now, step, written
             if self.tokens is None:
-                self.send(self.step or "")
+                self.send(step or "")
             else:
-                self.send(self.step or "", tokens=self.tokens.total, rate=round(self.tokens.rate(), 1))
+                self.send(step or "", tokens=written)
 
     def used(self) -> str:
         """The tools it called, for the log: "get_auction_prices ×3, WebSearch"."""
@@ -886,6 +889,7 @@ class Bridge:
         self.agent = agent
         self.publish = publish
         self.notify = notify  # tells the game how a question is coming along (publish_status)
+        self.session: int | None = None  # the game's UI session of the newest question acked (its /reload token)
         # The longest the agent goes without a sign of life while all is well (CommandAgent.quiet): the game is
         # told, and progress is sent at least that often.
         self.quiet = quiet
@@ -949,7 +953,7 @@ class Bridge:
                          question=item.post)
             return
         if isinstance(item, Question):  # right away, so the game knows the bridge is up
-            self.tell(item, "ack", tokens=0 if self.tokens else None)
+            self.tell(item, "ack")
 
     def _work(self) -> None:
         while not self.stop.is_set():
@@ -972,7 +976,7 @@ class Bridge:
             effort = None
         answer = ""  # stays empty if the agent fails: failures don't become part of the conversation
         progress = Progress(lambda step, **counts: self.tell(question, "progress", step, **counts), self.quiet,
-                            clock=self.clock, tokens=Tokens(self.clock) if self.tokens else None)
+                            clock=self.clock, tokens=Tokens() if self.tokens else None)
         try:
             # The conversation is the same whichever model answers, however hard it thinks.
             prompt = question.prompt(self.history.recent(question.player), self.history.clock(),
@@ -1033,12 +1037,16 @@ class Bridge:
         except Exception:
             log.exception("couldn't show this in game: %s", text)
 
-    def tell(self, question: Question, status: str, text: str = "", tokens: int | None = None,
-             rate: float = 0.0) -> None:
+    def tell(self, question: Question, status: str, text: str = "", tokens: int | None = None) -> None:
         """A note to the game about a question it waits for, for its status line (never shown as a message):
-        "ack" when it arrives, "progress" with the step the agent is on. Each says how long the bridge may then
-        stay quiet while all is well and, if they're counted, the tokens written so far and how fast (the ack's: 0)."""
-        counts = {} if tokens is None else {"tokens": tokens, "rate": rate}
+        "ack" when it arrives, with how long the bridge may then stay quiet while all is well; "progress" with the
+        step the agent is on and, if they're counted, the tokens written so far. Progress names no question (the
+        game knows the bridge answers in turn), so none goes out for one asked before the game's last /reload."""
+        if status == "ack" and question.post:
+            self.session = question.post[0]
+        elif question.post and self.session not in (None, question.post[0]):
+            return
+        counts = {} if tokens is None else {"tokens": tokens}
         try:
             self.notify(status, text, question=question.post, quiet=self.quiet, **counts)
         except Exception:

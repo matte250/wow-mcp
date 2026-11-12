@@ -3,6 +3,7 @@ per game API area in stub/apis/), with the real installer, transport and tools w
 files in between."""
 
 import contextlib
+import os
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,26 @@ def no_real_memory(tmp_path, monkeypatch):
     folder of its own, and no player named by a bridge."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.delenv(memory.PLAYER_ENV, raising=False)
+
+
+SITECUSTOMIZE = """
+from wow_mcp import game
+game.running_folders = lambda proc=None: set()
+"""
+
+
+@pytest.fixture(scope="session")
+def no_game_site(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("site")
+    (folder / "sitecustomize.py").write_text(SITECUSTOMIZE)
+    return folder
+
+
+@pytest.fixture(autouse=True)
+def no_game_in_subprocesses(no_game_site, monkeypatch):
+    """Python that a test starts (the Lua scripts' publish scripts) doesn't see WoW clients running on this machine
+    either: it would wait for one to confirm the bell's frames."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(no_game_site), os.environ.get("PYTHONPATH")])))
 
 
 @pytest.fixture

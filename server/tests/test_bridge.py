@@ -113,13 +113,14 @@ function client.LoadAddon()
     local receive = WowMCP_Receive
     WowMCP_Receive = function(payload)
         for _, m in ipairs(payload.messages or {}) do
-            if m.status then
-                Log(string.format("status %d %s %s/%s: %s", m.id, m.status, m.session, m.post, m.text))
-            else
-                Log(string.format("message %d %s: %s", m.id, m.from, m.text))
-            end
+            Log(string.format("message %d %s: %s", m.id, m.from, m.text))
         end
         return receive(payload)
+    end
+    local status = ns.AIChat.Status -- the bridge's notes, from the bell
+    ns.AIChat.Status = function(m)
+        Log(string.format("status %s %s: %s", m.status, tostring(m.question), tostring(m.step)))
+        return status(m)
     end
     return ns
 end
@@ -168,11 +169,10 @@ def test_ai_in_game_end_to_end(live_game, addons, tmp_path, monkeypatch, running
     assert "chat: |cff33ff99WowMCP|r Asking… what now?" in lines
     received = [line.split(" ", 2)[2] for line in dict.fromkeys(lines) if line.startswith("message ")]
     assert received == ["Claude: You're in Durotar, at 50, 50.", "Claude: Go and see Gornek."]
-    # Each question is acknowledged as it arrives, by the post it came in: a note for the AI tab's status
-    # line, never a chat line (and no warning that the bridge is down).
-    acks = {line.split(":")[0].split()[3] for line in lines if line.startswith("status ") and " ack " in line}
-    session = next(iter(acks)).split("/")[0]
-    assert acks == {f"{session}/1", f"{session}/2"}
+    # Each question is acknowledged as it arrives, by the post it came in (over the bell, no slot): a note for the AI
+    # tab's status line, never a chat line (and no warning that the bridge is down).
+    acks = [line.split(":")[0].split()[2] for line in lines if line.startswith("status ack ")]
+    assert acks == ["1", "2"]
     assert [line for line in dict.fromkeys(lines) if line.startswith("chat: ") and "Claude" in line] == [
         "chat: |cff33ff99[Claude]|r You're in Durotar, at 50, 50.", "chat: |cff33ff99[Claude]|r Go and see Gornek."]
     assert not any("wow-mcp-bridge" in line for line in lines)
@@ -212,10 +212,11 @@ def test_new_conversation_in_game_end_to_end(live_game, addons, tmp_path, monkey
         "Thorgrim asks, in game: what now?",
     ]
     assert "chat: |cff33ff99WowMCP|r Starting a fresh conversation." in log.read_text().splitlines()
-    # The reset itself sends nothing back (no live-update slot spent), unlike a question (its ack).
+    # The reset itself sends nothing back, unlike a question (its ack).
     state = json.loads((addons / "WowMCP" / "server-state.json").read_text())
-    assert [m["text"] for m in state["messages"] if not m.get("status")] == ["Answer 1.", "Answer 2.", "Answer 3."]
-    assert [m["post"] for m in state["messages"] if m.get("status") == "ack"] == [1, 2, 4]
+    assert [m["text"] for m in state["messages"]] == ["Answer 1.", "Answer 2.", "Answer 3."]
+    acks = [line.split(":")[0].split()[2] for line in log.read_text().splitlines() if line.startswith("status ack ")]
+    assert acks == ["1", "2", "4"]
     saved = json.loads((addons / "WowMCP" / "bridge-history.json").read_text())
     assert [(e["question"], e["answer"]) for e in saved["Thorgrim"]] == [("what now?", "Answer 3.")]
 
@@ -824,32 +825,33 @@ def test_thinking_picked_in_game_end_to_end(live_game, addons, tmp_path, monkeyp
     assert "chat: |cff33ff99WowMCP|r The AI now thinks at the level the bridge was started with (Medium)." in lines
 
 
-def test_progress_keeps_to_the_slot_budget():
-    """Each update to the game costs a live-update slot: a step goes out once it has lasted a few seconds, at most
-    every 40 s, and only when it changed; while the agent keeps busy, it goes again unchanged after `quiet`
-    seconds, so the game knows the bridge is there. A typical answer costs an ack, a few of these and the answer."""
+def test_progress_is_live_but_calm():
+    """Each update is a frame of the bell (no slot, but it holds the bell about half a second): a step goes out once it
+    has lasted a second, at most every 1.5 s, and only when it changed; while the agent keeps busy without news, it
+    goes again unchanged after `quiet` seconds, so the game knows the bridge is there."""
     now, sent = [0.0], []
-    progress = Progress(lambda step: sent.append((now[0], step)), quiet=120, every=40, clock=lambda: now[0])
+    progress = Progress(lambda step: sent.append((now[0], step)), quiet=120, clock=lambda: now[0])
 
     def busy(seconds, step=None, tool=None):
-        """The agent at work: it says it's on `step` (calling `tool`), then a sign of life every second (thinking
-        streams one about every 1.3 s)."""
+        """The agent at work: it says it's on `step` (calling `tool`), then a sign of life every half second."""
         progress.saw(step, tool)
-        for _ in range(seconds):
-            now[0] += 1
+        for _ in range(round(seconds * 2)):
+            now[0] += 0.5
             progress.saw()
 
-    busy(30, "checking where you are", "get_player_location")
-    busy(2, "checking auction prices", "get_auction_prices")
-    busy(28, None, "get_auction_prices")
-    busy(2, "searching the web", "WebSearch")  # too short to be told
-    busy(130, bridge.THINKING)
-    for _ in range(100):  # silent: no news to keep up
-        now[0] += 1
+    busy(10, "checking where you are", "get_player_location")
+    busy(0.5, "checking auction prices", "get_auction_prices")  # too short to be told
+    busy(20, "searching the web", "WebSearch")
+    for _ in range(300):  # then silent: kept up once, `quiet` after the last update, as it was busy since that
+        now[0] += 0.5
         progress.tick()
-    busy(3, bridge.WRITING)  # the answer comes before it's worth a slot
-    assert sent == [(40, "checking auction prices"), (80, bridge.THINKING), (200, bridge.THINKING)]
-    assert progress.used() == "get_player_location, get_auction_prices ×2, WebSearch"
+    busy(0.5, None, "WebSearch")
+    busy(2, bridge.WRITING)
+    assert sent == [(1.5, "checking where you are"), (11.5, "searching the web"), (131.5, "searching the web"),
+                    (182.0, bridge.WRITING)]
+    busy(150)  # busy, but nothing new to say: kept up after `quiet`
+    assert sent[4:] == [(302.0, bridge.WRITING)]
+    assert progress.used() == "get_player_location, get_auction_prices, WebSearch ×2"
     assert Progress(lambda step: None).used() == "none"
 
     # Steps, by Claude Code's stream-json events (with --include-partial-messages): content as it starts.
@@ -1119,7 +1121,7 @@ def test_tokens_are_counted_over_the_whole_run():
     """The tokens the agent writes, over all its turns: while a message streams, its thinking by the estimates that
     come with it and its text and tool calls by their length; once it's done, its exact count; at the end, the result's,
     which is what the messages' exact counts add up to. Nothing counts twice."""
-    tokens = Tokens(clock=lambda: 0.0)
+    tokens = Tokens()
     totals = []
     for event in RUN:
         tokens.see(event)
@@ -1131,7 +1133,7 @@ def test_tokens_are_counted_over_the_whole_run():
     assert tokens.final == 1112 == 1059 + 53
 
     # An older Claude Code that doesn't name each part's message, and thinking it shows: by its length.
-    tokens = Tokens(clock=lambda: 0.0)
+    tokens = Tokens()
     for event in (message_start("a"), {**message_end("a", 7), "api_message_id": None},
                   message_start("b"), {**delta("b", 0, "thinking_delta", thinking="x" * 40), "api_message_id": None}):
         tokens.see(event)
@@ -1141,79 +1143,42 @@ def test_tokens_are_counted_over_the_whole_run():
     assert tokens.total == 17
 
 
-def test_how_fast_the_agent_writes():
-    """The pace sent with each update, for the game to count on with: what was written over the last 10 s, from the
-    estimates as they stream, so a message's exact count coming in isn't a burst; 0 once nothing has come for 5 s (a
-    tool runs), as then the count doesn't grow."""
-    now = [0.0]
-    tokens = Tokens(clock=lambda: now[0])
-    assert tokens.rate() == 0
-    tokens.see(message_start(M1))
-    now[0] = 2
-    tokens.see(delta(M1, 1, "text_delta", text="x" * 80))
-    assert tokens.rate() == 10  # 20 tokens in its first 2 s
-    for _ in range(30):  # thinking: an estimate of 40 tokens every second
-        now[0] += 1
-        tokens.see(thought(M1, 40))
-    assert tokens.rate() == 40 and tokens.total == 1220
-    tokens.see(message_end(M1, 1500))
-    assert tokens.total == 1500 and tokens.rate() == 40
-    now[0] += 3  # a tool runs: 7 s of the last 10 were writing
-    assert tokens.rate() == 28
-    now[0] += 3
-    assert tokens.rate() == 0 and tokens.total == 1500
-
-
 def test_updates_carry_the_token_count():
-    """With Claude Code's events, every update to the game, for a new step or to keep in touch, also carries the tokens
-    written so far and the pace lately, which the game counts on with until the next. They go at the same times as
-    without them: no more slots."""
-    now, sent, plain = [0.0], [], []
-
-    def clock():
-        return now[0]
-
-    counted = Progress(lambda step, **counts: sent.append((now[0], step, counts)), quiet=120, every=40, clock=clock,
-                       tokens=Tokens(clock))
-    uncounted = Progress(lambda step: plain.append((now[0], step)), quiet=120, every=40, clock=clock)
+    """With Claude Code's events, every update to the game also carries the tokens written so far, and goes when that
+    count changed too: every 1.5 s at most while the agent writes (the game runs the count on between them), none
+    while a tool runs, the keepalive after `quiet`. A step too new to show waits; the count doesn't."""
+    now, sent = [0.0], []
+    progress = Progress(lambda step, **counts: sent.append((now[0], step, counts)), quiet=120, clock=lambda: now[0],
+                        tokens=Tokens())
 
     def second(*events):
         """A second of the agent's run, as CommandAgent watches it: its events, then a look."""
         now[0] += 1
-        for progress in (counted, uncounted):
-            for event in events:
-                progress.read(event)
-            progress.tick()
+        for event in events:
+            progress.read(event)
+        progress.tick()
 
     second(message_start(M1), block(M1, 0, "thinking", thinking=""))
-    for _ in range(29):  # thinking, 40 tokens a second
+    for _ in range(5):  # thinking, 40 tokens a second
         second(thought(M1, 40))
-    second(block(M1, 1, "tool_use", name="mcp__wow__get_auction_prices", input={}),
-           delta(M1, 1, "input_json_delta", partial_json='{"item_ids": [2589, 2592, 4306]}'), message_end(M1, 1300))
-    for _ in range(20):  # the tool runs: no events
-        second()
-    second({"type": "user", "message": {"content": [{"type": "tool_result"}]}}, message_start(M2),
-           block(M2, 0, "thinking", thinking=""))
-    for _ in range(130):  # thinking, 30 a second
-        second(thought(M2, 30))
-    for _ in range(100):  # waiting on the model
-        second()
-    second(block(M2, 1, "text", text=""))
-    second(delta(M2, 1, "text_delta", text="Linen sells for 1s 20c."), message_end(M2, 4900),
-           finished("Linen sells for 1s 20c.", 6200))
-    assert [(t, step) for t, step, _ in sent] == plain == [
-        (40, "checking auction prices"), (80, bridge.THINKING), (200, bridge.THINKING)]
-    # During the tool call: nothing written lately. Then thinking (with the first message's exact count), then the
-    # keepalive after it stopped.
-    assert [counts for _, _, counts in sent] == [
-        {"tokens": 1300, "rate": 0}, {"tokens": 2140, "rate": 30}, {"tokens": 5200, "rate": 0}]
-    assert counted.tokens.total == 6200  # the result's
+    second(block(M1, 1, "tool_use", name="mcp__wow__get_auction_prices", input={}), message_end(M1, 300))
+    for _ in range(130):  # the tool runs; Claude Code says it's still there
+        second({"type": "system", "subtype": "status"})
+    second(message_start(M2), block(M2, 0, "text", text=""), delta(M2, 0, "text_delta", text="x" * 40),
+           message_end(M2, 12), finished("x", 312))
+    second()
+    second()
+    assert sent == [(2, bridge.THINKING, {"tokens": 40}), (4, bridge.THINKING, {"tokens": 120}),
+                    (6, bridge.THINKING, {"tokens": 200}), (8, "checking auction prices", {"tokens": 300}),
+                    (128, "checking auction prices", {"tokens": 300}), (138, "checking auction prices", {"tokens": 310}),
+                    (140, bridge.WRITING, {"tokens": 312})]
+    assert progress.tokens.total == 312  # the result's
 
 
 def test_the_game_hears_how_many_tokens_were_written(addons, caplog):
-    """Claude Code's tokens: the ack starts the count at 0, every update carries it on, and the answer has the exact
-    count, with how long it took. An agent of the player's own (--agent) streams nothing to count: none of that, but
-    its answer says how long it took too."""
+    """Claude Code's tokens: every update carries the count so far (they go every 1.5 s at most, here every 2 s, as
+    the agent is looked at every second), and the answer has the exact count, with how long it took. An agent of the
+    player's own (--agent) streams nothing to count: none of that, but its answer says how long it took too."""
     caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
     now, notes, said = [0.0], [], []
 
@@ -1237,7 +1202,7 @@ def test_the_game_hears_how_many_tokens_were_written(addons, caplog):
                    notify=lambda status, text, question, quiet, **counts: notes.append((status, text, counts)))
         b.accept(stream.Post(5, 7, end=0, value={"question": "any flips?", "player": "Thorgrim"}))
         b.answer(b.questions.get_nowait())
-    assert notes == [("ack", "", {"tokens": 0, "rate": 0}), ("progress", bridge.THINKING, {"tokens": 1000, "rate": 25}),
+    assert notes == [("ack", "", {}), *(("progress", bridge.THINKING, {"tokens": 50 * k}) for k in range(1, 31)),
                      ("ack", "", {}), ("progress", bridge.THINKING, {})]
     assert said == [("Buy low, sell high.", (5, 7), {"took": 60, "tokens": 1650}),
                     ("Buy low, sell high.", (5, 7), {"took": 60})]

@@ -1,12 +1,14 @@
 """Gets data into a running WoW client without a /reload.
 
-The addon side (addon/WowMCP/Core.lua) explains the mechanism. In short, per update:
-write the payload into every load-on-demand slot addon and into WowMCP/Inbox.lua, then
-ring a doorbell: turn the next sig/ file (an empty .wav) into a valid silent .wav. The
-addon polls that file, sees it play, and loads a slot, which runs the payload.
+The addon side (addon/WowMCP/Core.lua) explains the mechanism. In short, there are two ways in:
+- Slots: per update, the payload goes into every load-on-demand slot addon and into WowMCP/Inbox.lua. The
+  game loads one slot per update (300 per UI session), and Inbox.lua at login and /reload.
+- The bell (bell.py): frames of 24 bits in a few long sound files, which the game reads again and again
+  without limit. A DATA frame tells it to load a slot; a REQUEST frame asks it for data, which it streams
+  back (stream.py); the bridge's notes about /ai questions are frames alone, no slot.
 
-Requests for the player's state ring the req/ doorbell instead; the addon streams its
-answer back (stream.py).
+While the game runs, each frame waits for the game's receipt before the next one is written, so none is
+missed; several MCP servers and the bridge take turns through a lock.
 """
 
 import contextlib
@@ -20,24 +22,29 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from wow_mcp import kinds, locking
+from wow_mcp import bell, game, locking, stream
 
 ADDON = "WowMCP"
 INTERFACE = "16001"
 SLOT_COUNT = 300
-# Doorbell pools: folder -> number of files. "sig" = new data in the slots, "req" = request
-# for game data; request number n asks for kind n % kinds.COUNT.
-BELLS = {"sig": 1000, "req": 500}
-# A doorbell file is one-shot per client process (once valid, the client keeps it valid),
-# so keep the ones the addon will poll next empty in case a previous run left them raised.
-BELL_CLEAR_AHEAD = 50
+BELL_STATE = "bell-state.json"  # next to server-state.json: when the game last confirmed a frame
+
+# Seconds a frame waits for its receipt: the game looks at seal.wav every 2 s when nothing happens, and reads a
+# new frame over its next two steps of 0.25 s. After two frames without one (the game doesn't read: a loading
+# screen, sound off, logged out) a short wait, so tools don't stall; a game that reads again answers quickly,
+# as it looks every 0.25 s for a while after anything arrives.
+RECEIPT_WAIT = 3.0
+SHORT_WAIT = 1.0
+MISSED_BEFORE_SHORT = 2
+RECEIPT_PATIENCE = 30.0  # the most, while the game is still sending something else first (stream.RECEIPT_IDLE)
+HANDSHAKE_TESTS = 2  # test frames at most, to show the game a marker going from valid to empty
 
 # Windows refuses to replace a file while another program has it open (the game reading it, a
 # virus scanner looking at a new file). That passes within moments, so keep trying this long.
 REPLACE_PATIENCE = 2.0
 
 
-# Long enough to still be playing when the addon checks on its next poll (0.5 s later).
+# A short silent wav: the client keeps it once read (the probes use it).
 def silent_wav(samples: int = 16000, rate: int = 8000) -> bytes:
     header = b"RIFF" + struct.pack("<I", 36 + samples) + b"WAVE"
     fmt = b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate, 1, 8)
@@ -101,10 +108,6 @@ def slot_name(i: int) -> str:
     return f"{ADDON}_S{i:03d}"
 
 
-def bell_path(addon_dir: Path, bell: str, n: int) -> Path:
-    return addon_dir / bell / f"{n % BELLS[bell]:04d}.wav"
-
-
 def _replace(tmp: str, path: Path) -> None:
     if sys.platform != "win32":
         os.replace(tmp, path)
@@ -132,16 +135,127 @@ def write_atomic(path: Path, data: bytes) -> None:
         raise
 
 
+class Bell:
+    """bell/ as the server writes it (bell.py has the format). Callers hold the transport's lock."""
+
+    def __init__(self, addon_dir: Path):
+        self.dir = addon_dir / bell.FOLDER
+        self.out_dir = addon_dir / "out"
+        self.state_path = addon_dir / BELL_STATE
+        self._silence: bytes | None = None
+
+    def is_on(self, name: str) -> bool:
+        """Whether a bell file is valid now. Only its size is looked at: the server never opens these files."""
+        try:
+            return (self.dir / name).stat().st_size > 0
+        except FileNotFoundError:
+            return False
+
+    def _set(self, name: str, on: bool) -> None:
+        if self.is_on(name) == on:
+            return
+        path = self.dir / name
+        if not on:
+            write_atomic(path, b"")
+            return
+        # A hard link to on.wav: a valid file without writing its 700 KB, renamed into place, so the game never
+        # reads one half made.
+        tmp = path.with_name(f".wowmcp-{os.getpid()}-{threading.get_ident()}.tmp")
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(self.dir / bell.ON, tmp)
+        except OSError:  # a drive without hard links: a copy does the same, with more writing
+            if self._silence is None:
+                self._silence = bell.silence()
+            write_atomic(path, self._silence)
+            return
+        try:
+            _replace(str(tmp), path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def write(self, frame: bell.Frame) -> int:
+        """Write a frame with the other parity than the one there: lead.wav, the data, then seal.wav. Returns
+        what its receipt holds: its bits and parity."""
+        parity = 0 if self.is_on(bell.SEAL) else 1
+        bits = frame.bits(parity)
+        self._set(bell.LEAD, bool(parity))
+        for i, name in enumerate(bell.DATA_FILES):
+            self._set(name, bool(bits >> i & 1))
+        self._set(bell.SEAL, bool(parity))
+        return bits | parity * bell.PARITY
+
+    def load_state(self) -> dict:
+        """{confirmed: unix time of the last receipt or None, missed: frames since without one, verified: the
+        game said it has seen the files change}."""
+        try:
+            saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        return {"confirmed": None, "missed": 0, "verified": False, **(saved if isinstance(saved, dict) else {})}
+
+    def send(self, frames: list[bell.Frame], listen: bool, receiver: stream.Receiver | None = None) -> bool:
+        """Write frames one at a time; True if the game confirmed them all.
+
+        With `listen` (the game runs), each one waits for its receipt (over out/: `receiver`, if one watches it
+        already). A receipt saying the game hasn't seen a marker go from valid to empty yet is followed by test
+        frames that do that (the handshake: it shows the client reads the files afresh). Without `listen`, a
+        single frame is written for whenever the game reads it (a game the server can't see running, the next
+        login); more would overwrite each other unread.
+        """
+        if not listen:
+            if len(frames) == 1:
+                with contextlib.suppress(OSError):
+                    self.write(frames[0])
+            return False
+        state, owned = self.load_state(), receiver is None
+        with contextlib.ExitStack() as stack:
+            if owned:
+                try:
+                    receiver = stack.enter_context(stream.Receiver(self.out_dir))
+                except stream.StreamError:
+                    return self.send(frames, False)
+            pending, tests, delivered = list(frames), 0, False
+            while pending:
+                start = len(receiver.symbols)
+                try:
+                    expected = self.write(pending.pop(0))
+                except OSError:  # Windows kept a file the game streams for too long: the next frame mends it
+                    receipt = None
+                else:
+                    wait = SHORT_WAIT if state["missed"] >= MISSED_BEFORE_SHORT else RECEIPT_WAIT
+                    try:
+                        receipt = receiver.receive_receipt(lambda r: r & bell.FRAME_MASK == expected, start, wait,
+                                                           RECEIPT_PATIENCE)
+                    except stream.StreamError:
+                        if not owned:
+                            raise  # the caller's receiver: theirs to handle (app.request asks again)
+                        receipt = None
+                if receipt is None:
+                    state["missed"] += 1
+                    break
+                state.update(confirmed=time.time(), missed=0, verified=bool(receipt & bell.VERIFIED))
+                if not pending:
+                    delivered = delivered or tests == 0
+                    if not state["verified"] and tests < HANDSHAKE_TESTS:
+                        pending.append(bell.test(tests))
+                        tests += 1
+            write_atomic(self.state_path, json.dumps(state).encode("utf-8"))
+            return delivered
+
+
 class Transport:
     def __init__(self, addons_dir: Path):
         self.addons_dir = addons_dir
         self.addon_dir = addons_dir / ADDON
         self.state_path = self.addon_dir / "server-state.json"
+        self.bell = Bell(self.addon_dir)
         self._lock = threading.Lock()
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        # Several MCP server processes (one per agent session) can share one game.
+        # Several MCP server processes (one per agent session) and the bridge can share one game.
         with self._lock, open(self.addon_dir / ".lock", "a") as lock_file:
             locking.acquire(lock_file)
             yield
@@ -151,6 +265,14 @@ class Transport:
             return json.loads(self.state_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {"seq": 0}
+
+    def listening(self) -> bool:
+        """Whether the game runs from this AddOns folder (<root>/<_flavour_>/Interface/AddOns), so it can
+        confirm frames."""
+        try:
+            return self.addons_dir.resolve().parents[1].name.lower() in game.running_folders()
+        except (OSError, IndexError):
+            return False
 
     def publish(self, change: Callable[[dict, int], None]) -> int:
         """Apply change(state, seq) to the persistent state and send all of it to the game."""
@@ -165,30 +287,27 @@ class Transport:
                 write_atomic(self.addons_dir / slot_name(i) / "Inbox.lua", data)
             write_atomic(self.addon_dir / "Inbox.lua", data)
             self._save(state)
-            # Last, so any slot the addon loads after hearing it already has the new data.
-            self._ring("sig", seq)
+            # Last, so any slot the addon loads for it already has the new data.
+            self.bell.send([bell.data(seq)], self.listening())
             return seq
 
-    def request(self, kind: int) -> int:
-        """Ask the game to send something (see stream.py); returns the request number."""
+    def request(self, kind: int, receiver: stream.Receiver) -> int:
+        """Ask the game to send something (see stream.py); returns the request's id, which its reply carries.
+        `receiver` watches out/ from before the request, for the receipt and the reply. Raises stream.Timeout
+        if the game doesn't take the request."""
         with self._locked():
             state = self.load_state()
-            # The next number of this kind; the ones skipped are never rung.
-            n = state.get("req", 0) + 1
-            n += (kind - n) % kinds.COUNT
-            state["req"] = n
+            state["req"] = state.get("req", 0) + 1
             self._save(state)
-            # So the addon knows which request comes next after a /reload or restart.
-            write_atomic(self.addon_dir / "Inbox.lua", render_payload(state).encode("utf-8"))
-            self._ring("req", n)
-            return n
+            request_id = state["req"] % bell.REQUEST_IDS
+            if not self.bell.send([bell.request(kind, request_id)], True, receiver):
+                raise stream.Timeout(f"the game didn't take request {request_id}")
+            return request_id
+
+    def send(self, frames: list[bell.Frame]) -> bool:
+        """Frames that need no slot (the bridge's notes about /ai questions); True if the game confirmed them."""
+        with self._locked():
+            return self.bell.send(frames, self.listening())
 
     def _save(self, state: dict) -> None:
         write_atomic(self.state_path, json.dumps(state, indent=1).encode("utf-8"))
-
-    def _ring(self, bell: str, n: int) -> None:
-        for ahead in range(1, BELL_CLEAR_AHEAD + 1):
-            path = bell_path(self.addon_dir, bell, n + ahead)
-            if path.stat().st_size:
-                write_atomic(path, b"")
-        write_atomic(bell_path(self.addon_dir, bell, n), SILENT_WAV)

@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from wow_mcp import game, item_text
+from wow_mcp import bell, game, item_text
 from wow_mcp.app import addons_dir, guidance, mismatch_error, tool, transport
 
 guidance(
@@ -24,19 +24,15 @@ STATUSES = ("ack", "progress")
 KEEP = 10  # the payload carries only the newest; the addon shows the ids it hasn't shown yet
 MAX_TEXT = 4000
 MAX_SENDER = 40
-MAX_STATUS = 80
 
 
 def _add(message: dict, question: tuple[int, int] | None) -> int:
-    """Publish a message, keeping the newest. A question's status notes go once a newer note or its answer is
-    there, so they don't crowd out answers the game hasn't shown yet (e.g. while it waits out a fight)."""
+    """Publish a message, keeping the newest (and none of the status notes that went this way before the bell)."""
     if question:
         message["session"], message["post"] = question
 
     def change(state: dict, seq: int) -> None:
-        kept = [m for m in state.get("messages") or [] if isinstance(m, dict)]
-        if question:
-            kept = [m for m in kept if not (m.get("status") and (m.get("session"), m.get("post")) == tuple(question))]
+        kept = [m for m in state.get("messages") or [] if isinstance(m, dict) and not m.get("status")]
         state["messages"] = [*kept[-(KEEP - 1) :], {"id": seq, **message}]
 
     return transport().publish(change)
@@ -79,25 +75,28 @@ def publish_message(text: str, style: str = "chat", sender: str = "Claude", repl
 
 
 def publish_status(status: str, text: str = "", question: tuple[int, int] | None = None,
-                   quiet: float | None = None, tokens: int | None = None, rate: float | None = None) -> int:
+                   quiet: float | None = None, tokens: int | None = None) -> bool:
     """Tell the game how a question the player asked in game (/ai, the bridge) is coming along, for the
-    AI chat tab's status line; it's never shown as a message. Returns its id.
+    AI chat tab's status line; it's never shown as a message. One frame of the bell (bell.py), no
+    live-update slot, so it can go every second or two. Returns whether the game confirmed it.
 
-    status: "ack" (the question arrived) or "progress" (text: the step the agent is on, e.g. "checking
-    auction prices"; "" for none). question: the post it came in, (session, id). quiet: the most
-    seconds the bridge goes without telling the game anything while it works on it; longer, and the
-    game says it seems to have stopped. tokens: how many the agent has written so far, if they're
-    counted; rate: how many a second lately, which the game counts on with until the next note.
+    status: "ack", the question arrived: question is the post it came in, (session, id), and quiet the
+    most seconds the bridge goes without telling the game anything while it works on it (longer, and
+    the game says it seems to have stopped). Or "progress", about the question the bridge is answering
+    (the oldest it has): text is the step the agent is on, one of bridge.STEP_CODES ("" for none), and
+    tokens how many it has written so far, if they're counted.
     """
+    from wow_mcp.bridge import step_code  # the bridge names the steps
+
     if status not in STATUSES:
         raise ValueError(f"status must be one of {', '.join(STATUSES)}, not {status!r}")
-    message = {"text": " ".join(text.split())[:MAX_STATUS], "status": status, "at": int(time.time())}
-    if quiet is not None:
-        message["quiet"] = quiet
-    if tokens is not None:
-        message["tokens"] = int(tokens)
-        message["rate"] = round(max(0.0, float(rate or 0)), 1)
-    return _add(message, question)
+    if status == "ack":
+        if not question:
+            raise ValueError("an ack names the question it's about")
+        frame = bell.ack(question[1], quiet or 0)
+    else:
+        frame = bell.progress(step_code(" ".join(text.split())), tokens)
+    return transport().send([frame])
 
 
 def delivery_note() -> str:

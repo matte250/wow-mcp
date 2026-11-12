@@ -7,7 +7,7 @@ import sys
 import pytest
 
 # How the Lua test scripts publish, through the real tools: answers to /ai are replies, the bridge's notes
-# about a question (ack, progress) statuses.
+# about a question (ack, progress) statuses, which go over the bell.
 PUBLISH_SCRIPT = """
 import json, sys
 from wow_mcp.tools import messages
@@ -15,7 +15,7 @@ args = json.loads(sys.argv[1])
 question = (args["session"], args["post"]) if "post" in args else None
 if "status" in args:
     messages.publish_status(args["status"], args.get("text", ""), question=question, quiet=args.get("quiet"),
-                            tokens=args.get("tokens"), rate=args.get("rate"))
+                            tokens=args.get("tokens"))
 else:
     messages.publish_message(args["text"], args.get("style", "chat"), args.get("sender", "Claude"),
                              reply=args.get("reply", False), default_model=args.get("defaultModel"),
@@ -149,7 +149,7 @@ end
 
 -- The arrow before token counts; the counts as the bridge sends them (Claude Code's: an --agent's have none).
 local ARROW = "|A:minimal-scrollbar-arrow-bottom-over:8:12|a"
-local function Counted(tokens, rate) return '"tokens":' .. tokens .. ',"rate":' .. (rate or 0) end
+local function Counted(tokens) return '"tokens":' .. tokens end
 """
 
 
@@ -972,15 +972,17 @@ def test_bridge_down(game):
         AnswerTo(1, "Yes.")
         assert(Count(client.Lines(tab), STATUS) == 0)
 
-        -- In a fight, news waits for it to end: that there is some is word enough.
+        -- In a fight: the bridge's notes come all the same (they need no slot); an answer waits for it to end, and
+        -- that there is one is word enough.
         client.combat = true
         client.Type("/ai in a fight?")
         Note("ack", 2)
+        assert(Thinking(Status()) and not ns.run.pendingLoad, Status())
+        AnswerTo(2, "Won.")
         client.Wait(60)
         assert(Thinking(Status()) and ns.run.pendingLoad, Status())
         client.combat = false
         client.Fire("PLAYER_REGEN_ENABLED")
-        AnswerTo(2, "Won.")
         assert(Count(client.Lines(tab), STATUS) == 0)
 
         -- The conversation in the main window too (/mcp aitab both): it's told there as well, once.
@@ -1070,38 +1072,39 @@ def test_status_notes_are_not_messages(game):
     """)
 
 
-def test_status_notes_make_room(addons):
-    """A question's notes give way to its newer note and to its answer, so they don't crowd answers out of the
-    payload (it keeps the newest 10) while the game waits to take them, e.g. for a fight to end."""
+def test_status_notes_go_over_the_bell(addons):
+    """The bridge's notes are frames of the bell, not messages: no live-update slot, nothing in the payload. An ack
+    names the question by its post id (mod 16) and says how long the bridge may stay quiet; progress names the step
+    by its number and carries the tokens written so far, if they're counted."""
+    from wow_mcp import bell, bridge
     from wow_mcp.app import transport
     from wow_mcp.tools import messages
 
-    messages.publish_status("ack", question=(77, 1), quiet=120)
-    messages.publish_status("ack", question=(77, 2), quiet=120)
-    messages.publish_status("progress", "checking   auction prices", question=(77, 1), quiet=120)
-    sent = transport().load_state()["messages"]
-    assert [(m["status"], m["post"], m["text"], m["quiet"]) for m in sent] == [
-        ("ack", 2, "", 120), ("progress", 1, "checking auction prices", 120)]
-    assert all(m["session"] == 77 and "from" not in m and "reply" not in m for m in sent)
-    messages.publish_message("Answer one.", sender="Claude Fable", reply=True, question=(77, 1))
-    sent = transport().load_state()["messages"]
-    assert [(m.get("status"), m["post"]) for m in sent] == [("ack", 2), (None, 1)]
+    def frame():
+        on = [int((transport().bell.dir / name).stat().st_size > 0)
+              for name in (bell.SEAL, bell.LEAD, *bell.DATA_FILES)]
+        assert on[0] == on[1]
+        return bell.decode(sum(b << i for i, b in enumerate(on[2:])), on[0])
+
+    messages.publish_status("ack", question=(77, 17), quiet=120)
+    assert frame() == bell.ack(1, 120)
+    messages.publish_status("progress", "checking   auction prices", question=(77, 1), tokens=3400)
+    assert frame() == bell.progress(bridge.STEP_CODES.index("checking auction prices"), 3400)
+    messages.publish_status("progress", "working it out")
+    assert frame() == bell.progress(1, None)
+    assert transport().load_state() == {"seq": 0}, "no slot, no payload"
     with pytest.raises(ValueError, match="status must be one of ack, progress"):
         messages.publish_status("done", question=(77, 1))
+    with pytest.raises(ValueError, match="an ack names the question"):
+        messages.publish_status("ack")
 
 
 def test_token_counts_in_the_payload(addons):
-    """Claude Code's notes carry the tokens written so far and the pace; its answers how long they took and the exact
-    count. An --agent's carry neither, and other messages never do."""
+    """Claude Code's answers say how long they took and the exact count. An --agent's carry no count, and other
+    messages never do."""
     from wow_mcp.app import transport
     from wow_mcp.tools import messages
 
-    messages.publish_status("ack", question=(77, 1), quiet=120, tokens=0)
-    assert [(m["tokens"], m["rate"]) for m in transport().load_state()["messages"]] == [(0, 0)]
-    messages.publish_status("progress", "working it out", question=(77, 1), quiet=120, tokens=3400, rate=25.04)
-    messages.publish_status("progress", "working it out", question=(77, 2), quiet=1800)
-    sent = transport().load_state()["messages"]
-    assert [(m["post"], m.get("tokens"), m.get("rate")) for m in sent] == [(1, 3400, 25.0), (2, None, None)]
     messages.publish_message("One.", reply=True, question=(77, 1), took=250.4, tokens=12345)
     messages.publish_message("Two.", reply=True, question=(77, 2), took=42)
     messages.publish_message("Heads up.", took=3, tokens=5)
@@ -1112,8 +1115,8 @@ def test_token_counts_in_the_payload(addons):
 
 def test_token_count(game):
     """With Claude Code, the status line also says how many tokens the AI has written, after an arrow, like Claude
-    Code's spinner. The bridge's notes come seldom (each costs a slot): between them the count climbs at the pace the
-    last one said, for 40 s at most, and the next one's count takes its place."""
+    Code's spinner. The bridge's notes come every second or two; between them the count climbs at the pace of the last
+    two, for 5 s at most, and the next one's count takes its place."""
     game(r"""
         local ns = client.LoadAddon()
         Asks(ns)
@@ -1125,32 +1128,37 @@ def test_token_count(game):
             return lines[#lines]
         end
         local function Shows(text) return Status():find(text, 1, true) ~= nil end
+        local function Written() return Status():match(ARROW:gsub("%p", "%%%0") .. " (%S+) tokens") end
 
-        -- The ack starts the count: nothing written yet, so nothing to show.
-        Note("ack", 1, nil, 120, Counted(0))
+        -- The ack: nothing written yet, so nothing to show.
+        Note("ack", 1, nil, 120)
         client.Wait(20)
-        assert(Status():match("^|cffababab" .. "Thinking… 0:1[012]|r$"), Status())
+        assert(Status():match("^|cffababab" .. "Thinking… 0:1[0-3]|r$"), Status())
 
-        -- A note: the count so far, between the clock and the step.
-        Note("progress", 1, "working it out", nil, Counted(3400, 25))
+        -- A note: the count so far, between the clock and the step; as it is, with no pace to go on yet.
+        Note("progress", 1, "working it out", nil, Counted(3400))
         assert(Status():match("^|cffababab" .. "Thinking… 0:1%d · |A:"), Status())
         assert(Shows(" · " .. ARROW .. " 3.4k tokens · working it out|r"), Status())
-        -- It climbs at that pace until the next...
+        client.Wait(8)
+        assert(Written() == "3.4k", Status())
+        -- The next: it climbs at the pace since the last one...
+        Note("progress", 1, "working it out", nil, Counted(4400))
+        assert(Written() == "4.4k", Status())
+        client.Wait(4)
+        local early = Written()
+        assert(early ~= "4.4k", Status())
+        -- ... for 5 s at most.
+        client.Wait(8)
+        local most = Written()
         client.Wait(20)
-        assert(Shows(" · " .. ARROW .. " 3.7k tokens · working it out|r"), Status())
-        -- ... for 40 s at most.
-        client.Wait(200)
-        assert(Shows(" · " .. ARROW .. " 4.4k tokens · working it out|r"), Status())
+        assert(Written() == most and most ~= early, most)
         assert(Count(client.Lines(tab), STATUS) == 1)
 
-        -- The next note's count takes its place, also when it's less than the estimate.
+        -- The next note's count takes its place, also when it's less than the estimate; it stays put then.
         Note("progress", 1, "checking auction prices", nil, Counted(4100))
         assert(Shows(" · " .. ARROW .. " 4.1k tokens · checking auction prices|r"), Status())
-        client.Wait(40)
+        client.Wait(10)
         assert(Shows(" · " .. ARROW .. " 4.1k tokens · checking auction prices|r"), Status())
-        Note("progress", 1, "checking auction prices", nil, Counted(4100, 30))
-        client.Wait(20)
-        assert(Shows(" · " .. ARROW .. " 4.4k tokens · checking auction prices|r"), Status())
 
         -- Too long without news: the warning is all the line says, as before; news brings the count back.
         client.Wait(400)
@@ -1170,7 +1178,8 @@ def test_token_count(game):
 
 
 def test_token_counts_are_cut_short(game):
-    """As Claude Code says them."""
+    """As Claude Code says them. (The bell carries a count exactly as it's shown up to 99.9k, bell.tokens_code; here
+    they go to the status line as they are, and with no pace, so they don't run on.)"""
     game(r"""
         local ns = client.LoadAddon()
         Asks(ns)
@@ -1179,9 +1188,11 @@ def test_token_counts_are_cut_short(game):
         local tab = Tab()
         for _, case in ipairs({ { 1, "1 token" }, { 850, "850 tokens" }, { 999, "999 tokens" }, { 1000, "1k tokens" },
                                 { 3400, "3.4k tokens" }, { 3449, "3.4k tokens" }, { 3450, "3.5k tokens" },
-                                { 12000, "12k tokens" }, { 12345, "12.3k tokens" }, { 999949, "999.9k tokens" },
-                                { 999950, "1M tokens" }, { 1234567, "1.2M tokens" }, { 12500000, "12.5M tokens" } }) do
-            Note("progress", 1, nil, nil, Counted(case[1]))
+                                { 12000, "12k tokens" }, { 12345, "12.3k tokens" }, { 99949, "99.9k tokens" },
+                                { 999949, "999.9k tokens" }, { 999950, "1M tokens" }, { 1234567, "1.2M tokens" },
+                                { 12500000, "12.5M tokens" } }) do
+            ns.AIChat.Status({ status = "progress", step = 0, tokens = case[1], rate = 0 })
+            client.Wait()
             local lines = client.Lines(tab)
             assert(lines[#lines]:find(" · " .. ARROW .. " " .. case[2] .. "|r", 1, true), case[2] .. ": " .. lines[#lines])
         end
@@ -1198,7 +1209,7 @@ def test_line_after_the_answer(game):
         client.Type("/ai any good flips near me?")
         local tab = Tab()
         Note("ack", 1, nil, 120, Counted(0))
-        Note("progress", 1, "working it out", nil, Counted(3400, 25))
+        Note("progress", 1, "working it out", nil, Counted(3400))
         AnswerTo(1, "Nothing worth flipping here.\\nTry again after the patch.", nil, '"took":250,"tokens":12345')
         local lines = client.Lines(tab)
         assert(lines[#lines - 2] == "|cff33ff99[Claude]|r Nothing worth flipping here.", table.concat(lines, "\n"))

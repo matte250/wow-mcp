@@ -6,10 +6,12 @@
 -- The files are empty, so nothing is ever heard.
 --
 -- Messages, with body = zlib(JSON):
---   reply: "WM\1", request id (4 bytes), body length (4 bytes), body
---   post:  "WM\2", session token (4 bytes), post id (4 bytes), body length (4 bytes), body
+--   reply:   "WM\1", request id (4 bytes), body length (4 bytes), body
+--   post:    "WM\2", session token (4 bytes), post id (4 bytes), body length (4 bytes), body
+--   receipt: "WM\3", a frame of the bell (4 bytes, see Core.lua), body length 0
 -- A post is sent unasked (e.g. a /ai question). Post ids count up from 1 in each UI session,
--- and the token tells them apart from the posts before a /reload.
+-- and the token tells them apart from the posts before a /reload. A receipt confirms a frame
+-- the server wrote; it waits for it before it writes the next.
 -- A message is read as a big-endian bit stream cut into 12-bit symbols. Symbol k is sent as
 -- file (symbol + Whitening(k)) % 4096, so runs of equal symbols (e.g. the zero bytes in the
 -- header) become different files. Messages go out one after another, never interleaved.
@@ -27,7 +29,7 @@ ns.Stream = Stream
 local ROOT = "Interface\\AddOns\\" .. ADDON .. "\\out\\"
 local BUDGET_MS = 1.5
 local MAX_PER_FRAME = 100
-local MAGIC, POST_MAGIC = "WM\1", "WM\2"
+local MAGIC, POST_MAGIC, RECEIPT_MAGIC = "WM\1", "WM\2", "WM\3"
 
 local paths = setmetatable({}, {
 	__index = function(t, symbol)
@@ -109,6 +111,18 @@ end
 function Stream.Send(id, value)
 	local body = Body(value)
 	Enqueue(MAGIC .. U32(id) .. U32(#body) .. body)
+end
+
+-- Confirm a frame of the bell (Core.lua). It goes ahead of the messages still waiting, though not of the
+-- one being sent: the server waits for it to write its next frame.
+function Stream.Receipt(value)
+	local files = Files(RECEIPT_MAGIC .. U32(value) .. U32(0))
+	if current then
+		table.insert(queue, 1, files)
+	else
+		current = { files = files, position = 1 }
+		sender:SetScript("OnUpdate", SendSome)
+	end
 end
 
 local session, posts -- set by the first post

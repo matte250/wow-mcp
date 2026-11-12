@@ -1,8 +1,7 @@
 -- A tiny stand-in for the WoW client, enough to run the WowMCP addon outside the game.
 -- File behaviour follows what the Forever client does with addon files (measured live):
---   * PlaySoundFile returns a handle for any existing file, empty or not; only a valid
---     one is still playing a moment later. A valid file stays cached for the rest of the
---     process, an empty one is read again next time.
+--   * PlaySoundFile streams a long sound from disk on every play, keeps a short one for the
+--     rest of the launch, and never plays an empty one (apis/sound.lua has the details).
 --   * LoadAddOn: reads the addon's Lua from disk when called, once per UI session.
 -- Usage: lua client.lua <AddOns dir> <script.lua>; the script drives the test.
 --
@@ -26,7 +25,7 @@ local function ReadFile(path)
 end
 
 client = {
-	chat = {}, tickers = {}, timers = {}, validSounds = {}, playing = {}, loaded = {}, opened = {},
+	chat = {}, tickers = {}, timers = {}, loaded = {}, opened = {},
 	combat = false, sound = true, now = 0, frames = {}, openedThisFrame = {},
 	player = { map = 1411, x = 0.5, y = 0.5 },
 }
@@ -201,23 +200,31 @@ C_Timer = {
 	NewTimer = AddTimer,
 }
 
--- One poll interval (0.5 s) passes: due timers fire, then tickers.
+-- One poll interval (0.5 s) passes: due timers fire, then tickers, then OnUpdate scripts. That's one render
+-- frame, unless a test asks for client.framesPerTick of them (the ones before have only OnUpdate).
 function client.Tick()
-	client.now = client.now + 0.5
-	local pending = {}
-	for _, timer in ipairs(client.timers) do
-		if timer.at <= client.now then
-			if not timer.cancelled then timer.fn() end
-		else
-			table.insert(pending, timer)
+	local frames = client.framesPerTick or 1
+	for i = 1, frames do
+		client.now = client.now + 0.5 / frames
+		if i == frames then
+			local pending = {}
+			for _, timer in ipairs(client.timers) do
+				if timer.at <= client.now then
+					if not timer.cancelled then timer.fn() end
+				else
+					table.insert(pending, timer)
+				end
+			end
+			client.timers = pending
 		end
-	end
-	client.timers = pending
-	wipe(client.openedThisFrame)
-	for _, fn in ipairs(client.tickers) do fn() end
-	for _, frame in ipairs(client.frames) do
-		-- Like the client: OnUpdate only runs while the frame is shown.
-		if frame.OnUpdate and frame:IsShown() then frame.OnUpdate(frame, 0.5) end
+		wipe(client.openedThisFrame)
+		if i == frames then
+			for _, fn in ipairs(client.tickers) do fn() end
+		end
+		for _, frame in ipairs(client.frames) do
+			-- Like the client: OnUpdate only runs while the frame is shown.
+			if frame.OnUpdate and frame:IsShown() then frame.OnUpdate(frame, 0.5 / frames) end
+		end
 	end
 end
 
@@ -254,11 +261,39 @@ function client.LoadAddon()
 	end
 	client.Fire("ADDON_LOADED", "WowMCP")
 	client.Fire("PLAYER_LOGIN")
+	client.ns = ns
 	return ns
 end
 
+-- The bell's frame as it is on disk (Core.lua): its bits and parity. Looked at here, not played.
+function client.BellFrame()
+	local function On(name)
+		local f = io.open(ADDONS .. "/WowMCP/bell/" .. name, "rb")
+		if not f then return 0 end
+		local size = f:seek("end")
+		f:close()
+		return size > 0 and 1 or 0
+	end
+	local bits = 0
+	for i = 23, 0, -1 do bits = bits * 2 + On(string.format("%02d.wav", i)) end
+	return bits + On("seal.wav") * 16777216
+end
+
+-- What the server does after each frame: wait until the game has it. Ticks until the addon has read the bell as
+-- it is on disk, `limit` ticks at most; none while its live updates are off.
+function client.Settle(limit)
+	for _ = 1, limit or 16 do
+		local ns = client.ns
+		if not (ns and ns.run.live) or ns.run.frame == client.BellFrame() then return end
+		client.Tick()
+	end
+end
+
 function client.Publish(json)
-	-- Hand control to the test runner, which publishes through the real transport.
+	-- Hand control to the test runner, which publishes through the real transport. It doesn't see this game
+	-- running, so it doesn't wait for the game to confirm the bell's frame before it writes the next: the
+	-- client does that here. The new frame is taken in the client.Wait() that follows.
+	client.Settle()
 	assert(os.execute(os.getenv("WOWMCP_PUBLISH") .. " '" .. json .. "'"))
 end
 
@@ -271,5 +306,6 @@ for name in apis:lines() do
 end
 apis:close()
 
+client.Launch()
 dofile(SCRIPT)
 print("OK")

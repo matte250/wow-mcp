@@ -1,9 +1,10 @@
 """Research probes: other ways for the server and the game to talk.
 
-Today the server reaches the running game through load-on-demand slot addons and sound
-"doorbells" (thousands of numbered files, read twice a second), and the game reaches the server by
-opening files from a pool of 4096. The probes test other channels: less discoverable, without
-per-launch limits, or both. Run them with WoW at the character screen or in a quiet spot, one at a
+When these were written, the server reached the running game through load-on-demand slot addons and
+sound "doorbells" (thousands of numbered files, read twice a second, each good once per launch), and
+the game reached the server by opening files from a pool of 4096. The probes test other channels:
+less discoverable, without per-launch limits, or both. What `stream` and `speed` found became the
+bell (wow_mcp/bell.py). Run them with WoW at the character screen or in a quiet spot, one at a
 time; each has a server half (here) and a game half (/mcp probe <name>).
 
     uv run --with fonttools --with numpy python probes/channel_probes.py <command>
