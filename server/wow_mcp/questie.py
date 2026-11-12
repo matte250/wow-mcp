@@ -16,6 +16,7 @@ tools then tell the agent to look things up elsewhere.
 """
 
 import base64
+import math
 import re
 import struct
 import zlib
@@ -31,10 +32,22 @@ CONTRACT = 4
 NPC = {"name": 1, "minLevel": 4, "maxLevel": 5, "spawns": 7, "zoneID": 9, "questStarts": 10, "questEnds": 11,
        "friendlyToFaction": 13, "subName": 14, "npcFlags": 15}
 OBJECT = {"name": 1, "questStarts": 2, "questEnds": 3, "spawns": 4, "zoneID": 5}
-QUEST = {"name": 1, "startedBy": 2, "finishedBy": 3, "requiredLevel": 4, "questLevel": 5, "objectivesText": 8,
-         "triggerEnd": 9, "objectives": 10, "preQuestGroup": 12, "preQuestSingle": 13, "zoneOrSort": 17,
-         "nextQuestInChain": 22}
-TYPES = {"Npc": NPC, "Object": OBJECT, "Quest": QUEST}
+QUEST = {"name": 1, "startedBy": 2, "finishedBy": 3, "requiredLevel": 4, "questLevel": 5, "requiredRaces": 6,
+         "requiredClasses": 7, "objectivesText": 8, "triggerEnd": 9, "objectives": 10, "preQuestGroup": 12,
+         "preQuestSingle": 13, "exclusiveTo": 16, "zoneOrSort": 17, "requiredSkill": 18, "requiredMinRep": 19,
+         "nextQuestInChain": 22, "specialFlags": 24, "parentQuest": 25, "breadcrumbForQuestId": 27,
+         "requiredMaxLevel": 32}
+ITEM = {"name": 1, "npcDrops": 2, "objectDrops": 3, "itemDrops": 4, "startQuest": 5, "questRewards": 6,
+        "requiredLevel": 10, "vendors": 14}
+TYPES = {"Npc": NPC, "Object": OBJECT, "Quest": QUEST, "Item": ITEM}
+
+# Race and class bits in quests' requiredRaces / requiredClasses (QuestieDB's Enum: raceMaskById, classKeys),
+# by the names the game's UnitRace / UnitClass give on an English client. Skyborne has one bit per faction.
+RACE_BITS = {"Human": 1, "Orc": 2, "Dwarf": 4, "Night Elf": 8, "Undead": 16, "Scourge": 16, "Tauren": 32,
+             "Gnome": 64, "Troll": 128, "Goblin": 256, "Blood Elf": 512, "Draenei": 1024}
+SKYBORNE_BITS = {"Alliance": 2 ** 32, "Horde": 2 ** 33}
+CLASS_BITS = {"Warrior": 1, "Paladin": 2, "Hunter": 4, "Rogue": 8, "Priest": 16, "Death Knight": 32, "Shaman": 64,
+              "Mage": 128, "Warlock": 256, "Monk": 512, "Druid": 1024}
 
 # NPC roles from npcFlags. These values are the Classic family's (QuestieDB's Enum.byExpansion.Classic and
 # .Forever); later expansions number them differently, so roles are only named for these flavours.
@@ -198,7 +211,7 @@ class QuestieDB:
         if row is None:
             return None
         keys = TYPES[kind]
-        wanted = [keys[n] for n in names] if names else list(keys.values())
+        wanted = [keys[n] for n in names if n in keys] if names else list(keys.values())
         present = int(row.get("p", 0) or 0)
         entity = Entity(kind, id)
         for index in wanted:
@@ -259,6 +272,106 @@ class QuestieDB:
             ranked.append((0 if name == phrase else 1 if starts else 2, id))
         return [id for _, id in sorted(ranked)]
 
+def race_bit(race: str | None, faction: str | None) -> int | None:
+    if race == "Skyborne":
+        return SKYBORNE_BITS.get(faction or "")
+    return RACE_BITS.get(race or "")
+
+
+@dataclass
+class Cluster:
+    x: float
+    y: float
+    radius: float  # in percent of the map's width, like highlight_areas
+    count: int
+
+
+def clusters(points: list[tuple[float, float]], reach: float = 6.0) -> list[Cluster]:
+    """Group spawn points that lie within `reach` (map percent) of one another into areas, biggest first."""
+    groups: list[list[tuple[float, float]]] = []
+    for point in points:
+        near = [g for g in groups if any(math.dist(point, q) <= reach for q in g)]
+        merged = [point] + [q for g in near for q in g]
+        groups = [g for g in groups if g not in near] + [merged]
+    out = []
+    for group in groups:
+        cx = sum(p[0] for p in group) / len(group)
+        cy = sum(p[1] for p in group) / len(group)
+        radius = max(2.0, max(math.dist((cx, cy), p) for p in group) + 1.0)
+        out.append(Cluster(round(cx, 1), round(cy, 1), round(min(radius, 50.0), 1), len(group)))
+    return sorted(out, key=lambda c: -c.count)
+
+
+_BLACKLIST_LINE = re.compile(r"^\s*\[(\d+)\]\s*=\s*true\s*,")
+
+
+def read_blacklist(addons_dir: Path) -> set[int]:
+    """Quests the Questie addon itself hides as not in the game (duplicates, removed, world events), from
+    Questie/Database/Corrections/QuestieQuestBlacklist.lua. Only unconditional entries; empty without Questie."""
+    path = addons_dir / "Questie" / "Database" / "Corrections" / "QuestieQuestBlacklist.lua"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    return {int(m[1]) for line in text.splitlines() if (m := _BLACKLIST_LINE.match(line))}
+
+
+@dataclass
+class Character:
+    level: int
+    faction: str | None = None  # "Alliance" / "Horde"
+    race: str | None = None
+    player_class: str | None = None
+
+
+def gray_below(level: int) -> int:
+    """Quests at or below this level are gray (no XP worth having) for a character of `level`; the Classic
+    rule of thumb, approximate."""
+    if level <= 5:
+        return 0
+    if level <= 39:
+        return level - 5 - level // 10
+    return level - 1 - level // 5
+
+
+def why_unavailable(db: "QuestieDB", quest: Entity, who: Character, completed: set[int], in_log: set[int],
+                    blacklist: set[int]) -> str | None:
+    """None if `who` can pick up the quest now as far as Questie's data tells, otherwise the reason."""
+    id = quest.id
+    if id in completed:
+        return "done"
+    if id in in_log:
+        return "in log"
+    if id in blacklist:
+        return "not in the game"
+    if (quest.get("requiredLevel") or 0) > who.level:
+        return "level"
+    if (max_level := quest.get("requiredMaxLevel")) and who.level > max_level:
+        return "level"
+    races = quest.get("requiredRaces") or 0
+    bit = race_bit(who.race, who.faction)
+    if races and bit is not None and not races & bit:
+        return "race"
+    classes = quest.get("requiredClasses") or 0
+    cls = CLASS_BITS.get(who.player_class or "")
+    if classes and cls is not None and not classes & cls:
+        return "class"
+    if quest.get("requiredSkill"):
+        return "profession"
+    group = _lua_list(quest.get("preQuestGroup"))
+    if group and not all(q in completed for q in group):
+        return "prerequisite"
+    single = _lua_list(quest.get("preQuestSingle"))
+    if single and not any(q in completed for q in single):
+        return "prerequisite"
+    if any(q in completed or q in in_log for q in _lua_list(quest.get("exclusiveTo"))):
+        return "exclusive"
+    parent = quest.get("parentQuest")
+    if parent and parent not in in_log:
+        return "prerequisite"
+    return None
+
+
 def _flavour_tocs(folder: Path, game_folder: str | None) -> list[Path]:
     suffixes = FLAVOURS.get(game_folder or "", ())
     tocs = [folder / f"QuestieDB_{s}.toc" for s in suffixes] + [folder / "QuestieDB.toc"]
@@ -289,6 +402,21 @@ def read_areas(folder: Path, flavour: str) -> dict[int, tuple[int | None, str]]:
 
 
 _cache: dict[tuple[Path, float], QuestieDB] = {}
+
+
+def installed(addons_dir: Path | None, game_folder: str | None = None) -> bool:
+    """Whether a baked QuestieDB is there for this game folder (a quick check: its .toc says so near the top)."""
+    if not addons_dir:
+        return False
+    for toc in _flavour_tocs(addons_dir / "QuestieDB", game_folder):
+        try:
+            with toc.open(encoding="utf-8", errors="replace") as f:
+                head = [next(f, "") for _ in range(60)]
+        except OSError:
+            continue
+        if any(line.startswith("## X-Mode: baked") for line in head):
+            return True
+    return False
 
 
 def load(addons_dir: Path | None, game_folder: str | None = None) -> QuestieDB | None:
