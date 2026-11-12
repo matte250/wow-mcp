@@ -61,6 +61,21 @@ guidance(
     "on its own: every refresh costs model tokens and a live update. remove_visual removes one.",
     order=68,
 )
+guidance(
+    "Decide which kind a named visual is when you make it. Automatic (the default) for derived data: results, "
+    "trackers, reports ('Flip results', 'My auctions'); every refresh rebuilds what's in it freely from live data, "
+    "adding, dropping and re-sorting rows. Curated when the player wants control over what's on it (a shopping or "
+    "watch list, 'my good flips'): it shows a list of theirs (get_lists; update_list makes one), named with "
+    "visualize's list, and only they decide what's on it. If you can't tell which they want, ask them (in game: "
+    "make it automatic, and say it can be a list they control instead). Either way its layout is set when it's "
+    "made: the blocks in order with their type and heading, a table's columns (name, type, unit, alignment) and a "
+    "list's value type. It changes only when the player asks (add or remove a column or a block): then send it "
+    "with change_layout=true and say in your answer what changed. Otherwise a version in another shape is refused, "
+    "and refreshes change only what's in it: rows and values, list items, texts, the subtitle and totals. So make "
+    "every block it will need from the start, and give a block one row or item saying so when there's nothing for "
+    "it ('No new candidates right now').",
+    order=68,
+)
 
 KEEP = 5            # visuals the player can flip back through
 MAX_BLOCKS = 8
@@ -77,6 +92,7 @@ MAX_ITEM_ID = 2147483647
 MAX_NAMED = 10
 MAX_NAME = 24             # characters: a name is a tab's label
 MAX_REFRESH = 300         # characters of refresh instructions
+MAX_LIST = 40             # characters of the name of the player's list a curated view shows (tools/lists.py)
 MIN_REFRESH_MINUTES = 15  # each refresh costs model tokens and a live-update slot
 MAX_REFRESH_MINUTES = 24 * 60
 MAX_NAMED_SIZE = 24_000   # bytes one named visual may take in the payload
@@ -452,7 +468,8 @@ Block = Annotated[Union[BLOCK_TYPES], Field(discriminator="type")]  # noqa: UP00
 
 class Visual(BaseModel):
     """A visual: a title and its blocks, top to bottom. With a name it's long-lasting, and may say how to rebuild
-    it from live data (refresh), and how often on its own (refresh_minutes, 0: never)."""
+    it from live data (refresh), and how often on its own (refresh_minutes, 0: never). A named one is curated when it
+    shows a list of the player's (list; '': automatic again)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -462,8 +479,9 @@ class Visual(BaseModel):
     name: Annotated[str | None, Field(min_length=1, max_length=MAX_NAME)] = None
     refresh: Annotated[str | None, Field(min_length=10, max_length=MAX_REFRESH)] = None
     refresh_minutes: Annotated[int | None, Field(ge=0, le=MAX_REFRESH_MINUTES)] = None
+    list: Annotated[str | None, Field(max_length=MAX_LIST)] = None  # last: it hides the builtin in the class body
 
-    @field_validator("name", "refresh")
+    @field_validator("name", "refresh", "list")
     @classmethod
     def _one_line(cls, value: str | None) -> str | None:
         return None if value is None else " ".join(value.split())
@@ -477,6 +495,10 @@ class Visual(BaseModel):
             problems.append("refresh: say how to rebuild it from live data: the tools to call and what to show")
         if self.name is None and (self.refresh is not None or self.refresh_minutes is not None):
             problems.append("refresh and refresh_minutes are for named visuals: give it a name too")
+        if self.list and not any(c.isalnum() for c in self.list):
+            problems.append("list: the name of the player's list it shows, e.g. 'Good flips'")
+        if self.name is None and self.list is not None:
+            problems.append("list is for named visuals: give it a name too")
         if self.refresh_minutes is not None and 0 < self.refresh_minutes < MIN_REFRESH_MINUTES:
             problems.append(f"refresh_minutes: at least {MIN_REFRESH_MINUTES} (each refresh costs model tokens and a "
                             "live update), or 0 to turn it off")
@@ -513,6 +535,62 @@ def same_name(a: str, b: str) -> bool:
 
 def find_named(state: dict, name: str) -> dict | None:
     return next((v for v in named_visuals(state) if same_name(v["name"], name)), None)
+
+
+def _words(value: object) -> str | None:
+    return " ".join(value.split()) if isinstance(value, str) and value.strip() else None
+
+
+def layout(blocks: object) -> list[dict]:
+    """A visual's layout, from its blocks as the payload carries them (so a named visual's state has it): each
+    block's type and heading, a table's columns (name, type, alignment as shown, a delta's unit) and a list's value
+    type. A named visual keeps it; refreshes change only what's in it."""
+    shape = []
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        part = {"type": b.get("type"), "heading": _words(b.get("heading"))}
+        if b.get("type") == "table":
+            part["columns"] = [{"name": _words(c.get("name")), "type": c.get("type"), "align": c.get("align"),
+                                "unit": c.get("unit")} for c in b.get("columns") or [] if isinstance(c, dict)]
+        elif b.get("type") == "list":
+            value = b.get("value") if isinstance(b.get("value"), dict) else {}
+            part["value"] = {"type": value.get("type"), "unit": value.get("unit")}
+        shape.append(part)
+    return shape
+
+
+def _shape(part: dict) -> str:
+    """One block of a layout in words."""
+    text = f"a {part['type']}" + (f" headed {part['heading']!r}" if part["heading"] else " without a heading")
+    if part["type"] == "table":
+        columns = []
+        for c in part["columns"]:
+            how = [str(c["type"])] + ([f"in {c['unit']}"] if c["unit"] else [])
+            if c["align"] != _align(str(c["type"]), None):
+                how.append(f"align {c['align']}")
+            columns.append(f"{c['name']!r} ({', '.join(how)})")
+        text += ", columns " + ", ".join(columns)
+    elif part["type"] == "list":
+        text += f", values of type {part['value']['type']}" + (f" in {part['value']['unit']}" if part["value"]["unit"]
+                                                                 else "")
+    return text
+
+
+def describe_layout(shape: list[dict]) -> str:
+    """A layout in words, exactly enough to send a visual again in the same shape."""
+    return "; ".join(f"{n}) {_shape(part)}" for n, part in enumerate(shape, 1))
+
+
+def _layout_kept(name: str, was: list[dict], now: list[dict]) -> str:
+    """Why a named visual's new version was refused: how it differs, and the layout to keep."""
+    differs = [f"{len(now)} block{'s' if len(now) != 1 else ''} instead of {len(was)}"] if len(now) != len(was) else []
+    differs += [f"block {n} is {_shape(b)}" for n, b in enumerate(now, 1) if n > len(was) or was[n - 1] != b]
+    return (f"Nothing was sent: the named visual {name!r} keeps its layout, and this version has another "
+            f"({'; '.join(differs)}). Its layout: {describe_layout(was)}. Send it again in that shape: the same "
+            "blocks and columns in the same order, with only the rows and values, list items, texts, subtitle and "
+            "totals new. Only if the player asked to change what it shows (add or remove a column or a block), send "
+            "it with change_layout=true, and say in your answer what changed.")
 
 
 def _store(state: dict, seq: int, temporary: list[dict], named: list[dict]) -> None:
@@ -560,8 +638,9 @@ def _names(named: list[dict]) -> str:
     return ", ".join(repr(v["name"]) for v in named)
 
 
-def _keep(visual: Visual, entry: dict) -> str:
-    """Sends a named visual: a new one after the others, or the one with its name replaced where it is."""
+def _keep(visual: Visual, entry: dict, change_layout: bool = False) -> str:
+    """Sends a named visual: a new one after the others, or the one with its name replaced where it is, in its layout
+    (unless change_layout)."""
     if (taken := size(entry)) > MAX_NAMED_SIZE:
         raise ToolError(
             f"Nothing was sent: it takes {taken // 1000} KB, and a named visual may take at most "
@@ -576,6 +655,9 @@ def _keep(visual: Visual, entry: dict) -> str:
         i = next((n for n, v in enumerate(named) if same_name(v["name"], visual.name)), None)
         if i is not None:
             old.update(named[i])
+            was, now = layout(old.get("blocks")), layout(entry["blocks"])
+            if was and not change_layout and was != now:  # none at all: a broken entry, nothing to keep
+                raise ToolError(_layout_kept(old["name"], was, now))
         elif auto:
             raise ToolError(f"Nothing was sent: the player removed {visual.name!r} while it was being refreshed.")
         elif len(named) >= MAX_NAMED:
@@ -585,11 +667,12 @@ def _keep(visual: Visual, entry: dict) -> str:
             )
         refresh = visual.refresh or old.get("refresh")
         every = old.get("every") if visual.refresh_minutes is None else visual.refresh_minutes or None
+        curated = old.get("list") if visual.list is None else visual.list or None
         if every and not refresh:
             raise ToolError("Nothing was sent: refresh_minutes needs refresh instructions (refresh): how to rebuild "
                             "it from live data.")
         kept = {"id": seq, "name": old.get("name", visual.name), **entry, "refresh": refresh, "every": every,
-                "player": player or old.get("player"), "auto": True if auto else None}
+                "list": curated, "player": player or old.get("player"), "auto": True if auto else None}
         kept = {key: value for key, value in kept.items() if value is not None}
         others = [v for n, v in enumerate(named) if n != i]
         if (total := size([*others, kept])) > MAX_NAMED_KEPT:
@@ -608,18 +691,27 @@ def _keep(visual: Visual, entry: dict) -> str:
     name = old.get("name", visual.name)
     refresh = visual.refresh or old.get("refresh")
     every = old.get("every") if visual.refresh_minutes is None else visual.refresh_minutes or None
+    curated = old.get("list") if visual.list is None else visual.list or None
     shows = f"{visual.title!r}, with {_listed([b.describe() for b in visual.blocks])}"
     if old:
         result = (f"The named visual {name!r} was updated in place (#{visual_id}): {shows}. It keeps its tab in the "
                   "game's window, and the player's sort, scroll and size.")
+        if layout(old.get("blocks")) != (now := layout(entry["blocks"])):
+            result += f" Its layout changed to: {describe_layout(now)}. Say in your answer what changed."
     else:
         result = (f"Named visual {name!r} sent to the game (#{visual_id}): {shows}. It stays under a tab of its own "
-                  "until it's removed (remove_visual).")
+                  "until it's removed (remove_visual). Its layout (blocks and columns) stays: refreshes change only "
+                  "what's in it.")
     if refresh:
         result += (f" Refresh: {refresh!r}, when the player clicks Refresh"
                    + (f" and on its own every {every} minutes while the game runs." if every else "."))
     else:
         result += " It has no refresh instructions, so the player can't refresh it: send it again with refresh."
+    if curated:
+        result += (f" It's curated: it shows the player's list {curated!r} (get_list), every entry, and only the "
+                   "player decides what's on it.")
+    elif old.get("list"):
+        result += " It's automatic now: no longer a view of a list."
     return result + delivery_note()
 
 
@@ -665,6 +757,20 @@ def visualize(
               f"many minutes (at least {MIN_REFRESH_MINUTES}) while the game runs. Only when the player asks for it to "
               "stay current: each refresh costs model tokens and a live update. 0 turns it off; left out: as it was."),
     ] = None,
+    list: Annotated[  # noqa: A002 (the name agents see; nothing below needs the builtin)
+        str | None,
+        Field(max_length=MAX_LIST, description="With name: makes it a curated view of this list of the player's "
+              "(get_lists), e.g. 'Good flips': it shows every entry with its current state and only the player "
+              "decides what's on it; a list not made yet is fine. Left out: as it was; '' makes it automatic again "
+              "(rebuilt freely from live data)."),
+    ] = None,
+    change_layout: Annotated[
+        bool,
+        Field(description="With the name of a named visual the game has: replace its layout (its blocks, a table's "
+              "columns, a list's value type). Only when the player asked to change what it shows (add or remove a "
+              "column or a block); say in your answer what changed. Left out, a named visual keeps its layout, and a "
+              "version in another shape is refused."),
+    ] = False,
 ) -> str:
     """Show the player a visual in World of Warcraft, in a window of its own: a title and a stack of blocks you
     choose, whatever fits the question. A table (comparing gear stats, auction house profits, drop rates, quest
@@ -673,16 +779,18 @@ def visualize(
 
     Without a name it's temporary: it opens when it arrives, and the player can flip back through the last 5, so
     a new one doesn't lose the one before. With a name it's long-lasting, under a tab of its own until removed,
-    and the same name again updates it in place (list_visuals shows the named ones).
+    and the same name again updates it in place (list_visuals shows the named ones), in the layout it was made with
+    (change_layout changes that, when the player asks). A named one is automatic (its content rebuilt freely from
+    live data) unless it's curated: a view of a list of the player's (list).
     """
     try:
         visual = Visual(title=title, subtitle=subtitle, blocks=blocks, name=name, refresh=refresh,
-                        refresh_minutes=refresh_minutes)
+                        refresh_minutes=refresh_minutes, list=list)
     except ValidationError as e:
         raise ToolError("Nothing was sent:\n" + _problems(e)) from None
     entry = visual.encode(int(time.time()))
     if visual.name is not None:
-        return _keep(visual, entry)
+        return _keep(visual, entry, change_layout)
     if (taken := size(entry)) > MAX_SIZE:
         raise ToolError(
             f"Nothing was sent: it takes {taken // 1000} KB, and at most {MAX_SIZE // 1000} KB fit in the game's "
@@ -828,6 +936,11 @@ class NamedVisual(BaseModel):
                                 "button runs it. None: it can't be refreshed until it's sent again with refresh.")
     refresh_minutes: int | None = Field(default=None, description="It's refreshed on its own this often while the "
                                         "game runs; None: only when the player clicks Refresh.")
+    list: str | None = Field(default=None, description="Curated: the player's list it shows (get_list), every entry, "
+                             "and only the player decides what's on it. None: automatic, rebuilt freely from live "
+                             "data.")
+    layout: str = Field(description="Its blocks and a table's columns, which every new version keeps; only "
+                        "change_layout changes them, when the player asks.")
     size: str = Field(description="What it takes of the game's updates.")
 
 
@@ -840,8 +953,9 @@ class VisualsInGame(BaseModel):
 @tool(annotations=ToolAnnotations(title="List the visuals in game", read_only_hint=True, open_world_hint=False))
 def list_visuals() -> VisualsInGame:
     """List the named visuals in the player's game (trackers and lists they keep): what each shows, when it was last
-    updated, its refresh instructions and how often it's refreshed on its own; and how many temporary ones there
-    are. Call it before making a named visual, to update one by its name rather than make another like it."""
+    updated, its layout, its refresh instructions and how often it's refreshed on its own, the player's list it shows
+    if it's curated; and how many temporary ones there are. Call it before making a named visual, to update one by
+    its name rather than make another like it."""
     state = transport().load_state()
     named, now = named_visuals(state), time.time()
 
@@ -850,7 +964,8 @@ def list_visuals() -> VisualsInGame:
         return NamedVisual(
             name=v["name"], title=str(v.get("title") or ""), subtitle=v.get("subtitle"), shows=_shows(v.get("blocks")
             or []), updated=f"{datetime.fromtimestamp(at):%Y-%m-%d %H:%M} ({_ago(now - at)})",
-            refresh=v.get("refresh"), refresh_minutes=v.get("every"),
+            refresh=v.get("refresh"), refresh_minutes=v.get("every"), list=v.get("list"),
+            layout=describe_layout(layout(v.get("blocks"))),
             size=f"{max(1, round(size(v) / 1000))} of {MAX_NAMED_SIZE // 1000} KB",
         )
 
