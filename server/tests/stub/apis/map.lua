@@ -62,6 +62,11 @@ MapCanvasPinMixin = {
 	end,
 	-- As in the game: the canvas calls CheckMouseButtonPassthrough("RightButton") on a pin
 	-- after OnAcquired, and right-clicks fall through to the map unless the pin says otherwise.
+	-- As in the newer UI (Blizzard_MapCanvas, retail): a click is passed on to OnMouseClickAction.
+	-- The classic UI's does nothing; a test sets client.classicCanvas for that.
+	OnClick = function(self, ...)
+		if not client.classicCanvas and self.OnMouseClickAction then self:OnMouseClickAction(...) end
+	end,
 	ShouldMouseButtonBePassthrough = function(self, button) return button == "RightButton" end,
 	CheckMouseButtonPassthrough = function(self, ...)
 		self:SetPassThroughButtons()

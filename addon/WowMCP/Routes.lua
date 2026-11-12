@@ -165,7 +165,10 @@ function StopPin:OnMouseLeave()
 	GameTooltip:Hide()
 end
 
+function StopPin:OnClick(...) ns.Map.PinOnClick(self, ...) end -- see Map.lua
+
 function StopPin:OnMouseClickAction(button)
+	self.clickActionRan = true
 	if button == "LeftButton" then Routes.GoTo(self.stop.n, self.stop.track) end
 end
 

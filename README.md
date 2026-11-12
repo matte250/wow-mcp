@@ -254,7 +254,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/mcp goals [show, hide, mute <n>, unmute <n>, clear [<n>, all]]` | The goals list (docks under the plan window): right-click a goal to mute it; − collapses; `clear` removes the done ones |
 | `/mcp prices [panel on, off]` | Auction prices your AI has: the last full scan, the priority list, searches left; at the auction house, look the list up again. `panel off` hides the status panel under the auction house window (on by default) |
 | `/mcp route [show, next, prev, <n>, stop]` | The route and its navigator (right-click the navigator for the next stop) |
-| `/mcp areas [show, clear]` | The highlighted areas |
+| `/mcp areas [show, clear]` | The highlighted areas (shift-click a circle on the map to remove it) |
 | `/mcp messages` | Repeat the last messages from your AI |
 | `/mcp reminders` | Reminders waiting to fire |
 | `/mcp status` | Live-update status and slots left |
