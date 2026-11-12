@@ -11,8 +11,9 @@
 --
 -- While answers are due, "Thinking…" is a status line with a clock, the tokens the AI has written so
 -- far and the step the bridge says the AI is on. The bridge says it has each question right away, and
--- how it's coming along now and then, so the line can also say when the bridge seems to be down. Each
--- answer gets a line under it with how long it took and how many tokens the AI wrote.
+-- how it's coming along every second or two (over the bell, Core.lua), so the line can also say when
+-- the bridge seems to be down. Each answer gets a line under it with how long it took and how many
+-- tokens the AI wrote.
 --
 -- Which Claude model answers, and how hard it thinks, is picked per character, with the picker at the
 -- AI tab's top right or /ai model and /ai thinking. Each question carries both to the bridge, which
@@ -28,7 +29,8 @@ local ACK_WAIT = 15      -- seconds for the bridge to say it has a question; lon
 local QUIET = 120        -- seconds the bridge may go without news while it answers, until it says (bridge.py's SILENCE)
 local QUIET_MARGIN = 60  -- seconds more before saying the AI seems to have stopped
 local STATUS_EVERY = 1   -- seconds between redraws of the status line, for its clock
-local GUESS_FOR = 40     -- seconds the token count may run on past the bridge's last note (bridge.py's PROGRESS_EVERY)
+local GUESS_FOR = 5      -- seconds the token count may run on past the bridge's last note (it sends one every 1.5 s)
+local QUESTION_IDS = 16  -- the bell names a question by its post id mod this (bell.py's QUESTION_IDS)
 local HELD = 2           -- seconds a chat line may wait for its items (ns.Chat), and the status line behind it
 local TAB_NAME = "AI"
 local TAB_DELAY = 5      -- seconds after login before the tab may be made: the chat windows are set up by then
@@ -45,6 +47,15 @@ local ARROW = "|A:minimal-scrollbar-arrow-bottom-over:8:12|a"
 local DOWN = "No answer from wow-mcp-bridge. Is it running?"
 local STOPPED = "The AI seems to have stopped responding."
 local LABEL = "|cff33ff99AI:|r"
+-- The steps the bridge says the AI is on, by their number on the bell: bridge.py's STEP_CODES, in its order.
+local STEPS = {
+	[0] = "", "working it out", "writing", "looking at your game", "updating your game", "using its tools",
+	"checking auction prices", "looking for upgrades", "looking up items", "looking in your bags",
+	"checking where you are", "looking at your character", "reading your quest log", "checking your quests",
+	"checking your professions", "checking your recipes", "checking vendors", "checking flight paths",
+	"checking reputations", "remembering earlier conversations", "marking the map", "marking a route",
+	"marking areas", "making a plan", "making a table or list", "searching the web", "reading a web page",
+}
 
 -- Links shift-clicked into the question become text the agent can read:
 -- "[Linen Cloth] (item 2589)".
@@ -80,7 +91,7 @@ local told = {}       -- said once per session: the tab is gone, or can't be mad
 local picker          -- the model and thinking picker on the AI tab, once made: { frame, Update }
 -- Questions without an answer yet, oldest first: { session, post (what Stream.Post named it), asked (GetTime()),
 -- acked, step (what the bridge says the AI is doing), tokens, rate, counted (if the bridge counts them: the tokens
--- the AI has written as of its last note, how many a second, and GetTime() that note came) }.
+-- the AI has written as of its last note, how many a second since the note before, and GetTime() that note came) }.
 local pending = {}
 local heard = -math.huge -- GetTime() of the last news from the server: a note, an answer, any new data
 local seq                -- ns.run.seq when last looked
@@ -160,9 +171,9 @@ end
 ---------------------------------------------------------------------------
 -- The status line at the bottom of the tab while answers are due: "Thinking… 1:24 · ↓ 3.4k tokens ·
 -- checking auction prices", how long the oldest question has waited, the tokens the AI has written for it
--- and the step the bridge last said it's on. The clock ticks here, at no cost; each note from the bridge
--- costs a live-update slot, so they come seldom (bridge.py's Progress), and the token count runs on at the
--- pace the last one said. The line says instead when the bridge hasn't said it has a question, or has
+-- and the step the bridge last said it's on. The clock ticks here; the bridge's notes come over the bell
+-- every second or two (bridge.py's Progress), and between them the token count runs on at the pace of the
+-- last two, for a few seconds. The line says instead when the bridge hasn't said it has a question, or has
 -- said nothing for longer than it said it might.
 --
 -- Chat windows let addons change and remove their lines (ScrollingMessageFrameSecureMixin's
@@ -184,12 +195,13 @@ local function Unthink(tab)
 end
 
 -- What seems wrong, if anything: a question the bridge hasn't said it has (nothing at all came since it
--- was asked), or nothing from it for longer than it said it might stay quiet.
+-- was asked; news in the same frame as the question was about something else), or nothing from it for
+-- longer than it said it might stay quiet.
 local function Warning(now)
 	for _, q in ipairs(pending) do
-		if heard < q.asked and now - q.asked >= ACK_WAIT then return DOWN end
+		if heard <= q.asked and now - q.asked >= ACK_WAIT then return DOWN end
 	end
-	if heard >= pending[1].asked and now - heard >= quiet + QUIET_MARGIN then return STOPPED end
+	if heard > pending[1].asked and now - heard >= quiet + QUIET_MARGIN then return STOPPED end
 end
 
 -- A time taken, as a clock shows it: "4:07".
@@ -212,10 +224,9 @@ local function Tokens(count)
 	return ARROW .. " " .. text .. (count == 1 and " token" or " tokens")
 end
 
--- The tokens the AI has written for question q by now, if the bridge counts them. Its notes come seldom, so
--- between them this is an estimate: the last count, on at the pace that note said. It runs on for GUESS_FOR
--- seconds at most, so it can't get far ahead if the AI stops writing meanwhile (a tool runs); the next note's
--- count takes its place.
+-- The tokens the AI has written for question q by now, if the bridge counts them. Between its notes this is an
+-- estimate: the last count, on at the pace since the note before. It runs on for GUESS_FOR seconds at most, so
+-- it can't get far ahead if the notes stop coming; the next note's count takes its place.
 local function Written(q, now)
 	if q.tokens then return q.tokens + q.rate * math.min(now - q.counted, GUESS_FOR) end
 end
@@ -280,12 +291,27 @@ local function Tick(_, elapsed)
 	Update()
 end
 
--- The question news from the bridge is about, by the post it came in: its place in pending. Without a post
+-- The question news from the bridge is about: its place in pending. An answer names the post it came in (and a
+-- note from before the bell); an ack on the bell the post id mod QUESTION_IDS (question). Progress names none:
+-- it's about the one the bridge answers, which takes them in turn, so the oldest it said it has. Without any
 -- (a bridge from before notes), the oldest.
-local function Find(session, post)
-	if post == nil then return pending[1] and 1 or nil end
+local function Find(m)
+	if m.question ~= nil then
+		for i, q in ipairs(pending) do
+			if q.post % QUESTION_IDS == m.question then return i end
+		end
+		return nil
+	end
+	if m.post == nil then
+		if m.status == "progress" then
+			for i, q in ipairs(pending) do
+				if q.acked then return i end
+			end
+		end
+		return pending[1] and 1 or nil
+	end
 	for i, q in ipairs(pending) do
-		if q.post == post and q.session == session then return i end
+		if q.post == m.post and q.session == m.session then return i end
 	end
 end
 
@@ -302,22 +328,41 @@ local function Reached(i, ack)
 	return i
 end
 
--- A note from the bridge about a question it's answering (Messages.lua): status "ack", it has it, or
--- "progress", text is the step it's on ("" for none). Each says how long the bridge may stay quiet now and,
--- if it counts them (Claude Code; not --agent), the tokens the AI has written so far (the ack's: 0) and how
--- many a second lately.
+-- A note from the bridge about a question it's answering, from the bell (Core.lua): status "ack", it has
+-- question (post id mod QUESTION_IDS) and may stay quiet that long now; or "progress", step is the number of
+-- the step it's on (STEPS) and tokens, if it counts them (Claude Code; not --agent), how many the AI has written
+-- so far. Notes from before the bell came as messages (Messages.lua), with session and post, text for the step
+-- and rate for the pace.
 function AIChat.Status(m)
-	heard = GetTime()
+	local now = GetTime()
+	heard = now
 	if type(m.quiet) == "number" and m.quiet > 0 then quiet = m.quiet end
-	local i = Find(m.session, m.post)
+	local i = Find(m)
 	if not i then return end -- asked before a /reload, or given up on
 	local q = pending[Reached(i, m.status ~= "progress")]
 	q.acked = true
-	if m.status == "progress" then q.step = m.text ~= "" and m.text or nil end
+	if m.status == "progress" then
+		local step = STEPS[m.step] or m.text
+		q.step = type(step) == "string" and step ~= "" and step or nil
+	end
 	if type(m.tokens) == "number" then
-		q.tokens, q.rate, q.counted = m.tokens, type(m.rate) == "number" and math.max(m.rate, 0) or 0, GetTime()
+		if type(m.rate) == "number" then
+			q.rate = math.max(m.rate, 0)
+		elseif q.tokens and now - q.counted >= 0.5 then
+			q.rate = math.max(m.tokens - q.tokens, 0) / (now - q.counted)
+		end
+		q.tokens, q.rate, q.counted = m.tokens, q.rate or 0, now
+	end
+	-- A visual being refreshed shows the news in its own window too (Messages.lua).
+	if ns.Visuals and ns.Visuals.Heard then
+		ns.Visuals.Heard({ status = m.status, post = q.post, session = q.session, text = q.step or "" })
 	end
 	Update()
+end
+
+-- Whether answers are due: the bell is read more often meanwhile (Core.lua).
+function AIChat.Waiting()
+	return #pending > 0
 end
 
 -- An answer from the bridge (Messages.lua), to the question asked in post `post` of `session`. The status
@@ -339,7 +384,7 @@ function AIChat.Answer(text, style, sender, bridgeModel, bridgeEffort, session, 
 		ns.Chat(NOTE .. "took " .. Clock(took) .. (type(tokens) == "number" and " · " .. Tokens(tokens) or "") .. "|r", tab)
 	end
 	heard = GetTime()
-	local i = Find(session, post)
+	local i = Find({ session = session, post = post })
 	if i then table.remove(pending, Reached(i)) end
 	Update(true)
 	if tab then Flash(tab) end
@@ -510,6 +555,16 @@ local function Ask(input)
 		return
 	end
 	if #pending == 0 then seq = ns.run.seq end -- data from before doesn't say the bridge has this one
+	table.insert(pending, { session = session, post = post, asked = GetTime() })
+	untilRedraw = STATUS_EVERY
+	ticker:SetScript("OnUpdate", Tick)
+	Update(true)
+end
+
+-- A post the bridge answers like a question though it wasn't typed: a named visual's Refresh (Messages.lua).
+-- Its notes on the bell and its reply then find it like a question's, and the status line shows meanwhile.
+function AIChat.Expect(post, session)
+	if #pending == 0 then seq = ns.run.seq end
 	table.insert(pending, { session = session, post = post, asked = GetTime() })
 	untilRedraw = STATUS_EVERY
 	ticker:SetScript("OnUpdate", Tick)

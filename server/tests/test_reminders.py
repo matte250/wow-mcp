@@ -180,7 +180,7 @@ def test_server_state_reset(game):
         client.LoadAddon()
         client.Wait()
         client.Publish('{"text":"Train skinning","zone":"Durotar"}')
-        client.Wait()
+        client.Wait(4) -- the bell's frame is taken on the third tick, the reminder checked on the next
         assert(#client.sounds == 1 and WowMCPDB.reminders[1].fired)
         assert(WowMCPDB.reminders[1].created ~= 5)
     """)

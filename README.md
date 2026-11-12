@@ -25,29 +25,43 @@ reach the disk on demand (technique from [wow-ai](https://github.com/chelinho139
 1. `C_AddOns.LoadAddOn()` reads a load-on-demand addon's Lua from disk when it's called.
    The installer creates 300 slot addons (`WowMCP_S001`-`S300`, grouped under WowMCP in the
    addon list). On each update the server writes the full current state into every slot.
-2. `PlaySoundFile()` reads a sound file again on every call until it has once been valid.
-   The addon plays the next `sig/NNNN.wav` twice a second and checks `C_Sound.IsPlaying()` on
-   the following poll. On Forever, an empty file still returns a handle but doesn't play.
-   After writing the slots, the server turns that file into a 2-second silent wav, and the
-   addon then loads one slot, which runs the update.
+2. `PlaySoundFile()` streams a long sound from disk on every play; a short one it reads once and
+   keeps for the rest of the launch, and an empty file returns a handle but never plays. So a file
+   that's either 8 seconds of silence or empty is a bit the addon can read again and again: play it,
+   and ask `C_Sound.IsPlaying()` a moment later. The server keeps a *frame* of 24 such bits in
+   `bell/` (a valid file is a hard link to `bell/on.wav`, so setting a bit writes nothing). A frame
+   says there's new data in the slots (the addon then loads one slot, which runs the update), asks
+   for the player's state, or carries the `/ai` status line's news.
 
 The same state goes into `WowMCP/Inbox.lua`, which the game reads on login and `/reload`, so
 markers survive reloads and restarts.
 
-The other direction uses file opens. A request for the player's state rings a second set of
-doorbells (`req/`, which don't use slots). The addon collects the answer as a Lua table, serializes
+A frame is 3 bits of type, 16 of payload and a 5-bit CRC, between two markers that carry its
+parity: the server sets `lead.wav` first and `seal.wav` last, and the addon reads them the other way
+round, so a frame read while the next one is written is read again. Reading costs about 0.1 ms per
+file, so the addon reads as little as it can: only `seal.wav`, every 2 seconds while nothing happens
+(the old doorbells read 18 files a second, always), and every quarter second for 90 seconds after the
+server sent something or the game logged in, while an `/ai` answer is due, and while the auction house
+or a mailbox is open. When `seal.wav` flips, it reads the whole frame (26 files, over a frame or two).
+It confirms each frame it takes, and the server writes the next one only then. The client only knows
+files that were there when it started, so the installer's new files need one full restart.
+
+The other direction uses file opens. A request for the player's state is a frame of the bell (no
+slot). The addon collects the answer as a Lua table, serializes
 it to JSON and compresses it with zlib (both built into the client). Then it "plays" a sequence of
 empty files `out/000.wav`–`out/fff.wav`, where each file name is 12 bits of the message. The client
 opens each file on disk. The server watches that folder (`inotify` on Linux, oplocks on Windows) and reads
-the sequence back.
+the sequence back. The addon's confirmation of each frame goes this way too.
 Nothing is drawn or heard, and the game doesn't have to be on screen. Sending is paced at about
 1.5 ms of frame time per frame: each open costs about 0.1 ms, and the client drops sound starts
 beyond about 256 per frame.
 
-Limits: each live update uses one slot, so you get 300 per UI session (`/reload` resets them).
-Updates that arrive during combat are applied when combat ends. If the game's sound is fully
-disabled, the doorbell can't work, so live updates turn off and new markers show after `/reload`.
-The addon checks this at login.
+Limits: each update of what the game shows (markers, plans, messages, ...) uses one slot, so you get
+300 per UI session (`/reload` resets them); requests and the `/ai` status line use none. Updates that
+arrive during combat are applied when combat ends. If the game's sound is fully disabled, the bell
+can't work, so live updates turn off and new markers show after `/reload`. The addon checks this at
+login, and with the server's first frames after it that the bell's files really are read afresh;
+it says so in chat if not, and `get_status` passes on that the game doesn't confirm frames.
 
 ## Setup
 
@@ -119,7 +133,7 @@ cd server && uv run wow-mcp-bridge --addons-dir "/path/to/World of Warcraft/_for
 
 To keep it running, copy `server/systemd/wow-mcp-bridge.service` to `~/.config/systemd/user/`, fix the
 two paths in it, and run `systemctl --user enable --now wow-mcp-bridge`. Its log is at
-`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--effort` (low, medium, high, xhigh or max) how hard it thinks when you haven't picked a level; `--timeout` (default 120) stops an answer after that many seconds without any sign of life from Claude Code (thinking, tool calls, writing); `--max-time` (default 1800) stops any answer, as a guard against runaways, and is the only limit for `--agent`, whose output isn't watched; `--agent` changes how it answers (with `--agent`, picks are ignored). Each `/ai` question costs a live-update slot for its acknowledgement, usually 0–2 for progress, and one for the answer.
+`journalctl --user -u wow-mcp-bridge -f`. `--model` is the model when you haven't picked one in game (only fable, opus, sonnet and haiku can be picked); `--effort` (low, medium, high, xhigh or max) how hard it thinks when you haven't picked a level; `--timeout` (default 120) stops an answer after that many seconds without any sign of life from Claude Code (thinking, tool calls, writing); `--max-time` (default 1800) stops any answer, as a guard against runaways, and is the only limit for `--agent`, whose output isn't watched; `--agent` changes how it answers (with `--agent`, picks are ignored). Each `/ai` answer costs a live-update slot; its acknowledgement and the status line's news (every second or two) cost none.
 
 On Windows, run the same command in a terminal you leave open while you play. To start it at logon instead,
 make a Task Scheduler task that runs `uv` with the arguments
@@ -132,7 +146,8 @@ conversation. It also keeps notes about each character (preferences, projects, p
 there, and every question comes with them. `/ai new` starts a fresh conversation; the archive and notes
 stay. `--history` and `--history-minutes` change the short-term part (`--history 0` turns it off).
 `cd server && uv run wow-mcp-memory import-logs <logs>` adds exchanges from old bridge logs. Only one
-bridge can answer for a game at a time; a second one refuses to start. Its log lines start with the time.
+bridge can answer for a game at a time; a second one refuses to start. Its log lines start with the time. A Refresh click on a named
+visual costs like a question; a refresh on its own costs one slot (`--no-visual-refresh` stops those).
 
 ## Tools
 
@@ -155,7 +170,7 @@ Every tool that reads the game also returns the game version, so agents look thi
 | Travel | `get_flight_paths` (known flight masters) |
 | Telling you things | `show_message` (chat or center screen), `set_reminder` / `list_reminders` / `cancel_reminder` (by time or place) |
 | Memory | `search_conversations` (every earlier /ai conversation, kept for good: all words in any case, items by name or ID, by days or date; newest first, with how long ago), `remember` / `forget_note` / `list_notes` (lasting notes about each character, in every /ai prompt) |
-| Visuals | `visualize` (a window of its own with a title and blocks: tables that sort by a click on a header and scroll, lists of things with values, short texts; items with their icon and tooltip, money with coin icons, gains green and losses red; the last 5 to flip back through), `clear_visuals` |
+| Visuals | `visualize` (a window of its own with a title and blocks: tables that sort by a click on a header and scroll, lists of things with values, short texts; items with their icon and tooltip, money with coin icons, gains green and losses red; the last 5 to flip back through; with a `name` it stays under a tab of its own until removed and the same name updates it in place, e.g. an auction tracker or flip list; `refresh` says how to rebuild it from live data, which the window's Refresh button runs through wow-mcp-bridge; `refresh_minutes` (at least 15) refreshes it on its own while the game runs), `list_visuals`, `remove_visual`, `clear_visuals` (the temporary ones; `include_named` also the named ones) |
 | Places (Questie) | `find_npc` (by name, title, role such as trainer or flight master, faction, zone), `find_object` (herbs, chests, quest objects), `find_quest` (who starts and ends it, objectives and where their mobs and objects are, prerequisites): read from the [Questie](https://github.com/Questie/Questie) addon's database when you have it installed for this game version, with zone-map coordinates and map IDs for `show_on_map`. Optional: without Questie they say so and your AI looks places up on the web as before |
 | Diagnostics | `get_status` (is the addon up to date, live updates, slots left; says when to /reload or reinstall) |
 
@@ -225,6 +240,7 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/ai <question>`, `/ask <question>` | Ask your AI (needs `wow-mcp-bridge` running); or just type in the AI chat tab |
 | `/ai model [default, fable, opus, sonnet, haiku]` | Which Claude model answers your `/ai` questions (kept per character); the AI tab has a picker for it too |
 | `/ai thinking [default, low, medium, high, xhigh, max]` (or `/ai effort`) | How hard the AI thinks before answering (kept per character); the AI tab's picker has it too |
+| `/mcp visuals <name>`, `recent`, `refresh [<name>]`, `remove <name>` | The tables and lists your AI keeps, each under a tab at the window's top: one click switches, a dot marks one that changed while you looked at another; Refresh has your AI rebuild one; the x on a tab asks before removing it |
 | `/mcp visuals [show, hide, clear, <n>]` (or `/mcp table`) | The window of tables and lists from your AI. Click a header to sort (right-click: as it came); the wheel scrolls; drag the corner to resize |
 | `/mcp aitab [on, both, off]` | Where the AI conversation shows: its own chat tab (default), the tab and the main window, or only the main window; brings a closed tab back |
 | `/ai new` | Start a fresh conversation with your AI |
@@ -254,7 +270,7 @@ Layout: one file per feature on each side, plugged into small registries.
   can ask for), `Stream.lua` (sending to the server), then one file per feature (`Map.lua`,
   `Player.lua`, `Quests.lua`, ...).
 - `server/wow_mcp/`: `app.py` (shared helpers), `item_text.py` (the item markup, shared by the tools and the bridge), `tools/` (one module per feature, picked up
-  automatically), `transport.py` / `stream.py` (the two directions; `opens_windows.py` is how Windows sees file opens, `locking.py` the file locks of both systems), `battlenet.py` (Blizzard's API), `memory.py` (the /ai conversation archive and notes, `wow-mcp-memory`), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
+  automatically), `transport.py` / `stream.py` (the two directions; `bell.py` is the format of the bell's frames, `opens_windows.py` is how Windows sees file opens, `locking.py` the file locks of both systems), `battlenet.py` (Blizzard's API), `memory.py` (the /ai conversation archive and notes, `wow-mcp-memory`), `online_auctions.py` (online prices: snapshots, history, house matching, `wow-mcp-auctions`), `game.py`, `install.py`.
 - `server/tests/`: `stub/client.lua` runs the addon in Lua, with game APIs in `stub/apis/` (one file
   per area). There's one `test_<feature>.py` per feature, and `conftest.py` has the fixtures
   (`run_client` for scripted sessions, `live_game` for end-to-end runs against the real tools).

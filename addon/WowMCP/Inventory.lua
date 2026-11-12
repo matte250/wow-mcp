@@ -473,7 +473,8 @@ loads:SetScript("OnEvent", function(_, _, itemID, success)
 end)
 
 -- For the upgrade finder (Auction.lua).
-ns.Inventory = { Equipment = Equipment, GearStats = GearStats, Lines = Lines }
+ns.Inventory = { Equipment = Equipment, GearStats = GearStats, Lines = Lines,
+	MailOpen = function() return mailbox ~= nil end } -- at a mailbox now (Core.lua reads the bell more often)
 
 ns.RegisterSection(ns.Kinds.ITEMS, "bags", Bags)
 ns.RegisterSection(ns.Kinds.ITEMS, "equipment", Equipment)

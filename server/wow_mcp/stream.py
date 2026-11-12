@@ -7,8 +7,9 @@ symbol, offset by a whitening sequence so that equal symbols in a row become dif
 files (the client opens a file at most once per frame). Nothing is drawn or heard in
 game, and the game doesn't have to be on screen.
 
-Two kinds of message come through: replies to requests (find_message) and posts the addon
-sends unasked, such as /ai questions (find_posts, Receiver.receive_posts).
+Three kinds of message come through: replies to requests (find_message), posts the addon sends
+unasked, such as /ai questions (find_posts, Receiver.receive_posts), and receipts for the frames of the
+streamed channel the other way (bell.py; find_receipts, Receiver.receive_receipt).
 """
 
 import ctypes
@@ -20,7 +21,7 @@ import struct
 import sys
 import time
 import zlib
-from collections.abc import Container, Iterator
+from collections.abc import Callable, Container, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,10 @@ POST_HEADER = len(POST_MAGIC) + 12  # magic, session token, post id, body length
 MAX_POST = 1 << 13
 # The most symbols an unfinished post can span; anything older can't be part of one.
 POST_WINDOW = -(-(POST_HEADER + MAX_POST) * 8 // 12)
+RECEIPT_MAGIC = b"WM\x03"
+RECEIPT_HEADER = len(RECEIPT_MAGIC) + 8  # magic, receipt, body length (always 0)
+# Seconds a receipt may wait behind the game's other messages, as long as their file opens keep coming.
+RECEIPT_IDLE = 1.0
 SYMBOL_FILE = re.compile(rb"([0-9a-f]{3})\.wav")
 
 IN_OPEN = 0x20
@@ -98,6 +103,12 @@ def encode_post(session: int, post_id: int, value: object) -> list[int]:
     return _encode(POST_MAGIC + struct.pack(">II", session, post_id), value)
 
 
+def encode_receipt(receipt: int) -> list[int]:
+    """The addon's receipt for a frame (as files opened), for tests: no body, so 8 files."""
+    symbols = bytes_to_symbols(RECEIPT_MAGIC + struct.pack(">II", receipt, 0))
+    return [(s + w) % 4096 for s, w in zip(symbols, whitening(len(symbols)))]
+
+
 def _messages(
     files: list[int], magic: bytes, header: int, max_body: int
 ) -> Iterator[tuple[int, tuple[int, ...], bytes | None]]:
@@ -150,6 +161,11 @@ def find_message(files: list[int], request_id: int) -> object | None:
         except (zlib.error, ValueError) as e:
             raise Corrupt(f"reply {request_id} arrived damaged: {e}") from e
     return None
+
+
+def find_receipts(files: list[int]) -> list[int]:
+    """The receipts complete in the opened files, oldest first (bell.py says what one holds)."""
+    return [fields[0] for _, fields, body in _messages(files, RECEIPT_MAGIC, RECEIPT_HEADER, 0) if body is not None]
 
 
 @dataclass(frozen=True)
@@ -265,17 +281,34 @@ class Receiver:
 
     def receive(self, request_id: int, start_timeout: float, idle_timeout: float) -> object:
         """Wait for the reply: it must start within start_timeout and keep arriving without
-        a gap longer than idle_timeout."""
+        a gap longer than idle_timeout. It may be here already (it came while the request's
+        receipt was awaited)."""
         deadline = time.monotonic() + start_timeout
-        while True:
+        value = find_message(self.symbols, request_id)
+        while value is None:
             now = time.monotonic()
             if now >= deadline:
                 raise Timeout(f"no complete reply to request {request_id}")
             if self._read(deadline - now):
                 value = find_message(self.symbols, request_id)
-                if value is not None:
-                    return value
                 deadline = max(deadline, time.monotonic() + idle_timeout)
+        return value
+
+    def receive_receipt(self, matches: Callable[[int], bool], start: int, wait: float, patience: float) -> int | None:
+        """The first receipt that `matches` among the files opened from position `start` in `symbols` on, waiting
+        up to `wait` seconds for it; longer while the game keeps opening files (it's sending something else
+        first), but `patience` at most. None if it doesn't come."""
+        began = time.monotonic()
+        deadline = began + wait
+        while True:
+            for receipt in find_receipts(self.symbols[start:]):
+                if matches(receipt):
+                    return receipt
+            now = time.monotonic()
+            if now >= deadline:
+                return None
+            if self._read(deadline - now):
+                deadline = min(began + patience, max(deadline, time.monotonic() + RECEIPT_IDLE))
 
     def receive_posts(self, wait: float) -> list[Post]:
         """Posts that completed, waiting up to `wait` seconds for file opens. Each post comes

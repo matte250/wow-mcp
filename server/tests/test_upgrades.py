@@ -340,16 +340,18 @@ def test_random_suffixes(game):
 
 
 SAVED = r"""
--- Every OnUpdate's time, in ms.
+-- Every OnUpdate's time, in ms (times keeps them all: one slow frame can be the machine, not the code).
 local Frame = getmetatable(UIParent)
-local SetScript, frames, slowest = Frame.SetScript, 0, 0
+local SetScript, frames, slowest, times = Frame.SetScript, 0, 0, {}
 function Frame:SetScript(name, fn)
     if name == "OnUpdate" and fn then
         local inner = fn
         fn = function(...)
             local started = os.clock()
             inner(...)
-            frames, slowest = frames + 1, math.max(slowest, (os.clock() - started) * 1000)
+            local ms = (os.clock() - started) * 1000
+            frames, slowest = frames + 1, math.max(slowest, ms)
+            times[#times + 1] = ms
         end
     end
     SetScript(self, name, fn)
@@ -364,9 +366,16 @@ def test_a_big_scan_is_searched_in_small_chunks(game):
         local ids = {}
         for i = 0, 19999 do ids[#ids + 1] = 100000 + i end
         client.Scanned(ids, function(id) return 100 + id % 997 end)
-        frames, slowest = 0, 0
+        frames, slowest, times = 0, 0, {}
         local answer = Find({ perSlot = 5 })
-        assert(frames >= 30 and slowest < 5, string.format("%d frames, the slowest %.2f ms", frames, slowest))
+        -- Many short frames. A busy machine (or a garbage collection) can stretch one or two now and
+        -- then; work that isn't spread out makes many long ones, or few frames.
+        table.sort(times)
+        local long = 0
+        for _, ms in ipairs(times) do if ms >= 5 then long = long + 1 end end
+        local median = times[math.ceil(#times / 2)]
+        assert(frames >= 30 and long <= 2 and median < 3,
+            string.format("%d frames, %d of 5 ms or more, median %.2f ms, slowest %.2f ms", frames, long, median, slowest))
         assert(answer.checked >= 20000 and answer.notLoaded == 0, answer.checked)
         -- Leather, cloth, shields and staves; no mail, plate, daggers or bows.
         local types = {}

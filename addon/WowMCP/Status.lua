@@ -29,6 +29,7 @@ local function Status()
 		build = ns.BUILD,               -- nil if Build.lua wasn't loaded (new file: restart WoW)
 		live = run.live,
 		liveProblem = run.liveProblem,
+		verified = run.verified,        -- seen the bell's files change on disk (Core.lua's handshake)
 		slotsLeft = ns.SlotsLeft(),
 		slotCount = ns.SLOT_COUNT,
 		slotProblem = run.slotProblem,  -- LoadAddOn's reason (e.g. "MISSING", "DISABLED") or "EXHAUSTED"

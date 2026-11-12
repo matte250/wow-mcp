@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from wow_mcp import game, install, kinds
 from wow_mcp.app import addons_dir, as_list, guidance, request, tool, transport
 from wow_mcp.install import ADDONS_DIR_ENV
-from wow_mcp.transport import ADDON, SLOT_COUNT, slot_name
+from wow_mcp.transport import ADDON, SLOT_COUNT, Bell, slot_name
 
 LOW_SLOTS = 20
 BUILD_LINE = re.compile(r'ns\.BUILD\s*=\s*"([^"]*)"')
@@ -44,6 +44,9 @@ class Status(BaseModel):
     loaded_build: str | None = Field(description="Build ID the game is running; it changes on /reload.")
     live_updates: bool | None = Field(description="Updates reach the game without a /reload.")
     live_problem: str | None
+    live_verified: bool | None = Field(description="The game had seen its live-update files change on disk when it "
+                                       "answered: it checks with the server's first frames after each /reload, so "
+                                       "the first answer after one may say no.")
     slots_left: int | None = Field(description="Live updates left in this UI session; /reload resets them.")
     slot_count: int | None
     last_update_sent: int | None = Field(description="Number of the latest update the server sent.")
@@ -100,6 +103,17 @@ def _check_disk(folder: Path, installed: str | None, repo: str | None, found: Fi
         found.install = "the addon code in the server's checkout is newer than the installed copy"
 
 
+def _unconfirmed(addon_dir: Path) -> str:
+    """What the server saw of the game not taking live updates, if it saw that: frames without a receipt."""
+    state = Bell(addon_dir).load_state()
+    if not state["missed"]:
+        return ""
+    since = state["confirmed"]
+    when = f"since {datetime.fromtimestamp(since).strftime('%H:%M')}" if isinstance(since, (int, float)) else "yet"
+    return (f"The game hasn't confirmed a live update {when} (it reads them by playing silent sound files, so game "
+            "sound must be on). ")
+
+
 def _check_game(status: dict, installed: str | None, sent: int, found: Findings) -> None:
     loaded = status.get("build")
     if loaded is None:
@@ -142,7 +156,7 @@ async def get_status() -> Status:
     the server's, whether live updates work and how many are left, and the game version. Returns advice on
     what to fix. Use it when another WoW tool fails or behaves oddly, or after the addon was updated."""
     unknown = dict(game_answered=False, installed_build=None, loaded_build=None, live_updates=None,
-                   live_problem=None, slots_left=None, slot_count=None, last_update_sent=None,
+                   live_problem=None, live_verified=None, slots_left=None, slot_count=None, last_update_sent=None,
                    last_update_in_game=None)
     repo = _repo_build()
     folder = addons_dir()
@@ -171,9 +185,9 @@ async def get_status() -> Status:
         problem = str(e)
         if now.running and not now.mismatch:
             found.notes.append(
-                "Ask the player to type /mcp status in game. If it says live updates are off, fix the reason it "
-                "gives (e.g. turn on game sound) and /reload. If /mcp isn't a command, the WowMCP addon isn't "
-                "loaded: enable it in the AddOns list, or fully restart WoW if it isn't listed."
+                _unconfirmed(addon_dir) + "Ask the player to type /mcp status in game. If it says live updates are "
+                "off, fix the reason it gives (e.g. turn on game sound) and /reload. If /mcp isn't a command, the "
+                "WowMCP addon isn't loaded: enable it in the AddOns list, or fully restart WoW if it isn't listed."
             )
     else:
         answered = True
@@ -198,6 +212,7 @@ async def get_status() -> Status:
         loaded_build=status.get("build") if status else None,
         live_updates=status.get("live") if status else None,
         live_problem=status.get("liveProblem") if status else None,
+        live_verified=status.get("verified") if status else None,
         slots_left=status.get("slotsLeft") if status else None,
         slot_count=status.get("slotCount") if status else None,
         last_update_sent=sent, last_update_in_game=status.get("seq") if status else None,
