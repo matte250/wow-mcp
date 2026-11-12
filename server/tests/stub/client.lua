@@ -294,7 +294,17 @@ function client.Publish(json)
 	-- running, so it doesn't wait for the game to confirm the bell's frame before it writes the next: the
 	-- client does that here. The new frame is taken in the client.Wait() that follows.
 	client.Settle()
-	assert(os.execute(os.getenv("WOWMCP_PUBLISH") .. " '" .. json .. "'"))
+	local command = os.getenv("WOWMCP_PUBLISH") .. " '" .. json .. "'"
+	if package.config:sub(1, 1) == "\\" then
+		-- Windows: os.execute goes through cmd.exe, which doesn't know single quotes. Hand the line to sh (Git's)
+		-- in a file instead.
+		local path = SCRIPT .. ".publish.sh"
+		local file = assert(io.open(path, "wb"))
+		file:write((command:gsub("\\", "/")))
+		file:close()
+		command = 'sh "' .. path .. '"'
+	end
+	assert(os.execute(command))
 end
 
 client.addonsDir, client.DiskPath, client.ReadFile = ADDONS, DiskPath, ReadFile
