@@ -31,8 +31,21 @@ elif "raw" in args:  # past the tool's checks, as a newer server might send it
     app.transport().publish(lambda state, seq: state.update(visuals={"id": seq, "list": [{"id": seq, **args["raw"]}]}))
 elif "message" in args:
     messages.publish_message(args["message"])
+elif "remove" in args:
+    visuals.remove_visual(args["remove"])
+elif "status" in args:  # the bridge's note about post `post` of session 77
+    messages.publish_status(args["status"], args.get("text", ""), question=(77, args["post"]))
+elif "reply" in args:  # and its reply to it
+    messages.publish_message(args["reply"], reply=True, question=(77, args["post"]))
 else:
-    visuals.visualize(args["title"], args["blocks"], subtitle=args.get("subtitle"))
+    def send():
+        visuals.visualize(args["title"], args["blocks"], subtitle=args.get("subtitle"), name=args.get("name"),
+                          refresh=args.get("refresh"), refresh_minutes=args.get("every"))
+    if args.get("auto"):  # as the bridge's refresh on its own sends it
+        with visuals.background(app.addons_dir(), args["name"]):
+            send()
+    else:
+        send()
 """
 
 
@@ -43,6 +56,13 @@ def lua_json(value):
 
 def visual(title, *blocks, subtitle=None):
     return lua_json({"title": title, "blocks": list(blocks), "subtitle": subtitle})
+
+
+def kept(name, title, *blocks, refresh=None, every=None, auto=False):
+    """A named visual; auto: as the bridge's refresh on its own sends it."""
+    blocks = blocks or ({"type": "text", "text": title},)
+    return lua_json({"title": title, "blocks": list(blocks), "name": name, "refresh": refresh, "every": every,
+                     "auto": auto})
 
 
 def table(columns, rows, **more):
@@ -100,6 +120,33 @@ PRELUDE = r"""
         return client.LoadAddon()
     end
     local function noErrors() assert(not has("error"), chat()) end
+    -- The tabs on show, by their names: "[Name]" is the one on show, "Name*" has a dot.
+    local function tabs()
+        local out = {}
+        for _, t in ipairs(win().Tabs or {}) do
+            if t:IsShown() then
+                local label = plain(t.Name.text) .. (t.Dot:IsShown() and "*" or "")
+                out[#out + 1] = t.on and "[" .. label .. "]" or label
+            end
+        end
+        return table.concat(out, ",")
+    end
+    local function tab(name)
+        for _, t in ipairs(win().Tabs) do
+            if t:IsShown() and plain(t.Name.text) == name then return t end
+        end
+    end
+    local function click(t) t.OnMouseUp(t, "LeftButton") end
+    local function footer() return plain(win().Footer.text) end
+    -- What the addon posts to the bridge, named as Stream.Post names them: post ids from 1, session 77.
+    local function Posts(ns)
+        local posted = {}
+        ns.Stream.Post = function(value)
+            posted[#posted + 1] = value
+            return #posted, 77
+        end
+        return posted
+    end
 """
 
 
@@ -740,6 +787,318 @@ def test_items_still_loading_show_when_they_arrive(game):
     """)
 
 
+# ---------------------------------------------------------------------------
+# Named visuals in the window: tabs, news, Refresh, removing
+# ---------------------------------------------------------------------------
+
+REFRESH = "Call get_my_auctions and show my active listings with undercut status"
+
+
+def test_named_visuals_have_tabs_of_their_own(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        -- Only temporary ones: no tabs, the window as it always was.
+        show([==[""" + visual("Gloves", table([col("A")], [["x"]])) + r"""]==])
+        local f = win()
+        assert(tabs() == "" and not f.Refresh:IsShown() and at(f.Title)[5] == -8)
+        -- A named one the player asked for comes to the front, under a tab of its own.
+        show([==[""" + kept("Auction tracker", "My auctions", refresh=REFRESH) + r"""]==])
+        assert(open() and f.Title.text == "My auctions" and tabs() == "Recent,[Auction tracker]", tabs())
+        assert(f.Refresh:IsShown() and f.Refresh:IsEnabled() and not f.Next:IsShown() and at(f.Title)[5] == -28)
+        assert(footer():find("^Updated %d%d:%d%d$"), footer())
+        show([==[""" + kept("Flip list", "Worth flipping") + r"""]==])
+        assert(f.Title.text == "Worth flipping" and tabs() == "Recent,Auction tracker,[Flip list]", tabs())
+        assert(not f.Refresh:IsShown(), "no refresh instructions, no Refresh button")
+
+        -- One click switches.
+        click(tab("Recent"))
+        assert(f.Title.text == "Gloves" and tabs() == "[Recent],Auction tracker,Flip list", tabs())
+        assert(not f.Refresh:IsShown() and footer():find("^Sent "))
+        click(tab("Auction tracker"))
+        assert(f.Title.text == "My auctions" and tabs() == "Recent,[Auction tracker],Flip list")
+        local t = tab("Flip list")
+        t.OnEnter(t)
+        assert(client.tooltip.lines[1] == "Flip list" and client.tooltip.lines[2] == "Worth flipping")
+        assert(client.tooltip.lines[#client.tooltip.lines] == "Click: show it.")
+        t.OnLeave(t)
+
+        -- What's on show is kept over a /reload, also when it's closed.
+        Reload()
+        client.Wait()
+        assert(open() and win().Title.text == "My auctions" and tabs() == "Recent,[Auction tracker],Flip list", tabs())
+        mcp("visuals hide")
+        Reload()
+        client.Wait()
+        assert(not open())
+        mcp("visuals show")
+        f = win()
+        assert(open() and f.Title.text == "My auctions")
+
+        -- A new temporary one opens on it as always, with its arrows on the title line.
+        show([==[""" + visual("Boots", table([col("A")], [["y"]])) + r"""]==])
+        assert(f.Title.text == "Boots" and tabs() == "[Recent],Auction tracker,Flip list" and f.Count.text == "2/2")
+        assert(f.Next:IsShown() and at(f.Next)[2] == f.Title)
+        f.Prev.OnClick(f.Prev)
+        assert(f.Title.text == "Gloves")
+        -- The Recent tab goes back to the one it was on.
+        click(tab("Flip list"))
+        assert(not f.Next:IsShown())
+        click(tab("Recent"))
+        assert(f.Title.text == "Gloves")
+        noErrors()
+    """)
+
+
+def test_tabs_take_more_rows_when_they_dont_fit(game):
+    names = ["Auction tracker", "Flip list", "Crafting", "Leatherworking mats", "Herbs to farm", "Pets to buy",
+             "Raid consumables", "Alt gear"]
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+    """ + "".join(f"show([==[{kept(name, name)}]==])\n" for name in names) + r"""
+        local f, rows, right = win(), {}, 0
+        for _, t in ipairs(f.Tabs) do
+            if t:IsShown() then
+                rows[at(t)[5]] = true
+                right = math.max(right, at(t)[4] + t.width)
+            end
+        end
+        local count = 0
+        for _ in pairs(rows) do count = count + 1 end
+        -- As wide as the tabs may make it, on more rows, the title under them.
+        assert(count > 1 and right <= f.width, count .. " rows, " .. right .. " of " .. tostring(f.width))
+        assert(f.content == 480 and at(f.Title)[5] < -(4 + count * 18), f.content)
+        noErrors()
+    """)
+
+
+def test_a_new_version_keeps_how_the_player_has_it(game):
+    rows = [["a", 100], ["b", 300], ["c", 200]]
+    later = [["d", 50], ["e", 500], ["f", 70]]
+    columns = [col("Item"), col("Profit", "money")]
+    game(r"""
+        local ns = client.LoadAddon()
+        client.Wait()
+        show([==[""" + kept("Flip list", "Worth flipping", table(columns, rows)) + r"""]==])
+        -- Sorted by profit, and made wider.
+        header(2).OnMouseUp(header(2), "LeftButton")
+        assert(column(1) == "b,c,a", column(1))
+        local width = win().content + 60
+        ns.Visuals.Resize(width)
+        -- The new version: in place, as the player had it.
+        show([==[""" + kept("Flip list", "Worth flipping now", table(columns, later)) + r"""]==])
+        assert(win().Title.text == "Worth flipping now" and column(1) == "e,f,d" and win().content == width, column(1))
+        Reload()
+        client.Wait()
+        assert(column(1) == "e,f,d" and win().content == width)
+        noErrors()
+    """)
+
+
+def test_news_the_player_didnt_ask_for_gets_a_dot(game):
+    """A named visual the bridge refreshed on its own doesn't come to the front; one the player asked for does."""
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        show([==[""" + kept("Auction tracker", "My auctions", refresh=REFRESH, every=30) + r"""]==])
+        show([==[""" + kept("Flip list", "Worth flipping", refresh=REFRESH) + r"""]==])
+        assert(win().Title.text == "Worth flipping")
+        -- Refreshed on its own while another one is on show: a dot on its tab, nothing more.
+        show([==[""" + kept("Auction tracker", "My auctions, later", auto=True) + r"""]==])
+        assert(win().Title.text == "Worth flipping" and tabs() == "Auction tracker*,[Flip list]", tabs())
+        local t = tab("Auction tracker")
+        t.OnEnter(t)
+        assert(client.tooltip.lines[2] == "My auctions, later" and client.tooltip.lines[3]:find("refreshed every 30 min"))
+        assert(client.tooltip.lines[5] == "Updated since you last looked.", table.concat(client.tooltip.lines, " | "))
+        t.OnLeave(t)
+        -- Until the player looks, also over a /reload.
+        Reload()
+        client.Wait()
+        assert(tabs() == "Auction tracker*,[Flip list]", tabs())
+        click(tab("Auction tracker"))
+        assert(win().Title.text == "My auctions, later" and tabs() == "[Auction tracker],Flip list", tabs())
+        assert(next(WowMCPDB.visualWindow.updated) == nil)
+        -- The one on show, refreshed on its own: in place.
+        show([==[""" + kept("Auction tracker", "My auctions, latest", auto=True) + r"""]==])
+        assert(win().Title.text == "My auctions, latest" and tabs() == "[Auction tracker],Flip list", tabs())
+        -- Asked for (a question, a session, its Refresh button): it comes to the front.
+        show([==[""" + kept("Flip list", "Worth flipping now") + r"""]==])
+        assert(win().Title.text == "Worth flipping now" and tabs() == "Auction tracker,[Flip list]", tabs())
+        -- The window closed: one refreshed on its own leaves it closed, one asked for opens it.
+        mcp("visuals hide")
+        show([==[""" + kept("Auction tracker", "Quietly", auto=True) + r"""]==])
+        assert(not open())
+        show([==[""" + kept("Auction tracker", "Asked for") + r"""]==])
+        assert(open() and win().Title.text == "Asked for" and tabs() == "[Auction tracker],Flip list", tabs())
+        noErrors()
+    """)
+
+
+def test_the_refresh_button(game):
+    game(r"""
+        -- The AI's replies in the main chat window; the model and thinking level picked for questions.
+        WowMCPDB = { aiTab = { mode = "off", models = { ["Thorgrim-Firemaw"] = "sonnet" },
+                               efforts = { ["Thorgrim-Firemaw"] = "high" } } }
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        client.Wait()
+        show([==[""" + kept("Auction tracker", "My auctions", refresh=REFRESH) + r"""]==])
+        local f = win()
+        f.Refresh.OnEnter(f.Refresh)
+        assert(client.tooltip.lines[2] == "Your AI rebuilds it: """ + REFRESH + r"""", client.tooltip.lines[2])
+        f.Refresh.OnLeave(f.Refresh)
+
+        -- A click asks the bridge, with the model and thinking level picked for questions.
+        f.Refresh.OnClick(f.Refresh)
+        local p = posted[1]
+        assert(#posted == 1 and p.refresh == "Auction tracker" and p.player == "Thorgrim" and p.model == "sonnet"
+            and p.effort == "high")
+        assert(footer():find("· Refreshing…$"), footer())
+        assert(not f.Refresh:IsEnabled())
+        mcp("visuals refresh")
+        assert(#posted == 1 and last():find("Auction tracker is being refreshed.", 1, true))
+        -- The bridge has it: it may take as long as it needs, and says what it's doing.
+        client.Publish('{"status": "ack", "post": 1}')
+        client.Wait(40)
+        assert(footer():find("· Refreshing…$"), footer())
+        client.Publish('{"status": "progress", "post": 1, "text": "checking auction prices"}')
+        client.Wait()
+        assert(footer():find("· Refreshing… checking auction prices$"), footer())
+        -- Also after a /reload.
+        ns = Reload()
+        posted = Posts(ns)
+        client.Wait()
+        f = win()
+        assert(footer():find("· Refreshing… checking auction prices$") and not f.Refresh:IsEnabled(), footer())
+        -- The new version: done.
+        show([==[""" + kept("Auction tracker", "My auctions, now") + r"""]==])
+        assert(f.Title.text == "My auctions, now" and footer():find("^Updated %d%d:%d%d$"), footer())
+        assert(f.Refresh:IsEnabled() and next(WowMCPDB.visualWindow.refreshing) == nil)
+        -- Its reply comes after it, in the AI's chat.
+        client.Publish('{"reply": "3 of your 8 auctions are undercut.", "post": 1}')
+        client.Wait()
+        assert(has("3 of your 8 auctions are undercut.") and footer():find("^Updated %d%d:%d%d$"))
+
+        -- No word from the bridge: the window says so, and the button works again.
+        f.Refresh.OnClick(f.Refresh)
+        client.Wait(32)
+        assert(footer():find("No answer from wow-mcp-bridge. Is it running?", 1, true) and f.Refresh:IsEnabled())
+        -- A reply without a new version: the reply says why.
+        f.Refresh.OnClick(f.Refresh)
+        assert(#posted == 2 and footer():find("· Refreshing…$"))
+        client.Publish('{"reply": "Sorry, I could not refresh it: the auction house is closed.", "post": 2}')
+        client.Wait()
+        assert(footer():find("· not updated: your AI says why in its chat$"), footer())
+        assert(f.Refresh:IsEnabled())
+
+        -- Without instructions, there's nothing to refresh by.
+        show([==[""" + kept("Flip list", "Worth flipping") + r"""]==])
+        assert(not f.Refresh:IsShown())
+        mcp("visuals refresh")
+        assert(#posted == 2 and last():find("Flip list has no refresh instructions", 1, true))
+        noErrors()
+    """)
+
+
+def test_removing_a_named_visual_asks_first(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        client.Wait()
+        show([==[""" + visual("Gloves", {"type": "text", "text": "x"}) + r"""]==])
+        show([==[""" + kept("Auction tracker", "My auctions") + r"""]==])
+        show([==[""" + kept("Flip list", "Worth flipping") + r"""]==])
+        local f = win()
+        assert(not tab("Recent").Close:IsShown() and tab("Flip list").Close:IsShown())
+        -- The x asks first; Cancel keeps it.
+        local x = tab("Flip list").Close
+        x.OnMouseUp(x)
+        assert(f.Confirm:IsShown() and plain(f.Confirm.Text.text):find("Remove Flip list?", 1, true), f.Confirm.Text.text)
+        f.Confirm.No.OnClick(f.Confirm.No)
+        assert(not f.Confirm:IsShown() and tabs() == "Recent,Auction tracker,[Flip list]" and #posted == 0)
+        -- Closing the window just hides it.
+        x.OnMouseUp(x)
+        f.Close.OnClick(f.Close)
+        f.OnHide(f) -- as the client runs it
+        assert(not f.Confirm:IsShown())
+        mcp("visuals show")
+        assert(tabs() == "Recent,Auction tracker,[Flip list]")
+        -- Remove: gone here, and through the bridge from the server; the window shows the recent ones.
+        x.OnMouseUp(x)
+        f.Confirm.Yes.OnClick(f.Confirm.Yes)
+        assert(tabs() == "[Recent],Auction tracker" and f.Title.text == "Gloves", tabs())
+        assert(#posted == 1 and posted[1].remove == "Flip list" and posted[1].player == "Thorgrim")
+        assert(last():find("Removed Flip list.", 1, true))
+        -- Until the server's state has caught up, the version it had stays out, also after a /reload.
+        show([[{"message": "Something else"}]])
+        assert(tabs() == "[Recent],Auction tracker", tabs())
+        Reload()
+        client.Wait()
+        assert(tabs() == "[Recent],Auction tracker", tabs())
+        -- Gone from the server's state too: nothing is kept about it, and made again it's back.
+        show('{"remove": "Flip list"}')
+        assert(WowMCPDB.visualRemoved["Flip list"] == nil)
+        show([==[""" + kept("Flip list", "Worth flipping again") + r"""]==])
+        assert(win().Title.text == "Worth flipping again" and tabs() == "Recent,Auction tracker,[Flip list]", tabs())
+        -- The AI removes the one on show: it says so.
+        show('{"remove": "Flip list"}')
+        assert(win().Title.text == "Gloves" and last():find("Your AI removed Flip list.", 1, true), last())
+        -- The last named one goes: no tabs.
+        mcp("visuals remove auction")
+        assert(tabs() == "" and win().Title.text == "Gloves", tabs())
+        noErrors()
+    """)
+
+
+def test_commands_for_named_visuals(game):
+    game(r"""
+        local ns = client.LoadAddon()
+        local posted = Posts(ns)
+        client.Wait()
+        show([==[""" + visual("Gloves", {"type": "text", "text": "x"}) + r"""]==])
+        show([==[""" + kept("Auction tracker", "My auctions", refresh=REFRESH, every=30) + r"""]==])
+        show([==[""" + kept("Flip list", "Worth flipping") + r"""]==])
+        mcp("visuals")
+        assert(has("What your AI keeps, under its tabs (/mcp visuals <name> shows one):"), chat())
+        assert(has("- |cffffffffAuction tracker|r: My auctions (text, updated ") and has(", refreshed every 30 min)"))
+        assert(has("- |cffffffffFlip list|r: Worth flipping (text, updated ") and last():find("1. |cffffffffGloves|r", 1, true))
+        -- By name, in any case, or the start of it; the recent ones.
+        mcp("visuals auction TRACKER")
+        assert(win().Title.text == "My auctions")
+        mcp("visuals flip")
+        assert(win().Title.text == "Worth flipping")
+        mcp("visuals recent")
+        assert(win().Title.text == "Gloves")
+        -- Refresh: the one on show, or one by name.
+        mcp("visuals refresh")
+        assert(last():find("Show the named table or list to refresh first", 1, true))
+        mcp("visuals refresh flip")
+        assert(#posted == 0 and last():find("Flip list has no refresh instructions", 1, true))
+        mcp("visuals refresh auction")
+        assert(#posted == 1 and posted[1].refresh == "Auction tracker" and posted[1].model == nil)
+        mcp("visuals auction")
+        assert(footer():find("refreshed every 30 min · Refreshing…", 1, true), footer())
+        -- Remove: by name, without asking (the command is deliberate).
+        mcp("visuals remove")
+        assert(last():find("/mcp visuals remove <name>", 1, true))
+        mcp("visuals remove nothing")
+        assert(last():find("There's none called nothing to remove.", 1, true))
+        mcp("visuals remove flip")
+        assert(posted[2].remove == "Flip list" and tabs() == "Recent,[Auction tracker]", tabs())
+        -- Clear: the recent ones; named ones stay.
+        mcp("visuals clear")
+        assert(last():find("Named ones stay", 1, true) and open() and tabs() == "[Auction tracker]", tabs())
+        mcp("visuals clear")
+        assert(last():find("No recent ones to clear.", 1, true))
+        mcp("visuals recent")
+        assert(last():find("No recent tables or lists.", 1, true))
+        mcp("visuals what")
+        assert(last():find("/mcp visuals [show, hide, clear, <n>]", 1, true) and last():find("remove <name>", 1, true))
+        noErrors()
+    """)
+
+
 def test_visuals_live(live_game, tmp_path):
     """visualize end to end, with the player's two kinds of question: comparing gear, and auction house profits."""
     dump = tmp_path / "window.txt"
@@ -983,3 +1342,214 @@ def test_visualize_tells_when_the_game_is_elsewhere(addons, monkeypatch):
     monkeypatch.setattr(wow_game, "running_folders", lambda proc=None: {"_forever_"})
     result = visuals.visualize("Shown", [{"type": "text", "text": "x"}])
     assert result.endswith("flip back through the last 5.")
+
+
+# ---------------------------------------------------------------------------
+# Named visuals: the tools
+# ---------------------------------------------------------------------------
+
+TEXT = [{"type": "text", "text": "x"}]
+
+
+def named(addons):
+    return state(addons)["visuals"].get("named", [])
+
+
+def test_a_named_visual_is_replaced_in_place(addons, monkeypatch):
+    visuals.visualize("Gloves", TEXT)
+    made = visuals.visualize("My auctions", [table([col("Item"), col("Price", "money")], [["a", 1]])],
+                             name="  Auction   tracker ", refresh=REFRESH)
+    assert made.startswith("Named visual 'Auction tracker' sent to the game (#2): 'My auctions', with a table (1 row x "
+                           "2 columns). It stays under a tab of its own until it's removed (remove_visual).")
+    assert f"Refresh: {REFRESH!r}, when the player clicks Refresh." in made
+    visuals.visualize("Worth flipping", TEXT, name="Flip list")
+    # The same name, in any case: replaced where it is, keeping its name and refresh instructions.
+    again = visuals.visualize("My auctions, now", TEXT, name="auction TRACKER", subtitle="Just now")
+    assert again.startswith("The named visual 'Auction tracker' was updated in place (#4): 'My auctions, now', with a "
+                            "text. It keeps its tab in the game's window, and the player's sort, scroll and size.")
+    sent = state(addons)["visuals"]
+    assert sent["id"] == 4 and [v["title"] for v in sent["list"]] == ["Gloves"]
+    assert [v["name"] for v in sent["named"]] == ["Auction tracker", "Flip list"]
+    tracker = sent["named"][0]
+    assert tracker["id"] == 4 and tracker["title"] == "My auctions, now" and tracker["subtitle"] == "Just now"
+    assert tracker["refresh"] == REFRESH and abs(tracker["at"] - time.time()) < 5
+    assert not {"every", "auto", "player"} & set(tracker)
+
+    # Refresh instructions and how often: kept when left out, changed when given; 0 stops refreshing on its own.
+    assert "and on its own every 30 minutes while the game runs." in visuals.visualize(
+        "x", TEXT, name="Auction tracker", refresh_minutes=30)
+    assert named(addons)[0]["every"] == 30
+    visuals.visualize("x", TEXT, name="Auction tracker", refresh="Call get_my_auctions and list what sold")
+    assert named(addons)[0]["every"] == 30 and named(addons)[0]["refresh"] == "Call get_my_auctions and list what sold"
+    visuals.visualize("x", TEXT, name="Auction tracker", refresh_minutes=0)
+    assert "every" not in named(addons)[0] and named(addons)[0]["refresh"]
+    assert "It has no refresh instructions, so the player can't refresh it" in visuals.visualize(
+        "y", TEXT, name="Flip list")
+
+    # Who asked in game (the bridge says) is kept: a refresh on its own is for them.
+    monkeypatch.setenv(visuals.memory.PLAYER_ENV, "Thorgrim")
+    visuals.visualize("y", TEXT, name="Flip list")
+    monkeypatch.delenv(visuals.memory.PLAYER_ENV)
+    visuals.visualize("z", TEXT, name="Flip list")
+    assert named(addons)[1]["player"] == "Thorgrim"
+
+
+def test_named_visuals_stay_apart_from_the_temporary_ones(addons, monkeypatch):
+    visuals.visualize("Kept", TEXT, name="Crafting")
+    for n in range(1, 8):
+        visuals.visualize(f"Visual {n}", TEXT)
+    sent = state(addons)["visuals"]
+    assert [v["title"] for v in sent["list"]] == [f"Visual {n}" for n in range(3, 8)]
+    assert [v["name"] for v in sent["named"]] == ["Crafting"]
+    # Nor does the temporary ones' size budget drop them.
+    big = table([col(f"C{n}") for n in range(10)], [[f"cell {r}-{n} " + "x" * 3 for n in range(10)] for r in range(200)])
+    for n in range(3):
+        visuals.visualize(f"Big {n}", [big])
+    sent = state(addons)["visuals"]
+    assert len(sent["list"]) < 5 and [v["name"] for v in sent["named"]] == ["Crafting"]
+
+    # Their own caps: ten of them...
+    for n in range(2, 11):
+        visuals.visualize(f"View {n}", TEXT, name=f"View {n}")
+    with pytest.raises(ToolError, match=r"Nothing was sent: the game already has 10 named visuals \('Crafting', 'View 2'"):
+        visuals.visualize("One more", TEXT, name="One more")
+    assert visuals.visualize("Still", TEXT, name="view 10").startswith("The named visual 'View 10' was updated")
+    # ... a size each...
+    bigger = table([col(f"C{n}") for n in range(10)], [[f"cell {r}-{n} " + "x" * 8 for n in range(10)] for r in range(200)])
+    assert visuals.size(visuals.Visual(title="B", blocks=[bigger]).encode(0)) > visuals.MAX_NAMED_SIZE
+    with pytest.raises(ToolError, match=r"Nothing was sent: it takes \d+ KB, and a named visual may take at most 24 KB"):
+        visuals.visualize("Bigger", [bigger], name="Crafting")
+    # ... and all of them together.
+    half = {**big, "rows": big["rows"][:100]}
+    monkeypatch.setattr(visuals, "MAX_NAMED_KEPT", 30_000)
+    visuals.visualize("Half", [half], name="View 2")
+    before = state(addons)
+    with pytest.raises(ToolError, match=r"the named visuals would take \d+ KB together, and at most 30 KB fit"):
+        visuals.visualize("Half", [half], name="View 3")
+    assert state(addons) == before, "nothing sent"
+
+
+def test_named_visuals_stay_in_the_servers_state(addons, monkeypatch):
+    from wow_mcp import app
+
+    visuals.visualize("Worth flipping", TEXT, name="Flip list", refresh=REFRESH, refresh_minutes=60)
+    # Kept with the server's state, and in the payload the game reads at login and /reload.
+    assert Transport(addons).load_state()["visuals"]["named"][0]["name"] == "Flip list"
+    inbox = (addons / "WowMCP" / "Inbox.lua").read_text()
+    assert 'name = "Flip list"' in inbox and f'refresh = "{REFRESH}"' in inbox and "every = 60" in inbox
+    # A server started anew has them; clearing the temporary ones leaves them.
+    monkeypatch.setattr(app, "_transport", None)
+    assert [v.name for v in visuals.list_visuals().named] == ["Flip list"]
+    visuals.visualize("Gloves", TEXT)
+    visuals.clear_visuals()
+    assert [v["name"] for v in named(addons)] == ["Flip list"]
+
+
+def test_list_visuals(addons):
+    empty = visuals.list_visuals()
+    assert empty.named == [] and empty.temporary == 0 and empty.room == "0 of 10 named visuals, 0 of 96 KB"
+    visuals.visualize("Gloves", TEXT)
+    visuals.visualize("Boots", TEXT)
+    visuals.visualize("My auctions", [table([col("Item"), col("Price", "money")], [["a", 1], ["b", 2]]), *TEXT],
+                      name="Auction tracker", subtitle="Your auctions as of your last visit", refresh=REFRESH,
+                      refresh_minutes=30)
+    visuals.visualize("Worth flipping", [{"type": "list", "items": [{"text": "a"}]}], name="Flip list")
+    listed = visuals.list_visuals()
+    assert listed.temporary == 2 and listed.room.startswith("2 of 10 named visuals, 1 of 96 KB")
+    tracker, flips = listed.named
+    assert (tracker.name, tracker.title, tracker.subtitle) == ("Auction tracker", "My auctions",
+                                                               "Your auctions as of your last visit")
+    assert tracker.shows == "a table (2 rows x 2 columns) and a text" and flips.shows == "a list (1 items)"
+    assert tracker.refresh == REFRESH and tracker.refresh_minutes == 30 and tracker.size == "1 of 24 KB"
+    assert tracker.updated.endswith("(just now)") and time.strftime("%Y-%m-%d") in tracker.updated
+    assert flips.refresh is None and flips.refresh_minutes is None
+
+
+def test_remove_visual(addons):
+    with pytest.raises(ToolError, match=r"There's no named visual 'Flip list'. The game has none."):
+        visuals.remove_visual("Flip list")
+    visuals.visualize("Gloves", TEXT)
+    visuals.visualize("My auctions", TEXT, name="Auction tracker")
+    visuals.visualize("Worth flipping", TEXT, name="Flip list")
+    seq = state(addons)["seq"]
+    with pytest.raises(ToolError, match=r"There's no named visual 'Nope'. The game has: 'Auction tracker', 'Flip list'."):
+        visuals.remove_visual("Nope")
+    assert state(addons)["seq"] == seq, "nothing sent"
+    assert visuals.remove_visual("flip LIST").startswith("Removed the named visual 'Flip list' from the game.")
+    sent = state(addons)["visuals"]
+    assert [v["name"] for v in sent["named"]] == ["Auction tracker"] and [v["title"] for v in sent["list"]] == ["Gloves"]
+    visuals.remove_visual("Auction tracker")
+    assert "named" not in state(addons)["visuals"]
+
+
+def test_clear_visuals_leaves_named_ones(addons):
+    visuals.visualize("My auctions", TEXT, name="Auction tracker")
+    seq = state(addons)["seq"]
+    assert visuals.clear_visuals() == ("There are no temporary visuals in the game; the named ones stay ('Auction "
+                                       "tracker'): remove_visual removes one.")
+    assert state(addons)["seq"] == seq, "nothing sent"
+    with pytest.raises(ToolError, match=r"#1 is the named visual 'Auction tracker': remove_visual removes it."):
+        visuals.clear_visuals(1)
+    visuals.visualize("Gloves", TEXT)
+    visuals.visualize("Boots", TEXT)
+    assert visuals.clear_visuals().startswith("Cleared 2 visuals from the game. The named ones stay ('Auction tracker').")
+    assert [v["name"] for v in named(addons)] == ["Auction tracker"]
+    # Everything, when the player asks for that.
+    visuals.visualize("Gloves", TEXT)
+    assert visuals.clear_visuals(include_named=True).startswith(
+        "Cleared 1 visual from the game, and the named ones: 'Auction tracker'.")
+    assert state(addons)["visuals"] == {"id": state(addons)["seq"], "list": []}
+    assert visuals.clear_visuals(include_named=True) == "There are no visuals in the game."
+
+
+@pytest.mark.parametrize("more, error", [
+    ({"name": "x" * 25}, "name: String should have at most 24 characters"),
+    ({"name": " - "}, "name: a few words, e.g. 'Auction tracker'"),
+    ({"name": "Flip list", "refresh": "short"}, "refresh: String should have at least 10 characters"),
+    ({"name": "Flip list", "refresh": "x" * 301}, "refresh: String should have at most 300 characters"),
+    ({"name": "Flip list", "refresh": "         ."}, "refresh: say how to rebuild it from live data"),
+    ({"refresh": REFRESH}, "refresh and refresh_minutes are for named visuals: give it a name too"),
+    ({"refresh_minutes": 30}, "refresh and refresh_minutes are for named visuals"),
+    ({"name": "Flip list", "refresh": REFRESH, "refresh_minutes": 10},
+     "refresh_minutes: at least 15 (each refresh costs model tokens and a live update), or 0 to turn it off"),
+    ({"name": "Flip list", "refresh": REFRESH, "refresh_minutes": 1441}, "refresh_minutes: Input should be less than"),
+    ({"name": "Flip list", "refresh_minutes": 30}, "refresh_minutes needs refresh instructions (refresh)"),
+])
+def test_what_a_named_visual_must_be(addons, more, error):
+    with pytest.raises(ToolError) as caught:
+        visuals.visualize("Checked", TEXT, **more)
+    assert str(caught.value).startswith("Nothing was sent:") and error in str(caught.value), str(caught.value)
+    assert "visuals" not in state(addons)
+
+
+def test_a_refresh_on_its_own_is_marked(addons):
+    """While the bridge refreshes a named visual on its own, its new version says so (auto): the game doesn't bring
+    it to the front then."""
+    visuals.visualize("My auctions", TEXT, name="Auction tracker", refresh=REFRESH)
+    mark = addons / "WowMCP" / visuals.BACKGROUND_FILE
+    with visuals.background(addons, "Auction tracker"):
+        assert mark.exists()
+        visuals.visualize("My auctions, later", TEXT, name="auction tracker")
+        assert named(addons)[0]["auto"] is True
+        visuals.visualize("Worth flipping", TEXT, name="Flip list")  # another one: not that refresh
+        assert "auto" not in named(addons)[1]
+    assert not mark.exists()
+    visuals.visualize("My auctions, asked for", TEXT, name="Auction tracker")
+    assert "auto" not in named(addons)[0]
+    # Removed by the player while it was being refreshed: not made again.
+    visuals.remove_visual("Auction tracker")
+    removed = "the player removed 'Auction tracker' while it was being refreshed"
+    with visuals.background(addons, "Auction tracker"), pytest.raises(ToolError, match=removed):
+        visuals.visualize("My auctions", TEXT, name="Auction tracker")
+    # A mark a bridge that died left behind counts for an hour.
+    mark.write_text(json.dumps({"name": "Flip list", "at": time.time() - visuals.BACKGROUND_FOR - 1}))
+    visuals.visualize("Worth flipping", TEXT, name="Flip list")
+    assert "auto" not in named(addons)[0]
+
+
+def test_named_guidance():
+    from wow_mcp import app, bridge
+
+    text = next(t for order, t in app.GUIDANCE if order == 68)
+    assert "list_visuals" in text and "refresh instructions" in text and "refresh_minutes only when" in text
+    assert "named visual" in bridge.SYSTEM_PROMPT and "list_visuals" in bridge.SYSTEM_PROMPT

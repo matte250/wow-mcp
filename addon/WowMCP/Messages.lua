@@ -151,7 +151,8 @@ end
 -- The payload lists the newest messages; show the ones with ids we haven't shown.
 -- WowMCPDB.messageId (the newest shown) survives /reload, so nothing repeats.
 -- m.status marks the bridge's notes about a question it's answering: they go to the AI tab's status
--- line (Chat.lua), never into chat or /mcp messages, and only while fresh.
+-- line (Chat.lua), never into chat or /mcp messages, and only while fresh. Notes and replies about a
+-- visual's Refresh button (by the post it made) also go to the visuals window.
 function Messages.Receive(list)
 	recent = {}
 	local valid, newest = {}, 0
@@ -167,6 +168,7 @@ function Messages.Receive(list)
 	WowMCPDB.messageId = newest
 	local now = time()
 	for _, m in ipairs(valid) do
+		if m.id > seen and m.post ~= nil and ns.Visuals then ns.Visuals.Heard(m) end
 		if m.id > seen and m.status ~= nil then
 			if not (type(m.at) == "number" and now - m.at > STALE) and ns.AIChat then ns.AIChat.Status(m) end
 		elseif m.id > seen then
@@ -212,6 +214,13 @@ ns.RegisterCommand("messages", "/mcp messages - repeat the last messages from yo
 -- values; a text. The stack scrolls as a whole when it's taller than the window can be, and a long
 -- table scrolls its own rows, so its header and totals stay in view. The last few visuals are kept to
 -- flip back through. A new visual opens the window; a /reload doesn't open it for one already seen.
+--
+-- Visuals with a name (a tracker, a flip or crafting list) are long-lasting: each has a tab of its own
+-- at the window's top, next to one for the temporary ones, until it's removed; a new version replaces it in
+-- place, keeping how the player has it. One the AI made or updated because the player asked (a question,
+-- a session, its Refresh button) comes to the front like a new visual; one the bridge refreshed on its own
+-- only gets a dot on its tab, unless it's on show. Its Refresh button posts to the bridge (Stream.lua),
+-- which rebuilds it by the instructions the AI gave it.
 ---------------------------------------------------------------------------
 
 do
@@ -236,12 +245,21 @@ do
 	local NUMERIC = { number = true, percent = true, money = true, delta = true, time = true, duration = true }
 	local MARKS = { gold = { 1, 0.82, 0 }, green = { 0.3, 1, 0.3 }, red = { 1, 0.35, 0.35 }, blue = { 0.35, 0.65, 1 },
 		grey = { 0.6, 0.6, 0.6 } }
-	local GREEN, RED, GREY, HINT = "|cff33ff33", "|cffff5050", "|cff808080", { 0.4, 0.8, 1 }
+	local GREEN, RED, GREY, BLUE, HINT = "|cff33ff33", "|cffff5050", "|cff808080", "|cff66ccff", { 0.4, 0.8, 1 }
 	local SORT_ARROW = "auctionhouse-ui-sortarrow" -- the auction house's
 	local FONTS = { title = "GameFontNormal", heading = "GameFontHighlight", header = "GameFontNormalSmall",
 		cell = "GameFontHighlightSmall" }
+	-- The tabs: their height and the gap between them, the room around a name and the most a name takes, the x
+	-- and the dot; how wide the window may grow for them to fit on one row; the temporary ones' tab.
+	local TAB = { height = 18, gap = 2, pad = 6, text = 120, close = 10, dot = 6, want = 480, recent = "Recent" }
+	local PAGES = 70     -- room the arrows and count take on the title line, when the tabs have the close button
+	local ACK_WAIT = 15  -- seconds for the bridge to say it has a refresh; longer, and it may not be running
+	local REFRESH_WAIT = 1860 -- seconds a refresh may take: the bridge's --max-time, and a little
 
 	local visuals = {} -- the kept visuals, oldest first: { id, title, subtitle, at, blocks = { block, ... } }
+	-- The named ones, in their tabs' order: also { name, refresh (the AI's instructions for rebuilding it),
+	-- every (minutes it's refreshed on its own), auto (this version came from such a refresh) }.
+	local named = {}
 	local current      -- the one the window shows
 	local window
 	local hovered      -- the row or cell under the mouse
@@ -249,10 +267,20 @@ do
 	local bars = {}    -- the scroll bars: their drags end when the window goes
 	local Layout
 
-	-- WowMCPDB.visualWindow: { point, relativePoint, x, y, rows (a table shows at once), open, showing (an id) }.
+	-- WowMCPDB.visualWindow: { point, relativePoint, x, y, rows (a table shows at once), open, showing (the id of
+	-- the temporary one on show, or last on show), tab (the name of the named one on show), updated = { [name] = true
+	-- for news the player hasn't looked at }, refreshing = { [name] = { at, id (of the version then), session, post,
+	-- acked, step } } }.
 	local function Saved()
 		WowMCPDB.visualWindow = WowMCPDB.visualWindow or {}
 		return WowMCPDB.visualWindow
+	end
+
+	-- One of the saved window's tables by names (updated, refreshing).
+	local function ByName(key)
+		local saved = Saved()
+		saved[key] = saved[key] or {}
+		return saved[key]
 	end
 
 	local function MaxRows()
@@ -261,13 +289,15 @@ do
 	end
 
 	-- How the player has a visual: { width (of its stack), scroll (of its stack), blocks = { [n] = what block n
-	-- keeps, e.g. a table's sort and its row on top } }, in WowMCPDB.visualViews by its id, so a /reload keeps it.
+	-- keeps, e.g. a table's sort and its row on top } }, in WowMCPDB.visualViews by its id, so a /reload keeps it;
+	-- a named one's in WowMCPDB.namedViews by its name, so its new versions keep it too.
 	local function View(v)
-		WowMCPDB.visualViews = WowMCPDB.visualViews or {}
-		local view = WowMCPDB.visualViews[v.id]
+		local key = v.name and "namedViews" or "visualViews"
+		WowMCPDB[key] = WowMCPDB[key] or {}
+		local view = WowMCPDB[key][v.name or v.id]
 		if not view then
 			view = {}
-			WowMCPDB.visualViews[v.id] = view
+			WowMCPDB[key][v.name or v.id] = view
 		end
 		view.blocks = view.blocks or {}
 		return view
@@ -283,6 +313,36 @@ do
 		for _, v in ipairs(visuals) do
 			if v.id == id then return v end
 		end
+	end
+
+	-- The named visual called name (any case), or else (unless exact) the only one whose name starts with it; nil
+	-- if none, and true too if several do.
+	local function FindNamed(name, exact)
+		local wanted, found = strtrim(tostring(name or "")):lower(), nil
+		if wanted == "" then return nil end
+		for _, v in ipairs(named) do
+			if v.name:lower() == wanted then return v end
+		end
+		if exact then return nil end
+		for _, v in ipairs(named) do
+			if v.name:lower():sub(1, #wanted) == wanted then
+				if found then return nil, true end
+				found = v
+			end
+		end
+		return found
+	end
+
+	-- The temporary visual the Recent tab shows: the one last on show, else the newest.
+	local function Recent()
+		return Find(Saved().showing) or visuals[#visuals]
+	end
+
+	-- The refresh the player asked for that's still on its way, if there is one: no newer version yet, and not
+	-- given up on.
+	local function Refreshing(v)
+		local r = v and v.name and ByName("refreshing")[v.name]
+		if r and r.id == v.id and time() - (tonumber(r.at) or 0) < REFRESH_WAIT then return r end
 	end
 
 	-- A text's width in one of FONTS, measured on the window's own font strings.
@@ -1163,6 +1223,209 @@ do
 		return holder
 	end
 
+	-- A plain button in the window's style: a label on a light box.
+	local function FlatButton(parent, label, onClick)
+		local b = CreateFrame("Button", nil, parent)
+		b.Back = b:CreateTexture(nil, "BACKGROUND")
+		b.Back:SetAllPoints()
+		b.Back:SetColorTexture(1, 1, 1, 0.12)
+		b:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+		b.Label = b:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+		b.Label:SetPoint("CENTER", b, "CENTER", 0, 0)
+		b.Label:SetText(label)
+		b.wide = math.ceil(b.Label:GetUnboundedStringWidth() or 40) + 16
+		b:SetSize(b.wide, 18)
+		b:SetScript("OnClick", onClick)
+		return b
+	end
+
+	-- How often a named visual is refreshed on its own: "every 30 min", "every 2 h".
+	local function Every(minutes)
+		if minutes < 60 or minutes % 60 ~= 0 then return "every " .. minutes .. " min" end
+		return "every " .. math.floor(minutes / 60) .. " h"
+	end
+
+	-- The line under a visual: when it was sent; for a named one when it was updated, how it's refreshed on its
+	-- own, and how a refresh the player asked for is coming along.
+	local function Footer(v)
+		if not v.name then return v.at and "Sent " .. When(v.at) or "" end
+		local parts = { v.at and "Updated " .. When(v.at) or "Updated" }
+		if v.every then parts[#parts + 1] = "refreshed " .. Every(v.every) end
+		local r = Refreshing(v)
+		if r and not r.acked and time() - (tonumber(r.at) or 0) >= ACK_WAIT then
+			parts[#parts + 1] = RED .. "No answer from wow-mcp-bridge. Is it running?|r"
+		elseif r then
+			parts[#parts + 1] = BLUE .. "Refreshing…" .. (r.step and " " .. ns.Escape(r.step) or "") .. "|r"
+		elseif v.missed then
+			parts[#parts + 1] = "not updated: your AI says why in its chat"
+		end
+		return table.concat(parts, " · ")
+	end
+
+	-- A tab's width, and the part of it that isn't its name: the name (cut short when long), its dot, its x.
+	local function TabWidth(v, dot)
+		local room = 2 * TAB.pad + (dot and TAB.dot + 4 or 0) + (v.name and TAB.close + 6 or 0)
+		return room + math.min(TAB.text, math.ceil(Measure("cell", v.name and ns.Escape(v.name) or TAB.recent))), room
+	end
+
+	-- How wide the tabs are on one row, with the close button.
+	local function TabsWide()
+		local wide = CLOSE - PAD + (#visuals > 0 and TabWidth({}) + TAB.gap or 0)
+		for _, v in ipairs(named) do wide = wide + TabWidth(v) + TAB.gap end
+		return wide
+	end
+
+	-- A tab: a named visual (v), or the temporary ones; a dot when it has news the player hasn't seen, and an x
+	-- to remove a named one. Dragging it moves the window.
+	local function CreateTab(f)
+		local tab = CreateFrame("Frame", nil, f)
+		tab:SetHeight(TAB.height)
+		tab:EnableMouse(true)
+		tab:RegisterForDrag("LeftButton")
+		tab:SetScript("OnDragStart", StartMoving)
+		tab:SetScript("OnDragStop", StopMoving)
+		tab.Back = tab:CreateTexture(nil, "BACKGROUND")
+		tab.Back:SetAllPoints()
+		tab.Name = tab:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+		tab.Name:SetPoint("LEFT", tab, "LEFT", TAB.pad, 0)
+		tab.Name:SetJustifyH("LEFT")
+		tab.Name:SetWordWrap(false)
+		tab.Dot = tab:CreateTexture(nil, "OVERLAY")
+		tab.Dot:SetSize(TAB.dot, TAB.dot)
+		tab.Dot:SetPoint("LEFT", tab.Name, "RIGHT", 4, 0)
+		tab.Dot:SetColorTexture(1, 0.82, 0, 1)
+		tab.Close = CreateFrame("Frame", nil, tab)
+		tab.Close:SetSize(TAB.close, TAB.close)
+		tab.Close:SetPoint("RIGHT", tab, "RIGHT", -4, 0)
+		tab.Close:EnableMouse(true)
+		tab.Close.X = tab.Close:CreateTexture(nil, "ARTWORK")
+		tab.Close.X:SetAllPoints()
+		tab.Close.X:SetTexture("Interface\\Buttons\\UI-StopButton")
+		tab.Close:SetScript("OnMouseUp", function() Visuals.AskRemove(tab.v and tab.v.name) end)
+		tab.Close:SetScript("OnEnter", function(self)
+			Tip(self)
+			GameTooltip:SetText("Remove this one", 1, 1, 1)
+			GameTooltip:AddLine("It asks first.", HINT[1], HINT[2], HINT[3])
+			GameTooltip:Show()
+		end)
+		tab.Close:SetScript("OnLeave", function(self) HideTip(self) end)
+		tab:SetScript("OnMouseUp", function(self, button)
+			if not button or button == "LeftButton" then Visuals.Open(self.v) end
+		end)
+		tab:SetScript("OnEnter", function(self)
+			local v = self.v
+			if not v then return end
+			Tip(self)
+			if v.name then
+				GameTooltip:SetText(ns.Escape(v.name), 1, 0.82, 0)
+				GameTooltip:AddLine(ns.ItemText(v.title), 1, 1, 1, true)
+				GameTooltip:AddLine(Footer(v), 0.7, 0.7, 0.7, true)
+				if v.refresh then GameTooltip:AddLine("Refresh: " .. ns.Escape(v.refresh), 0.7, 0.7, 0.7, true) end
+				if self.dot then GameTooltip:AddLine("Updated since you last looked.", 1, 0.82, 0) end
+			else
+				GameTooltip:SetText(TAB.recent, 1, 0.82, 0)
+				GameTooltip:AddLine("The latest tables and lists from your AI; the arrows flip through them.", 1, 1, 1, true)
+			end
+			if not self.on then GameTooltip:AddLine("Click: show it.", HINT[1], HINT[2], HINT[3]) end
+			GameTooltip:Show()
+		end)
+		tab:SetScript("OnLeave", function(self) HideTip(self) end)
+		return tab
+	end
+
+	-- The tabs, at the window's top while there are named visuals: one for the temporary ones (Recent), then one
+	-- per named visual, left to right and onto another row when the next doesn't fit; the first row leaves room
+	-- for the close button. Returns where the title goes, under them (PAD without tabs).
+	local function LayoutTabs(f, width)
+		for _, tab in ipairs(f.Tabs) do tab:Hide() end
+		if f.Confirm and not FindNamed(f.Confirm.name, true) then f.Confirm:Hide() end
+		if #named == 0 then return PAD end
+		local list, updated = {}, ByName("updated")
+		if #visuals > 0 then list[1] = Recent() end
+		for _, v in ipairs(named) do list[#list + 1] = v end
+		local x, y, limit = 0, 0, width + PAD - CLOSE
+		for i, v in ipairs(list) do
+			local tab = f.Tabs[i] or CreateTab(f)
+			f.Tabs[i] = tab
+			local on = v == current or (v.name == nil and current.name == nil)
+			local dot = v.name ~= nil and updated[v.name] == true and not on
+			local w, room = TabWidth(v, dot)
+			w = math.min(w, width)
+			if x > 0 and x + w > limit then x, y, limit = 0, y + TAB.height + TAB.gap, width end
+			tab.v, tab.on, tab.dot = v, on, dot
+			tab:ClearAllPoints()
+			tab:SetPoint("TOPLEFT", f, "TOPLEFT", PAD + x, -(4 + y))
+			tab:SetWidth(w)
+			tab.Back:SetColorTexture(1, 1, 1, on and 0.16 or 0.06)
+			tab.Name:SetWidth(math.max(1, w - room))
+			tab.Name:SetText((on and "|cffffd100" or "|cffaaaaaa") .. (v.name and ns.Escape(v.name) or TAB.recent) .. "|r")
+			tab.Dot:SetShown(dot)
+			tab.Close:SetShown(v.name ~= nil)
+			tab:Show()
+			x = x + w + TAB.gap
+		end
+		return 4 + y + TAB.height + 6
+	end
+
+	-- Asks before a named visual goes for good: a panel of our own over the window (a StaticPopup could taint).
+	local function CreateConfirm(f)
+		local c = CreateFrame("Frame", nil, f)
+		c:SetAllPoints()
+		c:SetFrameStrata("DIALOG")
+		c:EnableMouse(true) -- clicks don't go through to the window under it
+		c.Back = c:CreateTexture(nil, "BACKGROUND")
+		c.Back:SetAllPoints()
+		c.Back:SetColorTexture(0, 0, 0, 0.85)
+		c.Text = c:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+		c.Text:SetPoint("BOTTOMLEFT", c, "LEFT", PAD, 4)
+		c.Text:SetPoint("BOTTOMRIGHT", c, "RIGHT", -PAD, 4)
+		c.Text:SetJustifyH("CENTER")
+		c.Text:SetWordWrap(true)
+		c.Yes = FlatButton(c, "Remove", function()
+			c:Hide()
+			Visuals.Remove(c.name)
+		end)
+		c.Yes:SetPoint("TOPRIGHT", c, "CENTER", -4, -4)
+		c.No = FlatButton(c, CANCEL or "Cancel", function() c:Hide() end)
+		c.No:SetPoint("TOPLEFT", c, "CENTER", 4, -4)
+		c:Hide()
+		return c
+	end
+
+	-- The right end of the title line: the arrows through the temporary visuals, or a named one's Refresh button.
+	-- Without tabs the arrows sit by the close button, as they always have; with tabs (where the close button is)
+	-- they and Refresh end the title line. Returns the room they take from the title.
+	local function LayoutControls(f, v, many, index)
+		local tabbed = #named > 0
+		f.Prev:SetShown(many)
+		f.Next:SetShown(many)
+		f.Count:SetShown(many)
+		if many then
+			f.Count:SetText(index .. "/" .. #visuals)
+			f.Prev:SetEnabled(index > 1)
+			f.Next:SetEnabled(index < #visuals)
+			f.Next:ClearAllPoints()
+			if tabbed then
+				f.Next:SetPoint("RIGHT", f.Title, "RIGHT", PAGES, 0)
+			else
+				f.Next:SetPoint("RIGHT", f.Close, "LEFT", 0, 0)
+			end
+		end
+		local refresh = v.refresh ~= nil
+		f.Refresh:SetShown(refresh)
+		if refresh then
+			-- Not again while one is on its way; again if the bridge didn't say it has it.
+			local r = Refreshing(v)
+			local busy = r ~= nil and (r.acked or time() - (tonumber(r.at) or 0) < ACK_WAIT)
+			f.Refresh:SetEnabled(not busy)
+			f.Refresh.Label:SetTextColor(busy and 0.5 or 1, busy and 0.5 or 0.82, busy and 0.5 or 0)
+			f.Refresh:ClearAllPoints()
+			f.Refresh:SetPoint("RIGHT", f.Title, "RIGHT", f.Refresh.wide + 4, 0)
+		end
+		if not tabbed then return many and BUTTONS or CLOSE end
+		return many and PAGES or refresh and f.Refresh.wide + 4 or 0
+	end
+
 	local function CreateWindow()
 		local f = CreateFrame("Frame", "WowMCPVisualFrame", UIParent)
 		f:SetSize(MIN_WIDTH, 100)
@@ -1203,9 +1466,20 @@ do
 		f.Count:SetPoint("RIGHT", f.Next, "LEFT", -1, 0)
 		f.Prev = PageButton(f, "PrevPage", -1, "Previous")
 		f.Prev:SetPoint("RIGHT", f.Count, "LEFT", -1, 0)
+		-- A named visual's Refresh button, and its tabs (LayoutTabs).
+		f.Refresh = FlatButton(f, "Refresh", function() Visuals.Refresh() end)
+		f.Refresh:SetScript("OnEnter", function(self)
+			Tip(self)
+			GameTooltip:SetText("Refresh", 1, 1, 1)
+			if current and current.refresh then
+				GameTooltip:AddLine("Your AI rebuilds it: " .. ns.Escape(current.refresh), HINT[1], HINT[2], HINT[3], true)
+			end
+			GameTooltip:Show()
+		end)
+		f.Refresh:SetScript("OnLeave", function(self) HideTip(self) end)
+		f.Tabs = {}
 
 		f.Title = f:CreateFontString(nil, "ARTWORK", FONTS.title)
-		f.Title:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -PAD)
 		f.Title:SetJustifyH("LEFT")
 		f.Title:SetWordWrap(false)
 		f.Subtitle = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
@@ -1214,6 +1488,7 @@ do
 		f.Subtitle:SetMaxLines(2)
 		f.Footer = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
 		f.Footer:SetJustifyH("LEFT")
+		f.Footer:SetWordWrap(false)
 		-- For measuring texts: laid out like the ones on show, never seen.
 		f.Measures = {}
 		for font, template in pairs(FONTS) do
@@ -1290,6 +1565,7 @@ do
 			for _, bar in ipairs(bars) do bar.Stop() end
 			HideTip()
 			hovered = nil
+			if f.Confirm then f.Confirm:Hide() end
 		end)
 		return f
 	end
@@ -1312,12 +1588,20 @@ do
 		window = window or CreateWindow()
 		local f = window
 		f:Show()
-		saved.showing = v.id
+		-- What's on show is what a /reload shows; a named one's news has been seen.
+		if v.name then
+			saved.tab = v.name
+			ByName("updated")[v.name] = nil
+		else
+			saved.tab, saved.showing = nil, v.id
+		end
 		local view = View(v)
 
-		-- As wide as the widest block wants (or as the player made it), but no narrower than any can be.
-		local many, index = #visuals > 1, Index(v) or #visuals
-		local want = Measure("title", ns.ItemText(v.title)) + (many and BUTTONS or CLOSE)
+		-- As wide as the widest block wants (or as the player made it), but no narrower than any can be; wider for
+		-- the tabs to fit on one row, within limits.
+		local many, index = v.name == nil and #visuals > 1, Index(v) or #visuals
+		local controls = LayoutControls(f, v, many, index)
+		local want = Measure("title", ns.ItemText(v.title)) + controls
 		local least = MIN_WIDTH - 2 * PAD
 		for _, block in ipairs(v.blocks) do
 			local kind = BLOCKS[block.type]
@@ -1325,21 +1609,17 @@ do
 			want = math.max(want, kind.width(block), block.heading and Measure("heading", ns.ItemText(block.heading)) + GAP or 0)
 			least = math.max(least, kind.least and kind.least(block) or 0)
 		end
+		if #named > 0 then want = math.max(want, math.min(TAB.want, TabsWide())) end
 		local width = math.max(least, math.min(MAX_WIDTH - 2 * PAD, math.floor((tonumber(view.width) or want) + 0.5)))
 		f.content = width
 
-		-- The title, the subtitle under it, the arrows to the other visuals.
-		f.Prev:SetShown(many)
-		f.Next:SetShown(many)
-		f.Count:SetShown(many)
-		if many then
-			f.Count:SetText(index .. "/" .. #visuals)
-			f.Prev:SetEnabled(index > 1)
-			f.Next:SetEnabled(index < #visuals)
-		end
-		f.Title:SetWidth(width - (many and BUTTONS or CLOSE))
+		-- The tabs, the title under them, the subtitle under it.
+		local top = LayoutTabs(f, width)
+		f.Title:ClearAllPoints()
+		f.Title:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -top)
+		f.Title:SetWidth(width - controls)
 		f.Title:SetText(ns.ItemText(v.title))
-		local top = PAD + TITLE
+		top = top + TITLE
 		f.Subtitle:SetShown(v.subtitle ~= nil)
 		if v.subtitle then
 			f.Subtitle:ClearAllPoints()
@@ -1406,7 +1686,8 @@ do
 
 		f.Footer:ClearAllPoints()
 		f.Footer:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -(top + shown + 4))
-		f.Footer:SetText(v.at and "Sent " .. When(v.at) or "")
+		f.Footer:SetWidth(width)
+		f.Footer:SetText(Footer(v))
 		f:SetSize(width + 2 * PAD + (scrolls and BAR + BAR_GAP or 0), top + shown + 4 + LINE + PAD)
 
 		-- Scrolling or sorting moved another row under the mouse: its tooltip.
@@ -1420,9 +1701,23 @@ do
 	-- What the player does
 	---------------------------------------------------------------------------
 
+	-- Redraws the window if it's open, e.g. for news about a refresh.
+	local function Redraw()
+		if window and window:IsShown() then Layout() end
+	end
+
+	-- Shows the window on a visual, temporary or named (a click on its tab).
+	function Visuals.Open(v)
+		if not v then return end
+		current = v
+		Saved().open = true
+		HideTip()
+		Layout()
+	end
+
 	-- Shows the window: visual n (1 = the oldest kept), or the one it showed last.
 	function Visuals.Show(n)
-		if #visuals == 0 then return ns.Print("Nothing to show. Ask your AI for a table!") end
+		if #visuals == 0 and #named == 0 then return ns.Print("Nothing to show. Ask your AI for a table!") end
 		if n ~= nil then
 			if not visuals[n] then
 				return ns.Print(string.format("There's no %s: there %s %d. /mcp visuals lists them.", tostring(n),
@@ -1430,7 +1725,7 @@ do
 			end
 			current = visuals[n]
 		end
-		current = current or visuals[#visuals]
+		current = current or FindNamed(Saved().tab, true) or Recent() or named[1]
 		Saved().open = true
 		Layout()
 	end
@@ -1442,16 +1737,21 @@ do
 		ns.Print("Hidden. /mcp visuals show brings it back.")
 	end
 
-	-- Removes every visual there is; new ones from the AI show as usual.
+	-- Removes every temporary visual there is; new ones from the AI show as usual. Named ones stay.
 	function Visuals.Clear()
-		if #visuals == 0 then return ns.Print("Nothing to clear.") end
+		if #visuals == 0 then
+			return ns.Print(#named > 0 and "No recent ones to clear. /mcp visuals remove <name> removes a named one."
+				or "Nothing to clear.")
+		end
 		WowMCPDB.visualsCleared = visuals[#visuals].id
 		WowMCPDB.visualViews = nil
-		visuals, current = {}, nil
+		visuals = {}
 		local saved = Saved()
-		saved.open, saved.showing = nil, nil
+		saved.showing = nil
+		if not (current and current.name) then current, saved.open = nil, nil end
 		Layout()
-		ns.Print("Cleared. New tables and lists from your AI still show here.")
+		ns.Print("Cleared. New tables and lists from your AI still show here."
+			.. (#named > 0 and " Named ones stay: /mcp visuals remove <name> removes one." or ""))
 	end
 
 	-- The previous (-1) or next (1) visual.
@@ -1486,25 +1786,147 @@ do
 		Layout()
 	end
 
+	-- A named visual by what the player typed, or says why there's none.
+	local function Typed(name, verb)
+		local v, several = FindNamed(name)
+		if v then return v end
+		if several then
+			ns.Print(string.format("More than one is called %s…: type more of the name.", ns.Escape(strtrim(name))))
+		elseif #named == 0 then
+			ns.Print("Your AI keeps no named tables or lists yet.")
+		else
+			ns.Print(string.format("There's none called %s to %s. /mcp visuals lists them.", ns.Escape(strtrim(name)), verb))
+		end
+	end
+
+	-- Asks the bridge to rebuild a named visual (the one on show, without a name) by the instructions the AI gave
+	-- it, with the model and thinking level picked for this character's questions (Chat.lua keeps those in
+	-- WowMCPDB.aiTab). The window says how it's coming along until its new version arrives.
+	function Visuals.Refresh(name)
+		local v = current and current.name and current
+		if name and name ~= "" then
+			v = Typed(name, "refresh")
+			if not v then return end
+		elseif not v then
+			return ns.Print("Show the named table or list to refresh first, or name it: /mcp visuals refresh <name>.")
+		end
+		if not v.refresh then
+			return ns.Print(string.format("%s has no refresh instructions: ask your AI to make it again and say how "
+				.. "to keep it up to date.", ns.Escape(v.name)))
+		end
+		local r = Refreshing(v)
+		if r and (r.acked or time() - (tonumber(r.at) or 0) < ACK_WAIT) then
+			return ns.Print(string.format("%s is being refreshed.", ns.Escape(v.name)))
+		end
+		local store, me = WowMCPDB.aiTab or {}, tostring(UnitName("player")) .. "-" .. tostring(GetRealmName())
+		local post, session = ns.Stream.Post({ refresh = v.name, player = UnitName("player"),
+			model = (store.models or {})[me], effort = (store.efforts or {})[me] })
+		ByName("refreshing")[v.name] = { at = time(), id = v.id, post = post, session = session }
+		v.missed = nil
+		if ns.run and ns.run.liveProblem then
+			ns.Print("Live updates are off (" .. ns.run.liveProblem .. "), so its new version only shows after /reload.")
+		end
+		C_Timer.After(ACK_WAIT, Redraw) -- to say so if the bridge doesn't say it has it
+		Redraw()
+	end
+
+	-- News from the bridge about one of the player's posts (Messages.lua): that it has it, how it's coming along,
+	-- or its reply. For a refresh, the window shows the first two; the reply ends it, also without a new version
+	-- (the reply, in the AI's chat, says why).
+	function Visuals.Heard(m)
+		local refreshing = ByName("refreshing")
+		for name, r in pairs(refreshing) do
+			if r.post == m.post and r.session == m.session then
+				if m.status then
+					r.acked = true
+					if m.status == "progress" then r.step = m.text ~= "" and m.text or nil end
+				else
+					refreshing[name] = nil
+					local v = FindNamed(name, true)
+					if v and v.id == r.id then v.missed = true end
+				end
+				return Redraw()
+			end
+		end
+	end
+
+	-- The x on a named visual's tab: asks first.
+	function Visuals.AskRemove(name)
+		local v = FindNamed(name, true)
+		if not (v and window) then return end
+		window.Confirm = window.Confirm or CreateConfirm(window)
+		local c = window.Confirm
+		c.name = v.name
+		c.Text:SetText("Remove |cffffffff" .. ns.Escape(v.name) .. "|r?\nYour AI can make it again.")
+		c:Show()
+	end
+
+	-- Removes a named visual for good: here, and through the bridge from the server's state too, so it isn't
+	-- refreshed any more. Until then, the version it had doesn't come back with the next update.
+	function Visuals.Remove(name)
+		if not name or name == "" then return ns.Print("/mcp visuals remove <name> removes a named table or list.") end
+		local v = Typed(name, "remove")
+		if not v then return end
+		WowMCPDB.visualRemoved = WowMCPDB.visualRemoved or {}
+		WowMCPDB.visualRemoved[v.name] = v.id
+		for i, kept in ipairs(named) do
+			if kept == v then
+				table.remove(named, i)
+				break
+			end
+		end
+		if WowMCPDB.namedViews then WowMCPDB.namedViews[v.name] = nil end
+		ByName("updated")[v.name], ByName("refreshing")[v.name] = nil, nil
+		ns.Stream.Post({ remove = v.name, player = UnitName("player") }) -- nothing comes back: it costs no slot
+		if current == v then
+			current = Recent()
+			if not current then Saved().open = nil end
+		end
+		Layout()
+		ns.Print(string.format("Removed %s.", ns.Escape(v.name)))
+	end
+
+	-- The block types in a visual, for lists.
+	local function Kinds(v)
+		local kinds = {}
+		for _, block in ipairs(v.blocks) do kinds[#kinds + 1] = block.type end
+		return table.concat(kinds, ", ")
+	end
+
 	function Visuals.List()
-		if #visuals == 0 then return ns.Print("Nothing to show. Ask your AI for a table!") end
-		ns.Print("What your AI showed, newest last (/mcp visuals <n> shows one):")
+		if #visuals == 0 and #named == 0 then return ns.Print("Nothing to show. Ask your AI for a table!") end
 		local open = Saved().open
+		if #named > 0 then
+			ns.Print("What your AI keeps, under its tabs (/mcp visuals <name> shows one):")
+			for _, v in ipairs(named) do
+				ns.Print(string.format("- |cffffffff%s|r: %s (%s%s%s)%s", ns.Escape(v.name), ns.Escape(v.title), Kinds(v),
+					v.at and ", updated " .. When(v.at) or "", v.every and ", refreshed " .. Every(v.every) or "",
+					open and v == current and " - showing" or ""))
+			end
+		end
+		if #visuals == 0 then return end
+		ns.Print("What your AI showed, newest last (/mcp visuals <n> shows one):")
 		for i, v in ipairs(visuals) do
-			local kinds = {}
-			for _, block in ipairs(v.blocks) do kinds[#kinds + 1] = block.type end
-			ns.Print(string.format("%d. |cffffffff%s|r (%s%s)%s", i, ns.Escape(v.title), table.concat(kinds, ", "),
+			ns.Print(string.format("%d. |cffffffff%s|r (%s%s)%s", i, ns.Escape(v.title), Kinds(v),
 				v.at and ", sent " .. When(v.at) or "", open and v == current and " - showing" or ""))
 		end
 	end
 
-	-- A visual from the payload, with the blocks this addon can show; one it can't says so.
-	local function Parse(raw)
+	-- A visual from the payload, with the blocks this addon can show; one it can't says so. A named one (lasting)
+	-- also has its name, refresh instructions and how often it's refreshed on its own.
+	local function Parse(raw, lasting)
 		if type(raw) ~= "table" or type(raw.id) ~= "number" then return nil end
+		if lasting and not (type(raw.name) == "string" and raw.name ~= "") then return nil end
 		local v = {
 			id = raw.id, title = tostring(raw.title or "Visual"), at = tonumber(raw.at), blocks = {},
 			subtitle = type(raw.subtitle) == "string" and raw.subtitle ~= "" and raw.subtitle or nil,
 		}
+		if lasting then
+			local every = tonumber(raw.every)
+			v.name, v.auto = raw.name, raw.auto == true or nil
+			v.refresh = type(raw.refresh) == "string" and raw.refresh ~= "" and raw.refresh or nil
+			v.every = every and every > 0 and math.floor(every) or nil
+		end
 		for _, b in ipairs(type(raw.blocks) == "table" and raw.blocks or {}) do
 			if type(b) == "table" and #v.blocks < MAX_BLOCKS then
 				local kind, block = BLOCKS[b.type], nil
@@ -1524,19 +1946,61 @@ do
 		return #v.blocks > 0 and v or nil
 	end
 
-	-- The payload has the kept visuals, { id, list = { visual, ... } }, id being the update that last changed
-	-- them. One we haven't seen opens the window; the ones we have keep how the player left them.
+	-- The named visuals in the payload, in their tabs' order; ones the player removed stay out until a newer
+	-- version comes. A new version that came because the player asked (anything but the bridge's own refreshes)
+	-- is returned as news, the newest first; one that came on its own puts a dot on its tab instead, unless it's
+	-- the one on show (then it's simply on show, in place).
+	local function ReceiveNamed(payload, seen, had)
+		local list, sent, news = {}, {}, nil
+		local removed, updated, refreshing = WowMCPDB.visualRemoved or {}, ByName("updated"), ByName("refreshing")
+		for _, raw in ipairs(type(payload.named) == "table" and payload.named or {}) do
+			local v = type(raw) == "table" and (had[raw.id] or Parse(raw, true))
+			if v and v.name and not sent[v.name] then
+				sent[v.name] = true
+				if not (removed[v.name] and v.id <= removed[v.name]) then
+					list[#list + 1] = v
+					if v.id > seen then
+						refreshing[v.name] = nil
+						if not v.auto then
+							if not news or v.id > news.id then news = v end
+						elseif not (current and current.name == v.name) then
+							updated[v.name] = true
+						end
+					end
+				end
+			end
+		end
+		named = list
+		-- What's kept by name goes with the names the server no longer has.
+		for name in pairs(removed) do
+			if not sent[name] then removed[name] = nil end
+		end
+		for _, kept in ipairs({ updated, refreshing, WowMCPDB.namedViews or {} }) do
+			for name in pairs(kept) do
+				if not FindNamed(name, true) then kept[name] = nil end
+			end
+		end
+		return news
+	end
+
+	-- The payload has the kept visuals, { id, list = { visual, ... }, named = { visual, ... } }, id being the update
+	-- that last changed them. One we haven't seen opens the window (unless ReceiveNamed says otherwise); the ones
+	-- we have keep how the player left them.
 	function Visuals.Receive(payload)
 		local id = tonumber(payload.id) or 0
 		local seen = WowMCPDB.visualSeen or 0
+		local saved = Saved()
 		if id < seen then -- the server's state was reset, so its ids started over
-			seen, visuals = 0, {}
-			WowMCPDB.visualsCleared, WowMCPDB.visualViews = nil, nil
+			seen, visuals, named = 0, {}, {}
+			WowMCPDB.visualsCleared, WowMCPDB.visualViews, WowMCPDB.visualRemoved = nil, nil, nil
+			saved.refreshing = nil
 		end
 		WowMCPDB.visualSeen = id
 		local cleared = WowMCPDB.visualsCleared or 0
 		local had, list, newest = {}, {}, nil
-		for _, v in ipairs(visuals) do had[v.id] = v end -- read once: the payload comes with every update
+		-- Read once: the payload comes with every update. Ids are updates, so they're unique over both lists.
+		for _, v in ipairs(visuals) do had[v.id] = v end
+		for _, v in ipairs(named) do had[v.id] = v end
 		for _, raw in ipairs(type(payload.list) == "table" and payload.list or {}) do
 			local v = type(raw) == "table" and had[raw.id] or Parse(raw)
 			if v and v.id > cleared then
@@ -1549,24 +2013,35 @@ do
 		for viewed in pairs(WowMCPDB.visualViews or {}) do
 			if not Find(viewed) then WowMCPDB.visualViews[viewed] = nil end
 		end
-		local saved = Saved()
-		local was = window and window:IsShown()
+		local news = ReceiveNamed(payload, seen, had)
+		if news and (not newest or news.id > newest.id) then newest = news end
+		local was, before = window and window:IsShown(), current
 		if newest then
 			current = newest
 			saved.open = true
-		else
-			current = Find(current and current.id or saved.showing) or list[#list]
+		elseif current then -- its newest version, else (gone) the temporary one last on show
+			current = (current.name and FindNamed(current.name, true) or Find(current.id)) or Recent()
+		else -- after a /reload: what was on show
+			current = FindNamed(saved.tab, true) or Find(saved.showing) or list[#list]
 		end
-		if not current then saved.open, saved.showing = nil, nil end
+		if not current then saved.open, saved.showing, saved.tab = nil, nil, nil end
 		Layout()
-		if was and not current then ns.Print("Your AI cleared what it showed.") end
+		if was and before and before.name and not FindNamed(before.name, true) then
+			ns.Print(string.format("Your AI removed %s.", ns.Escape(before.name)))
+		elseif was and not current then
+			ns.Print("Your AI cleared what it showed.")
+		end
 	end
 
 	local USAGE = "/mcp visuals [show, hide, clear, <n>] - the tables and lists from your AI: list them, show or hide "
-		.. "their window, remove them, show number n. Click a table's header to sort by it; drag the corner to resize"
+		.. "their window, remove the recent ones, show number n. Ones your AI keeps under tabs: /mcp visuals <name> "
+		.. "shows one, remove <name>, refresh [<name>]. Click a table's header to sort by it; drag the corner to resize"
 
 	function Visuals.Command(rest)
-		local word = strtrim(tostring(rest or "")):lower()
+		local typed = strtrim(tostring(rest or ""))
+		local word = typed:lower()
+		local verb = word:match("^(%S+)%s+%S") -- and a name after it
+		local name = verb and strtrim(typed:sub(#verb + 1))
 		if word == "" or word == "list" then
 			Visuals.List()
 		elseif word == "show" then
@@ -1575,8 +2050,17 @@ do
 			Visuals.Hide()
 		elseif word == "clear" then
 			Visuals.Clear()
+		elseif word == "recent" then
+			if #visuals == 0 then return ns.Print("No recent tables or lists. Ask your AI for one!") end
+			Visuals.Open(Recent())
+		elseif word == "remove" or verb == "remove" then
+			Visuals.Remove(name)
+		elseif word == "refresh" or verb == "refresh" then
+			Visuals.Refresh(name)
 		elseif tonumber(word) then
 			Visuals.Show(math.floor(tonumber(word)))
+		elseif FindNamed(typed) then
+			Visuals.Open(FindNamed(typed))
 		else
 			ns.Print(USAGE)
 		end
@@ -1594,11 +2078,13 @@ do
 	-- Items that were still loading: their names, and the order by them.
 	ns.OnItemsLoaded(function()
 		local redraw = false
-		for _, v in ipairs(visuals) do
-			for _, block in ipairs(v.blocks) do
-				if block.waiting then
-					block.prepared = nil
-					redraw = redraw or v == current
+		for _, list in ipairs({ visuals, named }) do
+			for _, v in ipairs(list) do
+				for _, block in ipairs(v.blocks) do
+					if block.waiting then
+						block.prepared = nil
+						redraw = redraw or v == current
+					end
 				end
 			end
 		end
