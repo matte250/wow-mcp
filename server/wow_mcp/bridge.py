@@ -35,6 +35,10 @@ model in MODELS, and ignores a level it doesn't know with a warning, so no pick 
 Being long-lived, it also fetches each new online snapshot of the player's auction house (about
 hourly) when Blizzard API credentials are set up, so price history builds up even when nobody asks
 (online_auctions.py; --no-auction-refresh turns it off).
+
+It also rebuilds the named visuals the AI keeps in game (tools/visuals.py) by their own refresh
+instructions: when the player clicks a visual's Refresh button, and on their own every
+refresh_minutes while the game runs (--no-visual-refresh turns that off).
 """
 
 import argparse
@@ -101,7 +105,9 @@ while playing. Your final reply is shown to them in the game's chat, so:
 for more. No Markdown, tables, headings or web links: the chat window shows them literally.
 - When the answer is naturally a table or a list of things with values (comparing items or gear, \
 prices and profits, drop rates, materials), show it with visualize, in a window of its own, and \
-keep your reply to the conclusion and "Details in the window."
+keep your reply to the conclusion and "Details in the window." When they want something kept or \
+tracked to come back to (their auctions, a flip or crafting list), make it a named visual: \
+list_visuals first, update one by its name rather than add another, and give it refresh instructions.
 - Write each item you name as {item:<id>}, or {item:<id>:<name>}, with its item ID for their game \
 version, e.g. {item:2318:Light Leather}: the chat shows it as an item link with its icon, which \
 they can click. Their bags and bank (get_inventory), recipes, vendors, quest rewards and \
@@ -870,6 +876,60 @@ class CommandAgent:
                 pipe.close()
 
 
+# Named visuals ----------------------------------------------------------------------------
+# The Refresh button on a named visual (Messages.lua) posts { refresh = name, player, model?, effort? }, the x on
+# its tab { remove = name, player }. A refresh waits its turn with the questions and is answered like one, with the
+# player's picks, but it isn't part of the conversation: its prompt is the visual's own refresh instructions, from
+# the server's state (so the game only names the visual), and it logs lines of its own (memory.read_log reads the
+# questions' back). Visuals with refresh_minutes are refreshed on their own while the game runs, quietly: no ack,
+# progress or reply, so each costs only the live update its new version takes.
+
+REFRESH_CHECK = 60.0  # seconds between looks for named visuals that are due a refresh on their own
+
+
+def _visual_key(name: str) -> str:
+    return " ".join(name.split()).casefold()  # as tools/visuals.py matches names
+
+
+@dataclass(frozen=True)
+class Refresh:
+    """A named visual to rebuild: the player clicked its Refresh button (post), or it's due (auto)."""
+
+    name: str
+    player: str | None = None
+    model: str | None = None  # one of MODELS; None: the bridge's own
+    effort: str | None = None  # one of EFFORTS, likewise
+    post: tuple[int, int] | None = None
+    auto: bool = False
+
+    @classmethod
+    def from_post(cls, value: object) -> "Refresh | None":
+        """The refresh in a post from Messages.lua ({refresh = name, player, model, effort}), if it is one."""
+        if not isinstance(value, dict) or not isinstance(value.get("refresh"), str):
+            return None
+        name = " ".join(value["refresh"].split())[:MAX_QUESTION]
+        return cls(name, _player(value), _model(value), _effort(value)) if name else None
+
+    def prompt(self, instructions: str, notes: Sequence[memory.Note] = ()) -> str:
+        """The agent's prompt: the visual's refresh instructions, after the agent's notes about the player."""
+        parts = []
+        if notes:
+            lines = [(f"What you know about {self.player or 'the player'} (your notes from earlier conversations, "
+                      "oldest first):")]
+            lines += [f"- #{n.id} ({time.strftime('%Y-%m-%d', time.localtime(n.at))}): {n.text}" for n in notes]
+            parts.append("\n".join(lines))
+        instructions = instructions.strip()
+        if not instructions.endswith((".", "!", "?")):
+            instructions += "."
+        task = f"Update the visual named {self.name!r}: {instructions} Use the visualize tool with name={self.name!r}."
+        if self.auto:
+            task += " This runs on its own, on a timer, and nobody reads your reply: keep it to a few words."
+        else:
+            task = (f"{self.player or 'The player'} clicked Refresh on a visual in game. {task} Then reply in one "
+                    "short sentence: what changed, or what stands out.")
+        return "\n\n".join([*parts, task])
+
+
 # The service ------------------------------------------------------------------------------
 
 
@@ -881,7 +941,9 @@ class Bridge:
                  background: Sequence[Callable[[threading.Event], None]] = (),
                  models: bool = False, model: str | None = None, effort: str | None = None,
                  notify: Callable[..., int] = publish_status, quiet: float = SILENCE,
-                 clock: Callable[[], float] = time.monotonic, tokens: bool = False):
+                 clock: Callable[[], float] = time.monotonic, tokens: bool = False,
+                 refresh_every: float | None = REFRESH_CHECK):
+        self.addons_dir = addons_dir
         self.out_dir = addons_dir / ADDON / "out"
         self.agent = agent
         self.publish = publish
@@ -901,15 +963,26 @@ class Bridge:
         self.notes = memory.Notes()
         self.background = background  # jobs that run until `stop` (the online auction refresh)
         # Resets wait their turn too: a question asked before /ai new belongs to the old conversation.
-        self.questions: queue.Queue[Question | Reset] = queue.Queue(MAX_WAITING)
+        self.questions: queue.Queue[Question | Reset | Refresh] = queue.Queue(MAX_WAITING)
         self.ready = threading.Event()  # watching for questions
         self.stop = threading.Event()
+        # Named visuals: seconds between looks for ones due a refresh on their own (None: never); what each player
+        # picked last (model, effort), and who asked last, for those; the visuals queued or being refreshed, and
+        # when each was last tried on its own (by _visual_key).
+        self.refresh_every = refresh_every
+        self.picks: dict[str, tuple[str | None, str | None]] = {}
+        self.last_player: str | None = None
+        self._refreshing: set[str] = set()
+        self._tried: dict[str, float] = {}
+        self._refresh_lock = threading.Lock()
 
     def serve(self) -> None:
         """Receive and answer questions until `stop` is set."""
         threading.Thread(target=self._work, name="wow-mcp-bridge-agent", daemon=True).start()
         for job in self.background:
             threading.Thread(target=job, args=(self.stop,), name="wow-mcp-bridge-background", daemon=True).start()
+        if self.refresh_every:
+            threading.Thread(target=self._refresh_visuals, name="wow-mcp-bridge-visuals", daemon=True).start()
         with stream.Receiver(self.out_dir) as receiver:
             self.ready.set()
             while not self.stop.is_set():
@@ -927,11 +1000,14 @@ class Bridge:
             log.warning("%s", post.error)
             self.say("Your question arrived garbled. Please ask again.", question=post.key)
             return
+        if self.visual_post(post):
+            return
         item = Question.from_post(post.value) or Reset.from_post(post.value)
         if isinstance(item, Reset):
             log.info("%s starts a fresh conversation", item.player or "the player")
         elif item:
             item = replace(item, post=post.key)
+            self.picked(item.player, item.model, item.effort)
             # memory.read_log reads this line and the answer's back (import-logs): keep their wording.
             log.info("%s asks%s: %s", item.player or "the player", f" ({item.model})" if item.model else "", item.text)
             if item.effort:  # a line of its own, so the one above keeps its wording
@@ -959,6 +1035,8 @@ class Bridge:
                 continue
             if isinstance(item, Reset):
                 self.history.clear(item.player)
+            elif isinstance(item, Refresh):
+                self.refresh(item)
             else:
                 self.answer(item)
 
@@ -1044,6 +1122,152 @@ class Bridge:
         except Exception:
             log.exception("couldn't tell the game how its question is coming along (%s %s)", status, text)
 
+    # Named visuals (see Refresh) --------------------------------------------------------------
+
+    def picked(self, player: str | None, model: str | None, effort: str | None) -> None:
+        """What the player picked with their last question or click: their visuals' own refreshes use it too."""
+        self.picks[player or ""] = (model, effort)
+        self.last_player = player or self.last_player
+
+    def visual_post(self, post: stream.Post) -> bool:
+        """A post about a named visual: the player's Refresh click, or the x on its tab. True if it was one."""
+        value = post.value
+        if isinstance(value, dict) and isinstance(value.get("remove"), str):
+            from wow_mcp.tools import visuals
+
+            name = " ".join(value["remove"].split())
+            log.info("%s removed the visual %r in game", _player(value) or "the player", name)
+            try:  # the game has done it already; this is for the server's state, so it isn't refreshed any more
+                visuals.remove_named(name)
+            except Exception:
+                log.exception("couldn't remove the visual %r", name)
+            return True
+        refresh = Refresh.from_post(value)
+        if refresh is None:
+            return False
+        refresh = replace(refresh, post=post.key)
+        self.picked(refresh.player, refresh.model, refresh.effort)
+        log.info("%s refreshes the visual %r%s", refresh.player or "the player", refresh.name,
+                 f" ({refresh.model})" if refresh.model else "")
+        if self._queue(refresh) == "full":
+            self.say("I'm still busy with your earlier questions. Please click Refresh again in a minute.",
+                     question=refresh.post)
+        else:  # also when it's being refreshed already: its new version is on the way
+            self.tell(refresh, "ack", tokens=0 if self.tokens else None)
+        return True
+
+    def _queue(self, item: Refresh) -> str:
+        """Queues a refresh, unless that visual's is queued or running already: "queued", "already" or "full"."""
+        key = _visual_key(item.name)
+        with self._refresh_lock:
+            if key in self._refreshing:
+                return "already"
+            try:
+                self.questions.put_nowait(item)
+            except queue.Full:
+                return "full"
+            self._refreshing.add(key)
+        return "queued"
+
+    def refresh(self, item: Refresh) -> None:
+        """Rebuilds a named visual by its refresh instructions. A click gets a reply in the AI tab, like a question;
+        a refresh on its own only sends the visual."""
+        try:
+            self._refresh(item)
+        finally:
+            with self._refresh_lock:
+                self._refreshing.discard(_visual_key(item.name))
+
+    def _refresh(self, item: Refresh) -> None:
+        from wow_mcp.tools import visuals
+
+        found = visuals.find_named(visuals.transport().load_state(), item.name)
+        if not (found and found.get("refresh")):
+            why = (f"there's no visual named {item.name!r} any more" if not found
+                   else f"{found['name']!r} has no refresh instructions: ask me to rebuild it, and say how")
+            log.info("not refreshing the visual %r: %s", item.name, why)
+            if not item.auto:
+                self.say(f"I can't refresh that: {why}.", question=item.post)
+            return
+        name, player = found["name"], item.player or found.get("player")
+        model, effort = item.model, item.effort
+        if not self.models:
+            model = effort = None  # --agent answers its own way
+        if item.auto:
+            send = lambda step, **counts: None  # noqa: E731 (quiet: no live-update slots)
+        else:
+            send = lambda step, **counts: self.tell(item, "progress", step, **counts)  # noqa: E731
+        progress = Progress(send, self.quiet, clock=self.clock, tokens=Tokens(self.clock) if self.tokens else None)
+        try:
+            prompt = replace(item, name=name, player=player).prompt(
+                found["refresh"], self.notes.about(player) if player else ())
+            with visuals.background(self.addons_dir, name) if item.auto else contextlib.nullcontext():
+                text = self.agent(prompt, model, player, effort, progress) or f"Refreshed {name}."
+        except AgentTimeout as e:
+            log.error("refresh of the visual %r timed out: %s", name, e)
+            text = f"Sorry, I stopped refreshing {name}{':' if isinstance(e, AgentSilent) else ''} {e}."
+        except AgentError as e:
+            log.error("refresh of the visual %r failed: %s", name, e)
+            text = f"Sorry, I couldn't refresh {name}: {e}"
+        except Exception as e:  # a broken agent mustn't stop the bridge
+            log.exception("refresh of the visual %r failed", name)
+            text = f"Sorry, I couldn't refresh {name}: {e}"
+        if self.stop.is_set():
+            return
+        took = self.clock() - progress.started
+        written = progress.tokens.total if progress.tokens else None
+        log.info("refresh of the visual %r%s took %s; tools used: %s%s", name, " (on its own)" if item.auto else "",
+                 _clock(took), progress.used(), f"; tokens written: {written}" if written is not None else "")
+        log.info("refresh result: %s", text)  # not "answer:", which memory.read_log pairs with the questions
+        if not item.auto:
+            self.say("\n".join(chat_lines(text)), self.signed(model, effort), item.post, took, written)
+
+    def game_running(self) -> bool:
+        """Whether the game the addon is installed for is running now."""
+        from wow_mcp import game
+
+        try:
+            now = game.situation(self.addons_dir)
+        except Exception:  # an odd folder layout: as if not
+            return False
+        return any(g.folder == now.installed.folder for g in now.running)
+
+    def refresh_due(self, now: float | None = None) -> list[str]:
+        """Queues the named visuals due a refresh on their own (every refresh_minutes since their last version),
+        only while the game runs; returns their names. Each is tried at most once an interval, also when that
+        fails, and a full queue leaves them for the next look: the player's questions come first."""
+        from wow_mcp.tools import visuals
+
+        if not self.game_running():
+            return []
+        now = time.time() if now is None else now
+        due = []
+        for v in visuals.named_visuals(visuals.transport().load_state()):
+            every, at, key = v.get("every"), v.get("at"), _visual_key(v["name"])
+            if not (isinstance(every, int) and every > 0 and v.get("refresh")):
+                continue
+            at = float(at) if isinstance(at, (int, float)) else 0.0
+            if now - max(at, self._tried.get(key, 0.0)) < every * 60:
+                continue
+            player = v.get("player") or self.last_player
+            model, effort = self.picks.get(player or "", (None, None))
+            outcome = self._queue(Refresh(v["name"], player, model, effort, auto=True))
+            if outcome == "full":
+                break
+            self._tried[key] = now
+            if outcome == "queued":
+                log.info("refreshing the visual %r on its own: every %d min, last updated %s", v["name"], every,
+                         time.strftime("%Y-%m-%d %H:%M", time.localtime(at)) if at else "never")
+                due.append(v["name"])
+        return due
+
+    def _refresh_visuals(self) -> None:
+        while not self.stop.wait(self.refresh_every):
+            try:
+                self.refresh_due()
+            except Exception:
+                log.exception("couldn't look for named visuals to refresh")
+
 
 def claim(addon_dir: Path):
     """Make this the only bridge answering for this game; two would each answer every question.
@@ -1105,6 +1329,9 @@ def main() -> None:
     parser.add_argument("--no-auction-refresh", action="store_true",
                         help="don't fetch online auction prices every hour (on when ~/.config/wow-mcp/battlenet.env "
                         "has Blizzard API credentials), which builds up their price history")
+    parser.add_argument("--no-visual-refresh", action="store_true",
+                        help="don't refresh named visuals on their own (the ones the AI gave refresh_minutes); "
+                        "their Refresh button still works")
     args = parser.parse_args()
     if not args.addons_dir:
         parser.error(f"pass --addons-dir or set {ADDONS_DIR_ENV}")
@@ -1138,7 +1365,11 @@ def main() -> None:
     history = History(addons_dir / ADDON / HISTORY_FILE, args.history, args.history_minutes)
     background = auction_refresh(addons_dir, args.no_auction_refresh)
     bridge = Bridge(addons_dir, agent, history=history, background=background, models=not args.agent, model=args.model,
-                    effort=args.effort, quiet=agent.quiet, tokens=agent.streams)
+                    effort=args.effort, quiet=agent.quiet, tokens=agent.streams,
+                    refresh_every=None if args.no_visual_refresh else REFRESH_CHECK)
+    log.info("Named visuals: %s", "refreshed only when the player clicks Refresh (--no-visual-refresh)"
+             if args.no_visual_refresh else "refreshed when the player clicks Refresh, and on their own when due "
+             "while the game runs")
     signal.signal(signal.SIGTERM, lambda *_: bridge.stop.set())
     if args.agent:
         log.info("Answering /ai questions from %s with %s", addons_dir, command[0])

@@ -1418,3 +1418,234 @@ def test_bridge_refuses_a_launcher_that_would_garble_the_prompt(addons, tmp_path
         bridge.main()
     assert "wrapper.cmd is a batch launcher" in str(stopped.value).lower()
     assert "WOW_MCP_SYSTEM_PROMPT" in str(stopped.value)
+
+
+# Named visuals: the Refresh button, and refreshes on their own ----------------------------------
+
+TRACKER = "Call get_my_auctions and show my active listings with undercut status"
+TEXT = [{"type": "text", "text": "x"}]
+
+
+def keep(name="Auction tracker", refresh=TRACKER, every=None, title="My auctions"):
+    """A named visual in the server's state, as the AI makes it (tools/visuals.py)."""
+    from wow_mcp.tools import visuals
+
+    visuals.visualize(title, TEXT, name=name, refresh=refresh, refresh_minutes=every)
+
+
+def refresh_post(post_id, name="auction tracker", **picks):
+    return stream.Post(77, post_id, end=0, value={"refresh": name, "player": "Thorgrim", **picks})
+
+
+def logged(caplog):
+    return "\n".join(f"{r.levelname} {r.getMessage()}" for r in caplog.records)
+
+
+def test_a_refresh_click_runs_the_visuals_instructions(addons, caplog):
+    """The Refresh button is answered like a question, with the player's picks and a reply in the AI tab, by the
+    visual's own instructions; it isn't part of the conversation."""
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    keep()
+    asked, said, notes = [], [], []
+
+    def agent(prompt, model, asker, effort, progress):
+        asked.append((prompt, model, asker, effort))
+        return "3 of your 8 auctions are undercut."
+
+    b = Bridge(addons, agent, publish=lambda text, **kw: said.append((text, kw["sender"], kw["question"])),
+               notify=lambda status, text="", **kw: notes.append((status, kw["question"])),
+               history=bridge.History(None), models=True, model="opus")
+    b.accept(refresh_post(1, model="sonnet", effort="high"))
+    assert notes == [("ack", (77, 1))], "acked as it arrives, like a question"
+    item = b.questions.get_nowait()
+    assert isinstance(item, bridge.Refresh) and item.post == (77, 1) and not item.auto
+    b.refresh(item)
+    assert asked == [(
+        "Thorgrim clicked Refresh on a visual in game. Update the visual named 'Auction tracker': "
+        f"{TRACKER}. Use the visualize tool with name='Auction tracker'. Then reply in one short sentence: what "
+        "changed, or what stands out.",
+        "sonnet", "Thorgrim", "high",
+    )]
+    assert said == [("3 of your 8 auctions are undercut.", "Claude Sonnet · high", (77, 1))]
+    # Not part of the conversation or the archive.
+    assert b.history.recent("Thorgrim") == [] and b.archive.entries() == []
+    # Lines of its own in the log, which the memory importer passes over.
+    assert "Thorgrim refreshes the visual 'auction tracker' (sonnet)" in caplog.text
+    assert "refresh result: 3 of your 8 auctions are undercut." in caplog.text
+    assert " asks" not in caplog.text and "answer:" not in caplog.text
+    assert memory.read_log(logged(caplog), time.time()) == []
+
+    # Another agent (--agent) refreshes its own way, whatever was picked.
+    other = Bridge(addons, agent, publish=lambda text, **kw: None, notify=lambda *a, **kw: None)
+    other.accept(refresh_post(2, model="haiku", effort="low"))
+    other.refresh(other.questions.get_nowait())
+    assert asked[-1][1:] == (None, "Thorgrim", None)
+
+
+def test_refreshes_keep_out_of_the_questions_log_lines(addons, caplog):
+    """memory.read_log pairs each "asks" line with the next "answer:" one, and a failure's error with the question
+    it waits on: refreshes, done or failed, between them don't get in the way."""
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    keep()
+    outcomes = [AgentError("not logged in"), "Orgrimmar, by the bank.", "2 undercut.", "Go west."]
+
+    def agent(prompt, model, asker, effort, progress):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    b = Bridge(addons, agent, publish=lambda text, **kw: None, notify=lambda *a, **kw: None,
+               history=bridge.History(None))
+    # Each time a question is logged as it arrives, before the refresh ahead of it is done.
+    for n in (1, 3):
+        b.accept(refresh_post(n))
+        b.accept(question(n + 1, "where am I?" if n == 1 else "and then?"))
+        while not b.questions.empty():
+            item = b.questions.get_nowait()
+            b.refresh(item) if isinstance(item, bridge.Refresh) else b.answer(item)
+    assert "refresh of the visual 'Auction tracker' failed: not logged in" in caplog.text
+    assert "refresh result: 2 undercut." in caplog.text
+    assert [(e["question"], e["answer"]) for e in memory.read_log(logged(caplog), time.time())] == [
+        ("where am I?", "Orgrimmar, by the bank."), ("and then?", "Go west."),
+    ]
+
+
+def test_refreshes_that_cant_be_done(addons):
+    from wow_mcp.tools import visuals
+
+    keep("Flip list", refresh=None)
+    said = []
+    b = Bridge(addons, lambda *args: pytest.fail("no agent"), notify=lambda *a, **kw: None,
+               publish=lambda text, **kw: said.append((text, kw["question"])), history=bridge.History(None))
+    for n, name in enumerate(["Nope", "flip list"], 1):
+        b.accept(refresh_post(n, name))
+        b.refresh(b.questions.get_nowait())
+    assert said == [
+        ("I can't refresh that: there's no visual named 'Nope' any more.", (77, 1)),
+        ("I can't refresh that: 'Flip list' has no refresh instructions: ask me to rebuild it, and say how.", (77, 2)),
+    ]
+    # One refresh per visual at a time: the click meanwhile is told it's on its way, by its new version.
+    keep()
+    b.accept(refresh_post(3))
+    b.accept(refresh_post(4, "Auction Tracker"))
+    assert b.questions.qsize() == 1
+    b.questions.get_nowait()
+    b._refreshing.clear()
+    # The player's questions come first: with the queue full, the click is told to try again.
+    for n in range(MAX_WAITING):
+        b.questions.put_nowait(bridge.Question(f"q{n}", "Thorgrim"))
+    b.accept(refresh_post(5))
+    assert said[-1] == ("I'm still busy with your earlier questions. Please click Refresh again in a minute.", (77, 5))
+    assert visuals.find_named(transport().load_state(), "Auction tracker")["title"] == "My auctions"
+
+
+def test_visuals_refresh_on_their_own_while_the_game_runs(addons, monkeypatch, caplog):
+    """Named visuals with refresh_minutes are refreshed once they're due, only while the game runs, with the
+    player's last picks, quietly: no ack, progress or reply; their new versions don't come to the front."""
+    from wow_mcp import game
+    from wow_mcp.tools import visuals
+
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    keep(every=30)
+    keep("Flip list", refresh="Call get_auction_prices for the flip candidates and show margins", every=60)
+    keep("Crafting", refresh="Call get_known_recipes and show what's worth crafting")  # only when clicked
+    now = time.time()
+    asked, said, notes = [], [], []
+    mark = addons / "WowMCP" / visuals.BACKGROUND_FILE
+
+    def agent(prompt, model, asker, effort, progress):
+        asked.append((prompt, model, asker, effort, mark.exists()))
+        if "Auction tracker" in prompt:
+            visuals.visualize("My auctions, later", TEXT, name="Auction tracker")
+            return "Updated."
+        raise AgentError("not logged in")
+
+    b = Bridge(addons, agent, publish=lambda text, **kw: said.append(text), notify=lambda *a, **kw: notes.append(a),
+               history=bridge.History(None), models=True)
+    # Not while the game isn't running.
+    assert not b.game_running() and b.refresh_due(now + 3600) == []
+    monkeypatch.setattr(game, "running_folders", lambda proc=None: {"_forever_"})
+    assert b.game_running()
+    # Not before it's due.
+    assert b.refresh_due(now + 29 * 60) == []
+    # Due: with what the player picked last.
+    b.picked("Thorgrim", "haiku", "low")
+    assert b.refresh_due(now + 31 * 60) == ["Auction tracker"]
+    assert b.refresh_due(now + 32 * 60) == [], "on its way already"
+    item = b.questions.get_nowait()
+    assert item.auto and (item.name, item.player, item.model, item.effort) == ("Auction tracker", "Thorgrim", "haiku",
+                                                                             "low")
+    b.refresh(item)
+    prompt, model, asker, effort, marked = asked[0]
+    assert prompt == (f"Update the visual named 'Auction tracker': {TRACKER}. Use the visualize tool with "
+                      "name='Auction tracker'. This runs on its own, on a timer, and nobody reads your reply: keep it "
+                      "to a few words.")
+    assert (model, asker, effort, marked) == ("haiku", "Thorgrim", "low", True) and not mark.exists()
+    assert said == [] and notes == [], "no live-update slots but its own"
+    assert visuals.find_named(transport().load_state(), "Auction tracker")["auto"] is True
+    assert "refreshing the visual 'Auction tracker' on its own: every 30 min, last updated " in caplog.text
+    assert "refresh of the visual 'Auction tracker' (on its own) took 0:00; tools used: none" in caplog.text
+
+    # Next due 30 minutes after its new version. A failed one is tried again an interval later, not sooner.
+    updated = time.time()
+    assert b.refresh_due(updated + 29 * 60) == []
+    assert b.refresh_due(now + 61 * 60) == ["Auction tracker", "Flip list"]
+    for _ in range(2):
+        b.refresh(b.questions.get_nowait())
+    assert "refresh of the visual 'Flip list' failed: not logged in" in caplog.text and said == []
+    assert "Flip list" not in b.refresh_due(now + 62 * 60)
+    assert "Flip list" in b.refresh_due(now + 122 * 60)
+
+    # Not when turned off (--no-visual-refresh): the loop doesn't start.
+    off = Bridge(addons, agent, publish=lambda text, **kw: None, refresh_every=None)
+    assert off.refresh_every is None
+
+
+def test_the_x_on_a_tab_removes_it_on_the_server_too(addons, caplog):
+    from wow_mcp.tools import visuals
+
+    caplog.set_level(logging.INFO, logger="wow_mcp.bridge")
+    keep(every=30)
+    b = Bridge(addons, lambda *args: pytest.fail("no agent"), publish=lambda text, **kw: pytest.fail("no reply"),
+               notify=lambda *a, **kw: pytest.fail("no note"))
+    b.accept(stream.Post(77, 1, end=0, value={"remove": "Auction tracker", "player": "Thorgrim"}))
+    assert visuals.named_visuals(transport().load_state()) == [] and b.questions.empty()
+    assert "Thorgrim removed the visual 'Auction tracker' in game" in caplog.text
+    # Gone already (the AI removed it meanwhile): nothing to do.
+    b.accept(stream.Post(77, 2, end=0, value={"remove": "Auction tracker", "player": "Thorgrim"}))
+
+
+def test_refresh_in_game_end_to_end(live_game, addons, tmp_path, running):
+    """The player refreshes a named visual in game (its button, here /mcp visuals refresh); the bridge has the agent
+    rebuild it by its instructions, with the player's picks, and the game shows the new version and the reply."""
+    from wow_mcp.tools import visuals
+
+    log, typed = tmp_path / "game.log", tmp_path / "typed.txt"
+    keep(title="My auctions, before")
+    asked = []
+
+    def agent(prompt, model, asker, effort, progress):
+        asked.append((prompt, model, asker))
+        visuals.visualize("My auctions, now", TEXT, name="Auction tracker")
+        return "2 of your auctions are undercut."
+
+    setup = GAME.replace("LOG", log.as_posix()).replace("TYPED", typed.as_posix()) + """
+WowMCPDB.aiTab.models = { ["Thorgrim-Firemaw"] = "sonnet" }
+C_Timer.NewTicker(0.5, function()
+    local f = WowMCPVisualFrame
+    if f and f:IsShown() then Log("window: " .. f.Title.text .. " | " .. f.Footer.text) end
+end)
+"""
+    with live_game(setup, seconds=25):
+        running(Bridge(addons, agent, models=True))
+        wait_for(lambda: log.exists() and "window: My auctions, before" in log.read_text(), seconds=10)
+        type_in(typed, "/mcp visuals refresh")
+        wait_for(lambda: "2 of your auctions are undercut." in log.read_text(), seconds=15)
+        wait_for(lambda: "window: My auctions, now | Updated" in log.read_text(), seconds=5)
+
+    assert [(model, asker) for _, model, asker in asked] == [("sonnet", "Thorgrim")]
+    assert "Update the visual named 'Auction tracker': " + TRACKER in asked[0][0]
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert "chat: |cff33ff99[Claude Sonnet]|r 2 of your auctions are undercut." in lines
+    assert not any("wow-mcp-bridge" in line for line in lines)
