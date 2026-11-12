@@ -27,6 +27,18 @@ ON, OFF, LEAD, SEAL = "on.wav", "off.wav", "lead.wav", "seal.wav"
 DATA_FILES = [f"{i:02d}.wav" for i in range(DATA_BITS)]
 FILES = [ON, OFF, LEAD, SEAL, *DATA_FILES]  # what the installer makes; on.wav is the only valid one at first
 
+# The link layout, on Windows only (junction_windows.py has why): a bit is a junction bell/<stem> (seal, lead,
+# 00-23) to bell/on or bell/off, and the game plays <stem>/b.wav, which is silence in on/ and empty in off/.
+# Those two files are written at install and never again. bell/chk always points at on/, for the game's
+# self-test. The frames, their order and the receipts are the same.
+LINK_ON, LINK_OFF, LINK_FILE, LINK_CHECK = "on", "off", "b.wav", "chk"
+LINKS = [name.removesuffix(".wav") for name in (LEAD, SEAL, *DATA_FILES)]
+
+
+def link(name: str) -> str:
+    """The junction of a bit's file name: seal.wav -> seal."""
+    return name.removesuffix(".wav")
+
 # In a receipt, above the frame's 24 bits: its parity, and whether the game has seen the files change.
 PARITY = 1 << DATA_BITS
 VERIFIED = 1 << (DATA_BITS + 1)

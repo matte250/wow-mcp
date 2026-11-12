@@ -1,6 +1,7 @@
 """Slots and the bell (transport.py, bell.py): the frames as written, their receipts and the server's waiting."""
 
 import json
+import sys
 import threading
 import time
 
@@ -12,9 +13,13 @@ from wow_mcp.transport import Transport
 
 
 def on_disk(addon_dir):
-    """(seal, lead, bits) of the bell as the files are now."""
+    """(seal, lead, bits) of the bell as the game would read it now: each bit's file, which on Windows is the
+    one behind its junction (bell.py's link layout)."""
     def on(name):
-        return int((addon_dir / bell.FOLDER / name).stat().st_size > 0)
+        path = addon_dir / bell.FOLDER / name
+        if (addon_dir / bell.FOLDER / bell.LINK_CHECK).exists():
+            path = addon_dir / bell.FOLDER / bell.link(name) / bell.LINK_FILE
+        return int(path.stat().st_size > 0)
     return on(bell.SEAL), on(bell.LEAD), sum(on(name) << i for i, name in enumerate(bell.DATA_FILES))
 
 
@@ -23,6 +28,17 @@ def written(addon_dir):
     seal, lead, bits = on_disk(addon_dir)
     assert seal == lead, "a whole frame"
     return bell.decode(bits, seal)
+
+
+LINKED = sys.platform == "win32"  # the installer makes the bell's link layout there
+
+
+def flat(addons):
+    """The bell as plain files, as everywhere but Windows: there, take the junctions away again."""
+    for stem in (bell.LINK_CHECK, *bell.LINKS):
+        if (addons / "WowMCP" / bell.FOLDER / stem).exists():
+            (addons / "WowMCP" / bell.FOLDER / stem).rmdir()
+    return addons
 
 
 class FakeGame(threading.Thread):
@@ -117,7 +133,7 @@ def test_token_counts_as_the_game_shows_them():
 def test_writing_a_frame(addons):
     """lead.wav, the data, seal.wav; the parity flips with every frame; a valid file is a hard link to on.wav (no
     data written), an empty one empty."""
-    t = Transport(addons)
+    t = Transport(flat(addons))
     on = t.bell.dir / bell.ON
     assert on_disk(t.addon_dir) == (0, 0, 0), "as installed"
     receipt = t.bell.write(bell.data(5))
@@ -204,7 +220,9 @@ def test_install_makes_the_bell_and_clears_the_old_doorbells(tmp_path, capsys, m
             (old / pool / f"{n:04d}.wav").touch()
     done = install(addons)
     assert done.removed == 1501 and not any((old / pool).exists() for pool in ("sig", "req", "ctl"))
-    assert sorted(p.name for p in (old / bell.FOLDER).iterdir()) == sorted(bell.FILES)
+    links = [bell.LINK_ON, bell.LINK_OFF, bell.LINK_CHECK, *bell.LINKS] if LINKED else []
+    assert sorted(p.name for p in (old / bell.FOLDER).iterdir()) == sorted([*bell.FILES, *links])
+    assert ('ns.BELL = "links"' in (old / "Build.lua").read_text()) == LINKED
     assert (old / bell.FOLDER / bell.ON).read_bytes() == bell.silence()
     assert all((old / bell.FOLDER / name).stat().st_size == 0 for name in bell.FILES if name != bell.ON)
     assert done.created > len(bell.FILES)
@@ -232,8 +250,71 @@ def test_no_hard_links(addons, monkeypatch):
         raise OSError("not on this drive")
 
     monkeypatch.setattr(transport.os, "link", refuse)
-    t = Transport(addons)
+    t = Transport(flat(addons))
     t.bell.write(bell.data(1))
     assert written(t.addon_dir) == bell.data(1)
     assert (t.bell.dir / bell.SEAL).read_bytes() == bell.silence()
     assert not any(p.name.endswith(".tmp") for p in t.bell.dir.iterdir())
+
+
+@pytest.mark.skipif(not LINKED, reason="junctions: Windows only")
+def test_links_change_while_the_game_holds_the_files(addons):
+    """Windows: the client keeps a streamed file open, shared for reading only, for about 2 s after each play, so
+    a file it looks at more often can't be replaced. With the link layout the server re-points junctions and
+    never touches a file: frames go out whatever the game holds. As plain files, the same frame can't be written."""
+    import ctypes
+    from ctypes import wintypes
+
+    from wow_mcp import junction_windows
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+
+    def hold(path):  # as the client opens a sound: for reading, others may only read
+        handle = kernel32.CreateFileW(str(path), 0x80000000, 1, None, 3, 0, None)
+        assert handle != wintypes.HANDLE(-1).value, path
+        return handle
+
+    t = Transport(addons)
+    folder = t.bell.dir
+    assert t.bell.links() and on_disk(t.addon_dir) == (0, 0, 0), "as installed"
+    assert junction_windows.target(folder / bell.LINK_CHECK).name == bell.LINK_ON
+    held = [hold(folder / bell.LINK_ON / bell.LINK_FILE), hold(folder / bell.LINK_OFF / bell.LINK_FILE)]
+    try:
+        for n in range(1, 6):
+            receipt = t.bell.write(bell.data(n))
+            # The game's paths, through the junctions, while it holds both files they can lead to.
+            held.append(hold(folder / "seal" / bell.LINK_FILE))
+            assert written(t.addon_dir) == bell.data(n) and receipt >> bell.DATA_BITS == n % 2
+        silence = (folder / bell.LINK_ON / bell.LINK_FILE).read_bytes()
+        assert silence == bell.silence() and (folder / bell.LINK_OFF / bell.LINK_FILE).read_bytes() == b""
+    finally:
+        for handle in held:
+            kernel32.CloseHandle(handle)
+
+    # The same as plain files: the frame can't be written while the game holds the marker.
+    plain = Transport(flat(addons))
+    plain.bell.write(bell.data(1))
+    handle = hold(folder / bell.SEAL)
+    try:
+        with pytest.raises(PermissionError):
+            plain.bell.write(bell.data(2))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(not LINKED, reason="junctions: Windows only")
+def test_install_keeps_the_links(addons):
+    """Installing again (the game may run): the junctions keep their targets, nothing is new; one that points
+    into another folder (the game was moved) is pointed back here."""
+    from wow_mcp import junction_windows
+
+    t = Transport(addons)
+    t.bell.write(bell.data(9))
+    frame, folder = on_disk(t.addon_dir), t.bell.dir
+    assert install(addons).created == 0 and on_disk(t.addon_dir) == frame
+    elsewhere = addons / "moved" / bell.LINK_ON
+    elsewhere.mkdir(parents=True)
+    junction_windows.point(folder / "seal", elsewhere)
+    assert install(addons).created == 0
+    assert junction_windows.target(folder / "seal") == (folder / bell.LINK_ON).absolute()

@@ -342,7 +342,7 @@ end
 -- IDLE_EVERY seconds; every step while the server was busy lately (or we just logged in), an /ai question
 -- waits, or the auction house or a mailbox is open. When it flips, the whole frame on the next step, its plays spread over render
 -- frames (BUDGET_MS each). Sounds are checked and stopped CHECK_AFTER seconds after they started, a little
--- before the next step's: Windows can't replace a file a program has open, so the server gets its moment.
+-- before the next step's.
 --
 -- Were the client to keep these files like short sounds, the bits would stick. So until we've seen a
 -- marker go from valid to empty, receipts say so and the server writes test frames that make it do that.
@@ -350,10 +350,24 @@ end
 
 local BELL = ROOT .. "bell\\"
 local DATA_BITS = 24
-local SEAL, LEAD = BELL .. "seal.wav", BELL .. "lead.wav"
-local FRAME = { SEAL } -- in the order read: seal.wav, the data (lowest bit first), lead.wav
-for i = 0, DATA_BITS - 1 do FRAME[#FRAME + 1] = string.format("%s%02d.wav", BELL, i) end
-FRAME[#FRAME + 1] = LEAD
+-- On Windows the client keeps a streamed file open, shared for reading only, for about 2 s after a play,
+-- StopSound or not, so the server can't replace a file we look at that often. There the installer makes each
+-- bit a directory junction instead (ns.BELL == "links", from Build.lua): bell\seal\b.wav and so on, where
+-- bell\seal points at bell\on (b.wav: silence) or bell\off (b.wav: empty). The server re-points the
+-- junction and never touches a file; the client resolves the path afresh on every play. bell\chk always
+-- points at bell\on, for the self-test.
+local SEAL, LEAD, CHECK
+local FRAME -- in the order read: seal.wav, the data (lowest bit first), lead.wav
+
+-- Build.lua loads after this file, so the paths are made at login.
+local function Paths()
+	local suffix = ns.BELL == "links" and "\\b.wav" or ".wav"
+	SEAL, LEAD = BELL .. "seal" .. suffix, BELL .. "lead" .. suffix
+	CHECK = ns.BELL == "links" and BELL .. "chk" .. suffix or nil
+	FRAME = { SEAL }
+	for i = 0, DATA_BITS - 1 do FRAME[#FRAME + 1] = string.format("%s%02d%s", BELL, i, suffix) end
+	FRAME[#FRAME + 1] = LEAD
+end
 
 local STEP = 0.25       -- seconds between steps: each starts the sounds it reads
 local CHECK_AFTER = 0.2 -- seconds after they started that IsPlaying says what they were
@@ -530,6 +544,10 @@ local function Check()
 		if not plays.handles[1] then return Off("the game hasn't seen the live-update files yet: fully restart WoW") end
 		if not on[1] then return Off("a long silent sound doesn't play") end
 		if on[2] then return Off("an empty sound file plays") end
+		if CHECK and not plays.handles[3] then
+			return Off("the game hasn't seen the live-update links yet: fully restart WoW")
+		end
+		if CHECK and not on[3] then return Off("a sound behind a folder link doesn't play: run wow-mcp-install again") end
 		run.live = true
 		bell.hot = 1 -- what the server left there
 	elseif plays.kind == "seal" then
@@ -571,7 +589,8 @@ local function StartLive()
 	local problem = SoundProblem()
 	if problem then return Off(problem) end
 	bell.taken, bell.last = WowMCPDB.bell, GetTime()
-	Start("start", { BELL .. "on.wav", BELL .. "off.wav" })
+	Paths()
+	Start("start", { BELL .. "on.wav", BELL .. "off.wav", CHECK })
 	reader:SetScript("OnUpdate", OnUpdate)
 end
 
