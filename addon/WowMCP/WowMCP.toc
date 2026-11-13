@@ -28,6 +28,7 @@ Goals.lua
 Auction.lua
 Reminders.lua
 Tooltips.lua
+Glow.lua
 Status.lua
 Build.lua
 Inbox.lua
