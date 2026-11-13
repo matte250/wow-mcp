@@ -255,6 +255,15 @@ function ns.RegisterCommand(name, usage, run)
 	commands[name] = { usage = usage, run = run }
 end
 
+-- The /mcp commands' usage lines ("/mcp route [show, ...] - what it does"), sorted; a command
+-- registered without one (an alias) has none.
+function ns.CommandUsages()
+	local usages = {}
+	for _, c in pairs(commands) do usages[#usages + 1] = c.usage end
+	table.sort(usages)
+	return usages
+end
+
 local function Apply(payload)
 	for key, receive in pairs(receivers) do
 		if payload[key] ~= nil then receive(payload[key]) end
@@ -643,8 +652,5 @@ SlashCmdList.WOWMCP = function(input)
 		command.run(tonumber(name) or rest, rest)
 		return
 	end
-	local usages = {}
-	for _, c in pairs(commands) do usages[#usages + 1] = c.usage end
-	table.sort(usages)
-	for _, usage in ipairs(usages) do ns.Print(usage) end
+	for _, usage in ipairs(ns.CommandUsages()) do ns.Print(usage) end
 end
