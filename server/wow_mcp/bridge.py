@@ -426,9 +426,12 @@ STEPS = {
     "get_flight_paths": "checking flight paths",
     "get_reputations": "checking reputations",
     "search_conversations": "remembering earlier conversations",
-    "find_npc": "looking up NPCs",
-    "find_object": "looking up objects",
-    "find_quest": "looking up quests",
+    "find_npc": "looking up places",
+    "find_object": "looking up places",
+    "find_quest": "looking up places",
+    "get_quest_log_locations": "looking up places",
+    "find_item": "looking up items",
+    "find_available_quests": "looking for quests nearby",
     "show_on_map": "marking the map",
     "show_route": "marking a route",
     "highlight_areas": "marking areas",
@@ -449,7 +452,7 @@ STEP_CODES = (
     "checking your professions", "checking your recipes", "checking vendors", "checking flight paths",
     "checking reputations", "remembering earlier conversations", "marking the map", "marking a route",
     "marking areas", "making a plan", "making a table or list", "searching the web", "reading a web page",
-    "looking up NPCs", "looking up objects", "looking up quests",
+    "looking up places", "looking for quests nearby",
 )
 
 

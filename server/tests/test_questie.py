@@ -2,13 +2,15 @@
 The QuestieDB here is a tiny one written the way QuestieDB's baked .toc is: CBOR rows, base64, and a zlib'd
 ID list, with long values split into "~N~" chunks."""
 
+import asyncio
 import base64
+import importlib
 import struct
 import zlib
 
 import pytest
 
-from wow_mcp import questie
+from wow_mcp import app, questie
 from wow_mcp.tools import questie as tools
 
 
@@ -64,13 +66,30 @@ NPCS = {
     252691: {1: b"Adarien", 7: {2657: [[42.79, 70.48], [44.0, 72.36]]}, 14: b"Innkeeper", 15: 128},
     883: {1: b"Deer", 4: 1, 5: 1, 7: {433: [[27.13, 21.82]]}, 13: b"AH"},
     9001: {1: b"Gath'Ilzogg", 7: {44: [[-1, -1]]}},
+    3125: {1: b"Clattering Scorpid", 7: {1637: [[10.0, 10.0], [11.0, 12.0], [12.0, 10.5], [80.0, 80.0]]}, 13: b""},
+    3143: {1: b"Gornek", 7: {1637: [[42.0, 68.0]]}, 13: b"H", 15: 2},
+    4000: {1: b"Ally Giver", 7: {1637: [[41.0, 68.0]]}, 13: b"A", 15: 2},
 }
 OBJECTS = {60: {1: b"Wanted: Gath'Ilzogg", 2: [7001], 4: {44: [[24.53, 46.16]]}}}
+ITEMS = {5466: {1: b"Scorpid Stinger", 2: [3125], 14: [3143], 6: [7001]}}
+H, A = 2 + 16 + 32 + 128 + 2 ** 33, 1 + 4 + 8 + 64 + 2 ** 32  # all Horde / all Alliance races
 QUESTS = {
     7001: {1: b"WANTED: Gath'Ilzogg", 2: [None, [60]], 3: [[3365]], 4: 15, 5: 26,
            8: [b"Kill Gath'Ilzogg and bring his head."], 10: {1: [[9001]]}, 13: [7000], 22: 7002},
     7000: {1: b"Gathering Idols", 2: [[3365]], 3: [[3365]], 5: 18},
     7002: {1: b"Gath's Revenge", 5: 27},
+    # Quests Gornek and others give in Orgrimmar (area 1637), for find_available_quests.
+    8001: {1: b"Sting Them", 2: [[3143]], 3: [[3143]], 4: 4, 5: 6, 6: H, 8: [b"Bring 4 Scorpid Stingers."],
+           10: {3: [[5466, None, 0]]}},
+    8002: {1: b"Too High", 2: [[3143]], 4: 20, 5: 22},
+    8003: {1: b"Done Already", 2: [[3143]], 4: 1, 5: 5},
+    8004: {1: b"Needs Done Already", 2: [[3143]], 4: 1, 5: 6, 13: [8003]},
+    8005: {1: b"Needs Something Else", 2: [[3143]], 4: 1, 5: 6, 12: [8003, 7000]},
+    8006: {1: b"Alliance Only", 2: [[4000]], 4: 1, 5: 6, 6: A},
+    8007: {1: b"Mages Only", 2: [[3143]], 4: 1, 5: 6, 7: 128},
+    8008: {1: b"Gray", 2: [[3143]], 4: 1, 5: 1},
+    8009: {1: b"Blacklisted", 2: [[3143]], 4: 1, 5: 6},
+    8010: {1: b"Explore", 2: [[3143]], 3: [[3143]], 4: 1, 5: 7, 9: [b"Scout the hill.", {1637: [[50.0, 50.0]]}]},
 }
 AREAS = """\
 ZoneDB.private.areaIdToUiMapIdOverride = [[return {
@@ -92,7 +111,7 @@ def write_questie(addons_dir, contract=4, mode="baked", flavour="Forever", chunk
     (folder / "support" / flavour / "Zones" / "areaIdToUiMapId.lua").write_text(AREAS)
     lines = ["## Interface: 16001", "## Title: QuestieDB", f"## X-Contract-Version: {contract}",
              f"## X-Flavor: {flavour}", f"## X-Mode: {mode}"]
-    for kind, table in (("Npc", NPCS), ("Object", OBJECTS), ("Quest", QUESTS)):
+    for kind, table in (("Npc", NPCS), ("Object", OBJECTS), ("Quest", QUESTS), ("Item", ITEMS)):
         ids = base64.b64encode(zlib.compress(cbor(list(table)))).decode()
         if chunk_ids:  # long values come in parts
             third = len(ids) // 3 + 1
@@ -112,6 +131,33 @@ def with_questie(addons):
     questie._cache.clear()
     write_questie(addons)
     return addons
+
+
+def write_blacklist(addons_dir):
+    folder = addons_dir / "Questie" / "Database" / "Corrections"
+    folder.mkdir(parents=True)
+    (folder / "QuestieQuestBlacklist.lua").write_text(
+        "    local questsToBlacklist = {\n"
+        "        [8009] = true, -- not in the game\n"
+        "        [8008] = Expansions.Current >= Expansions.Cata,\n"
+        "        [3861] = HIDE_ON_MAP,\n"
+    )
+
+
+def in_game(monkeypatch, level=12, race="Orc", player_class="Warrior", faction="Horde", log=(), completed=()):
+    """The game's answers to the STATE and QUESTS requests (Player.lua, Quests.lua)."""
+    state = {"location": {"zone": "Orgrimmar", "mapID": 1454, "x": 42.5, "y": 68.5},
+             "character": {"level": level, "race": race, "class": player_class, "faction": faction}}
+    gaps, last = [], 0
+    for id in sorted(completed):
+        gaps.append(id - last)
+        last = id
+    quests = {"quests": {"completedGaps": gaps, "log": list(log)}}
+
+    async def request(kind):
+        return (state if kind == 0 else quests), "World of Warcraft: Forever"
+
+    monkeypatch.setattr(tools, "request", request)
 
 
 def test_reads_the_baked_database(with_questie):
@@ -203,5 +249,96 @@ def test_newer_contract_and_unchunked_values(addons):
 def test_bridge_status_line_names_the_lookups():
     from wow_mcp import bridge
 
-    assert bridge.tool_step("mcp__wow__find_npc") == "looking up NPCs"
-    assert bridge.tool_step("mcp__wow__find_quest") == "looking up quests"
+    assert bridge.tool_step("mcp__wow__find_npc") == "looking up places"
+    assert bridge.tool_step("mcp__wow__find_item") == "looking up items"
+    assert bridge.tool_step("mcp__wow__find_available_quests") == "looking for quests nearby"
+
+
+def test_find_item(with_questie):
+    item = tools.find_item("stinger")
+    assert item.splitlines()[1:] == [
+        "- Scorpid Stinger (item 5466)",
+        "  sold by: Gornek (NPC 3143)",
+        "    Orgrimmar 42.0, 68.0, map_id 1454",
+        "  dropped by: Clattering Scorpid (NPC 3125)",
+        "    Orgrimmar 10.0, 10.0; 11.0, 12.0; 12.0, 10.5; 80.0, 80.0, map_id 1454",
+        "  reward from: WANTED: Gath'Ilzogg (7001)",
+    ]
+    elsewhere = tools.find_item("5466", zone="Durotar")
+    assert "sold by" not in elsewhere and "dropped by" not in elsewhere and "reward from" in elsewhere
+
+
+def test_find_available_quests(with_questie, monkeypatch):
+    write_blacklist(with_questie)
+    in_game(monkeypatch, level=8, completed=[8003])
+    found = asyncio.run(tools.find_available_quests())
+    names = [line for line in found.splitlines() if line.startswith("- ")]
+    # Not: too high, done, a prerequisite missing, Alliance's, a mage's, Questie's blacklist, gray for level 8.
+    # Closest first, then lowest level.
+    assert names == ["- Sting Them (quest 8001; level 6, needs 4)", "- Needs Done Already (quest 8004; level 6, needs 1)",
+                     "- Explore (quest 8010; level 7, needs 1)", "- Gathering Idols (quest 7000; level 18)"]
+    assert "    from Gornek (NPC 3143): Orgrimmar 42.0, 68.0, map_id 1454, 1% of the map away" in found
+    assert "    from Karolek (NPC 3365): Orgrimmar 62.81, 44.15, map_id 1454, 32% of the map away" in found
+    assert "Quests Horde level 8 can pick up in Orgrimmar, closest first (4 in all; 1 gray left out)" in found
+    assert "Gray (quest 8008" in asyncio.run(tools.find_available_quests(include_gray=True))
+    # In the log already, or another zone.
+    in_game(monkeypatch, level=8, completed=[8003], log=[{"id": 8001}])
+    assert "Sting Them" not in asyncio.run(tools.find_available_quests())
+    assert "No quest to pick up in Elwynn" in asyncio.run(tools.find_available_quests(zone="Elwynn"))
+    # An Alliance mage sees theirs and the mage quest; Horde's are left out by race.
+    in_game(monkeypatch, level=6, race="Human", player_class="Mage", faction="Alliance")
+    found = asyncio.run(tools.find_available_quests())
+    assert "Alliance Only" in found and "Sting Them" not in found
+    assert "Mages Only" not in found  # its giver, Gornek, is Horde's
+    # Skyborne have a race bit per faction.
+    in_game(monkeypatch, level=6, race="Skyborne", faction="Horde")
+    assert "Sting Them" in asyncio.run(tools.find_available_quests())
+
+
+def test_quest_log_locations(with_questie, monkeypatch):
+    in_game(monkeypatch, log=[
+        {"id": 8001, "title": "Sting Them", "objectives": [{"text": "Scorpid Stinger: 1/4", "finished": False}]},
+        {"id": 7001, "title": "WANTED: Gath'Ilzogg", "ready": True},
+        {"id": 8010, "title": "Explore"},
+        {"id": 99999, "title": "Unknown To Questie"},
+    ])
+    lines = asyncio.run(tools.get_quest_log_locations()).splitlines()
+    assert lines[2:] == [
+        "- Sting Them (quest 8001)",
+        "    collect Scorpid Stinger (item 5466) from Clattering Scorpid",
+        "      Orgrimmar around 11.0, 10.8 radius 2.3 (3 spawns, map_id 1454)",
+        "      Orgrimmar around 80.0, 80.0 radius 2.0 (1 spawn, map_id 1454)",
+        "- WANTED: Gath'Ilzogg (quest 7001; ready to turn in)",
+        "  turn in at: Karolek (NPC 3365)",
+        "    Orgrimmar 62.81, 44.15, map_id 1454",
+        "- Explore (quest 8010)",
+        "    Scout the hill.",
+        "      Orgrimmar around 50.0, 50.0 radius 2.0 (1 spawn, map_id 1454)",
+        "- Unknown To Questie (quest 99999): not in Questie's database; look it up on the web.",
+    ]
+    in_game(monkeypatch, log=[{"id": 8001, "objectives": [{"text": "Scorpid Stinger: 4/4", "finished": True}]}])
+    assert "    done: collect Scorpid Stinger (item 5466) from Clattering Scorpid" in \
+        asyncio.run(tools.get_quest_log_locations())
+
+
+def test_clusters():
+    a, b = questie.clusters([(10, 10), (14, 10), (18, 10), (60, 60)])
+    assert (a.x, a.y, a.count) == (14.0, 10.0, 3) and a.radius == 5.0
+    assert (b.x, b.y, b.radius, b.count) == (60.0, 60.0, 2.0, 1)
+
+
+def test_tools_offered_only_with_questie(addons, monkeypatch):
+    def offered():
+        monkeypatch.setattr(app, "TOOLS", [])
+        monkeypatch.setattr(app, "GUIDANCE", [])
+        importlib.reload(tools)
+        return sorted(fn.__name__ for fn, _ in app.TOOLS), len(app.GUIDANCE)
+
+    try:
+        assert offered() == ([], 0)
+        questie._cache.clear()
+        write_questie(addons)
+        assert offered() == (["find_available_quests", "find_item", "find_npc", "find_object", "find_quest",
+                              "get_quest_log_locations"], 1)
+    finally:
+        importlib.reload(tools)
