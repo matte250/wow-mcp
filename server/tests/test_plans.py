@@ -2001,7 +2001,7 @@ def test_hovering_a_step_shows_its_npcs(game):
     """)
 
 
-def test_shift_click_removes_the_plan_steps_area(game):
+def test_right_click_removes_the_plan_steps_area(game):
     game(r"""
         client.LoadAddon()
         client.Wait()
@@ -2012,9 +2012,7 @@ def test_shift_click_removes_the_plan_steps_area(game):
         client.Wait(2)
         WorldMapFrame:SetMapID(1411)
         assert(#client.Pins(AREA) == 1 and #client.Pins(STOP) == 3)
-        client.shift = true
-        assert(client.ClickMap("LeftButton", 0.56, 0.45))
-        client.shift = false
+        assert(client.ClickMap("RightButton", 0.56, 0.45))
         assert(#client.Pins(AREA) == 0 and #client.Pins(STOP) == 3 and has("Removed the area"), chat())
         Reload()
         assert(#client.Pins(AREA) == 0 and #client.Pins(STOP) == 3, "stays removed through a /reload")

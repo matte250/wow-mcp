@@ -115,7 +115,7 @@ function Pin:OnMouseEnter()
 	if a.yards then
 		GameTooltip:AddLine(string.format("About %d yards across", math.floor(2 * a.yards + 0.5)), 0.7, 0.7, 0.7)
 	end
-	if self:GetMap().AddCanvasClickHandler then GameTooltip:AddLine("Shift-click to remove it", 0.4, 0.8, 1) end
+	if self:GetMap().AddCanvasClickHandler then GameTooltip:AddLine("Right-click or shift-click to remove it", 0.4, 0.8, 1) end
 	GameTooltip:Show()
 end
 
@@ -174,11 +174,12 @@ local function AreaAt(map, cx, cy)
 	return best
 end
 
--- Shift-click on a circle removes it. The circles let clicks through to the map (a big one would
--- otherwise take the clicks that zoom in and out), so this is a click handler on the map itself.
+-- Right-click (or shift-click) on a circle removes it; a right-click outside the circles still
+-- zooms out. The circles let clicks through to the map (left-clicks inside them still zoom in),
+-- so this is a click handler on the map itself.
 local function OnMapClick(map, button, cx, cy)
-	if not (IsShiftKeyDown and IsShiftKeyDown()) then return false end
-	if button ~= "LeftButton" and button ~= "RightButton" then return false end
+	local shift = IsShiftKeyDown and IsShiftKeyDown()
+	if button ~= "RightButton" and not (shift and button == "LeftButton") then return false end
 	local a = AreaAt(map, cx, cy)
 	if not a then return false end
 	Areas.Remove(a)
@@ -296,7 +297,7 @@ function Areas.Unguide()
 	RefreshPins()
 end
 
--- Removes one circle (shift-click on the map) until the AI sends new ones, or, for a plan step's,
+-- Removes one circle (right-click on the map) until the AI sends new ones, or, for a plan step's,
 -- until another step's come up.
 function Areas.Remove(a)
 	local list, record

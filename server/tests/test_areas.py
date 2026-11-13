@@ -188,7 +188,7 @@ def test_area_pins_in_combat_block_nothing(run_areas):
     """)
 
 
-def test_shift_click_removes_a_circle(run_areas):
+def test_right_click_removes_a_circle(run_areas):
     run_areas(r"""
         client.LoadAddon()
         client.Wait()
@@ -203,20 +203,24 @@ def test_shift_click_removes_a_circle(run_areas):
 
         -- The tooltip says how.
         client.Pins(AREA)[1]:OnMouseEnter()
-        assert(table.concat(client.tooltip.lines, "|"):find("Shift-click to remove it", 1, true))
+        assert(table.concat(client.tooltip.lines, "|"):find("Right-click or shift-click to remove it", 1, true))
 
-        -- A plain click is the map's (zooming); so is a shift-click beside the circles.
+        -- A left-click is the map's (zooming in); so is a right-click beside the circles (zooming out).
         assert(not client.ClickMap("LeftButton", 0.55, 0.5))
+        assert(not client.ClickMap("RightButton", 0.9, 0.9))
         client.shift = true
         assert(not client.ClickMap("LeftButton", 0.9, 0.9))
+        client.shift = false
         assert(labels() == "Boars,Bank")
 
-        -- Inside the bank, which also lies inside the boars: the smaller one goes.
+        -- A right-click inside the bank, which also lies inside the boars: the smaller one goes.
         assert(client.ClickMap("RightButton", 0.3, 40 / 300))
         assert(labels() == "Boars" and chat():find("Removed the area |cff", 1, true) and chat():find("Bank|r.", 1, true), chat())
+        -- Shift-click works too.
+        client.shift = true
         assert(client.ClickMap("LeftButton", 0.55, 0.52))
-        assert(labels() == "")
         client.shift = false
+        assert(labels() == "")
 
         -- Removed stays removed through a /reload, on every map.
         wipe(client.loaded); wipe(client.tickers); wipe(client.timers); wipe(client.frames); wipe(client.chat); wipe(client.opened)
