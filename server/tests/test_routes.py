@@ -401,3 +401,34 @@ def test_route_pins_in_combat_block_nothing(run_route):
         WorldMapFrame:SetMapID(WorldMapFrame:GetMapID())
         assert(#WorldMapFrame.pins > 0 and not client.blocked, "blocked in combat: " .. tostring(client.blocked))
     """)
+
+
+def test_right_click_on_a_stop_removes_the_route(run_route):
+    run_route(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish(TURN_INS)
+        client.Wait()
+        local nav = WowMCPRouteNavigator
+        local stop = client.Pins(STOP)[2]
+        assert(stop and nav:IsShown() and client.waypoint)
+        -- Its right-clicks are its own, not the map's zoom-out.
+        assert(stop.passThrough and #stop.passThrough == 0, "right-clicks stay on the stop")
+        stop:OnMouseEnter()
+        assert(table.concat(client.tooltip.lines, "|"):find("Right-click to remove the route", 1, true))
+
+        stop:OnClick("RightButton")
+        assert(#client.Pins(STOP) == 0 and #client.Pins(LINE) == 0 and not nav:IsShown() and client.waypoint == nil)
+        assert(chat():find("Route hidden. /mcp route show brings it back.", 1, true))
+        SlashCmdList.WOWMCP("route show")
+        assert(#client.Pins(STOP) == 3 and nav:IsShown())
+
+        -- Shift-click too, also on the classic map canvas; a plain click still picks the stop.
+        client.classicCanvas = true
+        client.Pins(STOP)[3]:OnClick("LeftButton")
+        assert(nav.Title.text == "Turn-ins  3/3", nav.Title.text)
+        client.shift = true
+        client.Pins(STOP)[1]:OnClick("LeftButton")
+        client.shift = false
+        assert(#client.Pins(STOP) == 0 and not nav:IsShown())
+    """)
