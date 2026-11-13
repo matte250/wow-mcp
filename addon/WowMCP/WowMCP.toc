@@ -29,5 +29,6 @@ Auction.lua
 Reminders.lua
 Tooltips.lua
 Status.lua
+SlashHelp.lua
 Build.lua
 Inbox.lua

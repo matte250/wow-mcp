@@ -516,13 +516,20 @@ COMMANDS.effort = COMMANDS.thinking
 -- Asking
 ---------------------------------------------------------------------------
 
+-- The /ai commands, as /ai alone lists them (and the list of commands when typing /, SlashHelp.lua).
+function AIChat.Usages()
+	return {
+		"/ai <question> - ask the AI (or type in its chat tab), e.g. /ai where can I learn leatherworking?",
+		"/ai new - start a fresh conversation (it remembers your recent questions for follow-ups)",
+		"/ai model [name] - which Claude model answers (" .. Ids(MODEL) .. "); the AI tab has a picker too",
+		"/ai thinking [level] - how hard the AI thinks (" .. Ids(EFFORT) .. "); also on the AI tab's picker",
+	}
+end
+
 local function Ask(input)
 	local typed = strtrim(input or "")
 	if typed == "" then
-		Say("/ai <question> - ask the AI (or type in its chat tab), e.g. /ai where can I learn leatherworking?")
-		Say("/ai new - start a fresh conversation (it remembers your recent questions for follow-ups)")
-		Say("/ai model [name] - which Claude model answers (" .. Ids(MODEL) .. "); the AI tab has a picker too")
-		Say("/ai thinking [level] - how hard the AI thinks (" .. Ids(EFFORT) .. "); also on the AI tab's picker")
+		for _, usage in ipairs(AIChat.Usages()) do Say(usage) end
 		return
 	end
 	local lower = typed:lower()
