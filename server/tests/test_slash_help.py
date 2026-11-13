@@ -109,3 +109,42 @@ def test_mcp_help(run_client):
         printed = table.concat(client.chat, "\n", before + 1)
         assert(Has(printed, "/ai thinking [level]"), printed)
     """)
+
+
+def test_other_addons_commands(run_client):
+    """Other addons' commands that start with what's typed, by name and addon; not Blizzard's own."""
+    run_client(HELPERS + r"""
+        local ns = client.LoadAddon()
+        client.Wait()
+        -- Prat's (as AceConsole registers them), Questie's, and one of Blizzard's: secure.
+        SlashCmdList.ACECONSOLE_CLEAR, SLASH_ACECONSOLE_CLEAR1, SLASH_ACECONSOLE_CLEAR2 = function() end, "/clear", "/CLS"
+        SlashCmdList.QUESTIE, SLASH_QUESTIE1 = function() end, "/questie"
+        SlashCmdList.RELOAD, SLASH_RELOAD1 = function() end, "/reload"
+        issecurevariable = function(t, key)
+            if t ~= SlashCmdList then return true end
+            if key == "RELOAD" then return true end
+            return false, key == "QUESTIE" and "Questie" or (key:find("^WOWMCP") and "WowMCP" or "Prat-3.0")
+        end
+        local Shown = ns.SlashHelp.Shown
+
+        -- "/" alone: ours, and how many others there are.
+        Typing("/")
+        assert(Has(Shown(), "/mcp status") and Has(Shown(), "And 2 commands of other addons"), Shown())
+        assert(not Has(Shown(), "/questie"), Shown())
+        -- Typing on: theirs that match, with the addon; ours too when they match.
+        Typing("/c")
+        local list = Shown()
+        assert(Has(list, "/clear, /cls") and Has(list, "(Prat-3.0)") and not Has(list, "/mcp") and not Has(list, "/questie"), list)
+        Typing("/q")
+        assert(Has(Shown(), "/questie") and Has(Shown(), "(Questie)"), Shown())
+        -- Not Blizzard's own, and not ours twice.
+        Typing("/re")
+        assert(not Shown(), tostring(Shown()))
+        Typing("/m")
+        list = Shown()
+        assert(Has(list, "/mcp status") and not Has(list, "Other addons") and not Has(list, "(WowMCP)"), list)
+        -- Their arguments aren't known: past the name, theirs go.
+        Typing("/clear ")
+        assert(not Shown(), tostring(Shown()))
+        issecurevariable = nil
+    """)

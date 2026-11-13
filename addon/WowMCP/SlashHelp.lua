@@ -3,6 +3,10 @@
 -- all; "/mcp r" the /mcp commands that start with r; "/mcp route " what /mcp route takes. Anything
 -- else (/s, /w, /cast, a plain line) hides it. /mcp help prints the same list in the chat.
 --
+-- Under them, other addons' commands that start with what's typed (Prat's /clear, Questie's
+-- /questie, ...), by name and addon only: an addon doesn't say what its commands do. Read from the
+-- game's list of slash commands, so no addon is needed; Blizzard's own commands are left out.
+--
 -- Like the AI tab's typing (Chat.lua), it leaves Blizzard's chat box alone: no hooks on its
 -- methods or scripts. It hears when a box gets focus and loses it (EventRegistry's chat box events)
 -- and meanwhile reads the box's text once a frame, from a frame of its own. The list is a frame of
@@ -17,6 +21,8 @@ local COMMAND = "|cffffd200" -- the command, in the gold of the game's own help
 local NOTE = "|cffaaaaaa"
 local TITLE = "|cff8fc8ffWowMCP|r"
 local MAX_NOTES = 8              -- more matches than this: the commands only, a line each
+local MAX_OTHERS = 10            -- other addons' commands listed at most
+local OURS = { WOWMCP = true, WOWMCPAI = true }
 local WIDTH, PAD, GAP = 400, 6, 4 -- px: when the box can't say how wide it is; padding; space over the box
 
 -- Each command name and the names that also run it.
@@ -116,8 +122,51 @@ function SlashHelp.Matches(text, entries)
 	return #found > 0 and found or nil
 end
 
--- The list's text: with what each does while there are few, the commands only while there are many.
-function SlashHelp.Text(found)
+-- Other addons' commands: { names = { "/clear", "/cls" }, addon = "Prat-3.0" }, by first name. Blizzard's
+-- own are secure; one an addon added says which (issecurevariable). A client without it: all of them.
+function SlashHelp.Others()
+	local others = {}
+	for key in pairs(SlashCmdList) do
+		local secure, addon = true, nil
+		if issecurevariable then secure, addon = issecurevariable(SlashCmdList, key) else secure = false end
+		if not secure and not OURS[key] then
+			local names, i = {}, 1
+			while type(_G["SLASH_" .. key .. i]) == "string" do
+				local name = _G["SLASH_" .. key .. i]:lower()
+				local seen = false
+				for _, n in ipairs(names) do seen = seen or n == name end
+				if not seen then names[#names + 1] = name end
+				i = i + 1
+			end
+			if #names > 0 then others[#others + 1] = { names = names, addon = addon } end
+		end
+	end
+	table.sort(others, function(a, b) return a.names[1] < b.names[1] end)
+	return others
+end
+
+-- The other addons' commands a command name being typed starts (from two characters: "/" alone
+-- would be all of them).
+function SlashHelp.OtherMatches(text, others)
+	if type(text) ~= "string" then return {} end
+	local typed = text:lower():match("^%s*(/%S+)$")
+	local found = {}
+	if not typed then return found end
+	for _, other in ipairs(others) do
+		for _, name in ipairs(other.names) do
+			if name:sub(1, #typed) == typed then
+				found[#found + 1] = other
+				break
+			end
+		end
+	end
+	return found
+end
+
+-- The list's text: with what each does while there are few, the commands only while there are many;
+-- then the other addons' commands that match (more, while only "/" is typed).
+function SlashHelp.Text(found, others, more)
+	found = found or {}
 	local lines = { TITLE }
 	local notes = #found <= MAX_NOTES
 	for _, entry in ipairs(found) do
@@ -128,6 +177,19 @@ function SlashHelp.Text(found)
 		lines[#lines + 1] = line
 	end
 	if not notes then lines[#lines + 1] = NOTE .. "Keep typing to see what each does.|r" end
+	if others and #others > 0 then
+		lines[#lines + 1] = NOTE .. "Other addons:|r"
+		for i, other in ipairs(others) do
+			if i > MAX_OTHERS then
+				lines[#lines + 1] = NOTE .. "... and " .. (#others - MAX_OTHERS) .. " more, keep typing.|r"
+				break
+			end
+			lines[#lines + 1] = COMMAND .. table.concat(other.names, ", ") .. "|r"
+				.. (other.addon and NOTE .. " (" .. other.addon .. ")|r" or "")
+		end
+	elseif more and more > 0 then
+		lines[#lines + 1] = NOTE .. "And " .. more .. " commands of other addons: type their first letter.|r"
+	end
 	return table.concat(lines, "\n")
 end
 
@@ -137,6 +199,7 @@ end
 
 local list    -- the frame, made when first needed
 local watched -- the chat box with focus
+local others  -- other addons' commands, read when a chat box gets focus
 local shownFor -- the text the list was made for
 local watcher = CreateFrame("Frame")
 
@@ -169,12 +232,14 @@ local function Update(box)
 	local text = Text(box)
 	if text == shownFor then return end
 	local found = SlashHelp.Matches(text, SlashHelp.Entries())
-	if not found then return Hide() end
+	local theirs = SlashHelp.OtherMatches(text, others or {})
+	if not found and #theirs == 0 then return Hide() end
+	local more = type(text) == "string" and text:match("^%s*/$") and #(others or {}) or nil
 	if not list then Make() end
 	local width = box.GetWidth and box:GetWidth() or 0
 	if width < 200 then width = WIDTH end
 	list.text:SetWidth(width - 2 * PAD)
-	list.text:SetText(SlashHelp.Text(found))
+	list.text:SetText(SlashHelp.Text(found, theirs, more))
 	list:SetSize(width, list.text:GetStringHeight() + 2 * PAD)
 	list:ClearAllPoints()
 	list:SetPoint("BOTTOMLEFT", box, "TOPLEFT", 0, GAP)
@@ -189,6 +254,7 @@ end
 
 local function OnFocus(_, box)
 	watched = box
+	others = SlashHelp.Others()
 	shownFor = false -- not any text: update now
 	Update(box)
 	watcher:SetScript("OnUpdate", Watch)
