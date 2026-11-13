@@ -158,6 +158,7 @@ function StopPin:OnMouseEnter()
 	local yards = ns.Map.Distance(s)
 	if yards then GameTooltip:AddLine(string.format("%d yards away", math.floor(yards + 0.5)), 0.7, 0.7, 0.7) end
 	GameTooltip:AddLine("Click to make this the current stop", 0.4, 0.8, 1)
+	GameTooltip:AddLine(s.track.guided and "Right-click to remove these directions" or "Right-click to remove the route", 0.4, 0.8, 1)
 	GameTooltip:Show()
 end
 
@@ -167,9 +168,18 @@ end
 
 function StopPin:OnClick(...) ns.Map.PinOnClick(self, ...) end -- see Map.lua
 
+-- Right-clicks are for removing the route, not for zooming the map out (as Map.lua's markers).
+function StopPin:ShouldMouseButtonBePassthrough()
+	return false
+end
+
 function StopPin:OnMouseClickAction(button)
 	self.clickActionRan = true
-	if button == "LeftButton" then Routes.GoTo(self.stop.n, self.stop.track) end
+	if button == "RightButton" or (button == "LeftButton" and IsShiftKeyDown and IsShiftKeyDown()) then
+		Routes.Hide(self.stop.track)
+	elseif button == "LeftButton" then
+		Routes.GoTo(self.stop.n, self.stop.track)
+	end
 end
 
 function LinePin:OnLoad()
@@ -660,7 +670,12 @@ function Routes.Show()
 end
 
 function Routes.Stop()
-	local t = Target()
+	Routes.Hide(Target())
+end
+
+-- Hides a track (the route, or a guide's directions): its stops, lines, navigator and waypoint,
+-- until /mcp route show or a new one. Right-click on a stop does this too.
+function Routes.Hide(t)
 	if NoRoute(t) then return end
 	t.Saved().hidden = true
 	ClearWaypoint()
