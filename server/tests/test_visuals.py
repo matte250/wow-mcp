@@ -1363,10 +1363,13 @@ def test_a_named_visual_is_replaced_in_place(addons, monkeypatch):
                            "2 columns). It stays under a tab of its own until it's removed (remove_visual).")
     assert f"Refresh: {REFRESH!r}, when the player clicks Refresh." in made
     visuals.visualize("Worth flipping", TEXT, name="Flip list")
-    # The same name, in any case: replaced where it is, keeping its name and refresh instructions.
-    again = visuals.visualize("My auctions, now", TEXT, name="auction TRACKER", subtitle="Just now")
+    # The same name, in any case: replaced where it is, keeping its name and refresh instructions (here in another
+    # layout, as if the player asked for it).
+    again = visuals.visualize("My auctions, now", TEXT, name="auction TRACKER", subtitle="Just now",
+                              change_layout=True)
     assert again.startswith("The named visual 'Auction tracker' was updated in place (#4): 'My auctions, now', with a "
-                            "text. It keeps its tab in the game's window, and the player's sort, scroll and size.")
+                            "text. It keeps its tab in the game's window, and the player's sort, scroll and size. Its "
+                            "layout changed to: 1) a text without a heading. Say in your answer what changed.")
     sent = state(addons)["visuals"]
     assert sent["id"] == 4 and [v["title"] for v in sent["list"]] == ["Gloves"]
     assert [v["name"] for v in sent["named"]] == ["Auction tracker", "Flip list"]
@@ -1422,10 +1425,10 @@ def test_named_visuals_stay_apart_from_the_temporary_ones(addons, monkeypatch):
     # ... and all of them together.
     half = {**big, "rows": big["rows"][:100]}
     monkeypatch.setattr(visuals, "MAX_NAMED_KEPT", 30_000)
-    visuals.visualize("Half", [half], name="View 2")
+    visuals.visualize("Half", [half], name="View 2", change_layout=True)
     before = state(addons)
     with pytest.raises(ToolError, match=r"the named visuals would take \d+ KB together, and at most 30 KB fit"):
-        visuals.visualize("Half", [half], name="View 3")
+        visuals.visualize("Half", [half], name="View 3", change_layout=True)
     assert state(addons) == before, "nothing sent"
 
 
@@ -1553,3 +1556,132 @@ def test_named_guidance():
     text = next(t for order, t in app.GUIDANCE if order == 68)
     assert "list_visuals" in text and "refresh instructions" in text and "refresh_minutes only when" in text
     assert "named visual" in bridge.SYSTEM_PROMPT and "list_visuals" in bridge.SYSTEM_PROMPT
+
+
+# Kinds and layouts of named visuals ---------------------------------------------------------------------------------
+
+FLIPS = [table([col("Item", "item"), col("Profit", "money")], [[18731, 4500]], heading="Flips"),
+         {"type": "list", "heading": "Suggestions", "items": [{"text": "None right now"}], "value_type": "money"}]
+FLIPS_LAYOUT = ("1) a table headed 'Flips', columns 'Item' (item), 'Profit' (money); 2) a list headed 'Suggestions', "
+                "values of type money")
+
+
+def flips(rows=((18731, 4500),), heading="Flips", columns=None, suggestions="money", **more):
+    """FLIPS with other contents, or another shape."""
+    columns = columns or [col("Item", "item"), col("Profit", "money")]
+    return [table(columns, [list(r) for r in rows], heading=heading, **more),
+            {"type": "list", "heading": "Suggestions", "items": [{"text": "Bronze Tube", "value": 900}],
+             "value_type": suggestions}]
+
+
+def test_a_named_visual_keeps_its_layout(addons):
+    made = visuals.visualize("Good flips", FLIPS, name="Good flips", refresh=REFRESH)
+    assert "Its layout (blocks and columns) stays: refreshes change only what's in it." in made
+    # Kept in its state, with its blocks.
+    assert visuals.layout(named(addons)[0]["blocks"]) == [
+        {"type": "table", "heading": "Flips", "columns": [
+            {"name": "Item", "type": "item", "align": "left", "unit": None},
+            {"name": "Profit", "type": "money", "align": "right", "unit": None}]},
+        {"type": "list", "heading": "Suggestions", "value": {"type": "money", "unit": None}},
+    ]
+    assert visuals.describe_layout(visuals.layout(named(addons)[0]["blocks"])) == FLIPS_LAYOUT
+
+    # New contents in the same layout: rows, values, items, the title, subtitle and totals. An alignment given as the
+    # one it had anyway is the same layout.
+    again = visuals.visualize("Good flips, now", flips(rows=[(4470, 300), (2320, -20)], totals=["Total", 280],
+                                                       columns=[col("Item", "item"), col("Profit", "money",
+                                                                                         align="right")]),
+                              name="good flips", subtitle="Just now")
+    assert again.startswith("The named visual 'Good flips' was updated in place") and "layout" not in again
+    assert len(named(addons)[0]["blocks"][0]["rows"]) == 2
+
+    # Another shape is refused, nothing sent, with the layout to keep.
+    before = state(addons)
+    for blocks, differs in [
+        (flips(columns=[col("Profit", "money"), col("Item", "item")]),
+         "block 1 is a table headed 'Flips', columns 'Profit' (money), 'Item' (item)"),
+        (flips(columns=[col("Item", "item"), col("Profit", "money"), col("Listed", "number")], rows=[(1, 2, 3)]),
+         "columns 'Item' (item), 'Profit' (money), 'Listed' (number)"),
+        (flips(columns=[col("Item", "item"), col("Profit", "number")]), "'Profit' (number)"),
+        (flips(columns=[col("Item", "item"), col("Profit", "money", align="center")]),
+         "'Profit' (money, align center)"),
+        (flips(columns=[col("Item", "item"), col("Gain", "money")]), "'Gain' (money)"),
+        (flips(heading="Good flips"), "block 1 is a table headed 'Good flips'"),
+        (flips(suggestions="number"), "block 2 is a list headed 'Suggestions', values of type number"),
+        (flips()[:1], "1 block instead of 2"),
+        ([*flips(), {"type": "text", "text": "x"}], "3 blocks instead of 2; block 3 is a text without a heading"),
+    ]:
+        with pytest.raises(ToolError) as refused:
+            visuals.visualize("Good flips", blocks, name="Good flips")
+        error = str(refused.value)
+        assert error.startswith("Nothing was sent: the named visual 'Good flips' keeps its layout, and this version "
+                                "has another (") and differs in error, (differs, error)
+        assert f"Its layout: {FLIPS_LAYOUT}. Send it again in that shape" in error
+        assert "Only if the player asked to change what it shows" in error and "change_layout=true" in error
+    assert state(addons) == before
+
+    # When the player asks: change_layout, and the new one is kept from then on.
+    wider = flips(columns=[col("Item", "item"), col("Profit", "money"), col("Change", "delta", unit="percent")],
+                  rows=[(18731, 4500, 12)])
+    changed = visuals.visualize("Good flips", wider, name="Good flips", change_layout=True)
+    assert ("Its layout changed to: 1) a table headed 'Flips', columns 'Item' (item), 'Profit' (money), 'Change' "
+            "(delta, in percent); 2) a list headed 'Suggestions', values of type money. Say in your answer what "
+            "changed.") in changed
+    with pytest.raises(ToolError, match=r"Its layout: 1\) a table headed 'Flips', columns 'Item' \(item\), 'Profit' "
+                                        r"\(money\), 'Change' \(delta, in percent\); 2\)"):
+        visuals.visualize("Good flips", FLIPS, name="Good flips")
+    assert visuals.visualize("Good flips", wider, name="Good flips", change_layout=True).count("layout") == 0
+    # Keeping it isn't refreshing it: the instructions stay too.
+    assert named(addons)[0]["refresh"] == REFRESH
+
+    # Temporary visuals have no layout to keep, and a new name starts its own.
+    visuals.visualize("Good flips", FLIPS)
+    visuals.visualize("Good flips", [{"type": "text", "text": "x"}])
+    assert visuals.visualize("Other", [{"type": "text", "text": "x"}], name="Other").startswith("Named visual 'Other'")
+
+
+def test_a_named_visual_shows_a_list_of_the_players_or_not(addons):
+    """A named visual is automatic, unless it's a curated view of a list of the player's (list)."""
+    automatic = visuals.visualize("My auctions", TEXT, name="Auction tracker", refresh=REFRESH)
+    assert "curated" not in automatic and "list" not in named(addons)[0]
+    curated = visuals.visualize("Good flips", FLIPS, name="Good flips", refresh=REFRESH, list="  good  flips ")
+    assert ("It's curated: it shows the player's list 'good flips' (get_list), every entry, and only the player "
+            "decides what's on it.") in curated
+    # Kept when left out, like the refresh instructions; '' makes it automatic again.
+    visuals.visualize("Good flips", FLIPS, name="Good flips")
+    assert named(addons)[1]["list"] == "good flips"
+    listed = visuals.list_visuals().named
+    assert [(v.name, v.list) for v in listed] == [("Auction tracker", None), ("Good flips", "good flips")]
+    assert listed[0].layout == "1) a text without a heading" and listed[1].layout == FLIPS_LAYOUT
+    automatic = visuals.visualize("Good flips", FLIPS, name="Good flips", list="")
+    assert "It's automatic now: no longer a view of a list." in automatic
+    assert "list" not in named(addons)[1] and visuals.list_visuals().named[1].list is None
+    # A list not made yet is fine: it shows empty, with suggestions.
+    visuals.visualize("Shopping", TEXT, name="Shopping", list="Shopping")
+    assert named(addons)[2]["list"] == "Shopping"
+
+
+@pytest.mark.parametrize("more, error", [
+    ({"list": "Good flips"}, "list is for named visuals: give it a name too"),
+    ({"name": "Good flips", "list": "---"}, "list: the name of the player's list it shows, e.g. 'Good flips'"),
+    ({"name": "Good flips", "list": "x" * 41}, "list: String should have at most 40 characters"),
+])
+def test_what_a_curated_view_must_be(addons, more, error):
+    with pytest.raises(ToolError) as caught:
+        visuals.visualize("Checked", TEXT, **more)
+    assert str(caught.value).startswith("Nothing was sent:") and error in str(caught.value), str(caught.value)
+    assert "visuals" not in state(addons)
+
+
+def test_named_kinds_and_layout_guidance():
+    from wow_mcp import app
+
+    text = [t for order, t in app.GUIDANCE if order == 68][1]
+    for said in ("Automatic (the default)", "Curated when the player wants control", "visualize's list",
+                 "If you can't tell which they want, ask them", "layout is set when it's made",
+                 "a table's columns (name, type, unit, alignment)", "only when the player asks",
+                 "change_layout=true and say in your answer what changed", "another shape is refused",
+                 "make every block it will need from the start"):
+        assert said in text, said
+    doc = " ".join(visuals.visualize.__doc__.split())
+    assert "in the layout it was made with" in doc and "curated" in doc

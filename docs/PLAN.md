@@ -31,6 +31,9 @@ only by the integrator, who merges the workstreams one by one.
 | W24 | The player's own auctions | `Auction.lua` (after the lookups, own do-block) | `tools/my_auctions.py` | KNOWLEDGE section `myAuctions` |
 | W25 | Visuals: tables, lists, texts in a window | `Messages.lua` (own do-block) | `tools/visuals.py` | payload key `visuals` |
 | W26 | Named visuals: kept under tabs, refreshed by the bridge | `Messages.lua` (visuals do-block) | `tools/visuals.py`, `bridge.py` | payload key `visuals` (`named`), stream posts `{refresh}`, `{remove}` |
+| W27 | Auction history: own sales, expiries, wins, listings, kept for good | – | `tools/auction_history.py` | KNOWLEDGE section `myAuctions`, ITEMS section `mail`; data `~/.local/share/wow-mcp/auction-history.jsonl` |
+| W28 | Spells and talents, spell details | `Player.lua` (own do-block) | `tools/spells.py` | REPUTATION sections `spellbook`, `talents`; payload key `spellLookup`, ITEM_DETAILS section `spellDetails` |
+| W29 | Lists the player owns; curated and automatic named views; fixed layouts | – | `tools/lists.py`, `tools/visuals.py`, `bridge.py` | data `~/.local/share/wow-mcp/lists.json`; named visual keys `list`, layout from blocks |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`
@@ -145,6 +148,21 @@ startup, so after the one restart for this restructure, every feature only needs
   `visualRemoved`. Posts `{ refresh = name, player, model?, effort? }` and `{ remove = name, player }`. Bridge:
   `Refresh`, `refresh_due()` every 60 s, `--no-visual-refresh`. Guidance order 68. Messages.lua's main chunk is
   at 158 of Lua's 200 locals.
+- **Auction history** (`tools/auction_history.py`): each call merges `myAuctions` (KNOWLEDGE) and `mail` (ITEMS) into
+  `auction-history.jsonl` in `memory.data_dir()`, append-only, one record per line: `{player, kind (sold, expired,
+  cancelled, won, listed), at, item, name, count, price (all of them)}` plus its source: `auction` (key id + kind),
+  `mail` (key kind, invoice name or attached item ID, count, price, expiry within 2 s) or `notice` (key kind, name,
+  time). Reading joins an auction's record, its mail and the notice into one event (same kind, item and count, within
+  a day). No verdicts: the AI combines it with vendor and auction prices. Guidance order 14.
+- **Lists** (`tools/lists.py`): `lists.json` in `memory.data_dir()` = `{player: [{name, description, at, entries}]}`, each entry `{item?, label?, note?, at, why?}`; at most 200 entries a list. Names match in any case. Tools take `player` (the bridge's asker) like the memory tools. Reading a list returns `RULE`: show every entry, change entries only when the player asks. Guidance order 69 (lists, then curated views).
+- **Named visual kinds and layouts**: a named visual is automatic unless it has `list` (the name of a list of the player's, ≤ 40 characters): then it's curated, and `Refresh.prompt(instructions, notes, layout, curated)` tells the refresh to show that list's entries, every one. The layout is derived from the blocks, not stored: `layout(blocks)` = each block's type and heading, a table's columns (name, type, unit, alignment), a list's value type; `describe_layout` words it for prompts. A new version of a named visual in another layout is refused unless `change_layout=true` (only when the player asks). Guidance order 68.
+- **Spells and talents**: REPUTATION sections `spellbook` = `{ class, level, tabs = { { name, kind, spells = { { id,
+  name, rank, passive, cd, lower, learn } } } }, problem }` and `talents` = `{ class, level, spec, role, unspent,
+  spent, group, groups, trees = { { name, spent, talents = { { name, spell, rank, max, tier, needs, after, open,
+  pending, choices } } } }, none, problem }`. They're on REPUTATION so STATE, asked before most answers, doesn't
+  carry them. Payload `spellLookup = { id, at, spells }` (at most 20); ITEM_DETAILS section `spellDetails`, answered
+  for 120 s, reused by the server for 90 s. Forever's talents are C_Traits, the class's trees as groups of one tree.
+  Guidance order 48.
 - **Mail data**: `WowMCPDB.mail["Name-Realm"] = { time, total, mails = { { from, subject, money, cod,
   expires, read, returned, returns, player, alt, gm, ah, sale = { item, count, player, price, deposit,
   fee, eta }, items = { { id, name, count, quality } } } } }`; ITEMS section `mail` = `{ inbox, open,
