@@ -189,7 +189,18 @@ function Pin:OnMouseLeave()
 	GameTooltip:Hide()
 end
 
+-- Newer map canvases pass a pin's clicks on from MapCanvasPinMixin:OnClick to OnMouseClickAction;
+-- the classic one only calls OnClick, which does nothing. Pins use this as their OnClick so their
+-- OnMouseClickAction runs on both, once (OnMouseClickAction sets pin.clickActionRan).
+function Map.PinOnClick(pin, ...)
+	pin.clickActionRan = nil
+	if MapCanvasPinMixin.OnClick then MapCanvasPinMixin.OnClick(pin, ...) end
+	if not pin.clickActionRan then pin:OnMouseClickAction(...) end
+end
+Pin.OnClick = Map.PinOnClick
+
 function Pin:OnMouseClickAction(button)
+	self.clickActionRan = true
 	if button == "RightButton" or (button == "LeftButton" and IsShiftKeyDown and IsShiftKeyDown()) then
 		Map.Remove(self.marker.index)
 	elseif button == "LeftButton" then

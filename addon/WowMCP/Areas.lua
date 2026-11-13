@@ -18,7 +18,9 @@ local PALETTE = {
 }
 
 local current     -- the payload being shown
-local areas = {}  -- resolved: an ns.Map.Locate location plus n, label, radius (0-1 of the map's width), yards, color
+-- resolved: an ns.Map.Locate location plus n, order (its place in the list sent), label,
+-- radius (0-1 of the map's width), yards, color
+local areas = {}
 local guided = {} -- set by another feature with Areas.Guide (Plans.lua: the current step's), shown with them
 local provider
 local mapAfterCombat
@@ -113,6 +115,7 @@ function Pin:OnMouseEnter()
 	if a.yards then
 		GameTooltip:AddLine(string.format("About %d yards across", math.floor(2 * a.yards + 0.5)), 0.7, 0.7, 0.7)
 	end
+	if self:GetMap().AddCanvasClickHandler then GameTooltip:AddLine("Right-click or shift-click to remove it", 0.4, 0.8, 1) end
 	GameTooltip:Show()
 end
 
@@ -150,11 +153,45 @@ local function RefreshPins()
 	if provider and provider:GetMap() then provider:RefreshAllData() end
 end
 
+-- The smallest circle on the map under a point of it (0-1), if any.
+local function AreaAt(map, cx, cy)
+	local mapID = map:GetMapID()
+	if not (mapID and cx and cy) then return end
+	local canvas = map:GetCanvas()
+	local w, h = canvas:GetWidth(), canvas:GetHeight()
+	local width = Width(mapID)
+	local best, bestRadius
+	for _, list in ipairs({ areas, guided }) do
+		for _, a in ipairs(list) do
+			local x, y = ns.Map.Project(a, mapID)
+			local radius = a.mapID == mapID and a.radius or (a.yards and width and a.yards / width)
+			if x and radius and ((cx - x) * w) ^ 2 + ((cy - y) * h) ^ 2 <= (radius * w) ^ 2
+				and (not best or radius < bestRadius) then
+				best, bestRadius = a, radius
+			end
+		end
+	end
+	return best
+end
+
+-- Right-click (or shift-click) on a circle removes it; a right-click outside the circles still
+-- zooms out. The circles let clicks through to the map (left-clicks inside them still zoom in),
+-- so this is a click handler on the map itself.
+local function OnMapClick(map, button, cx, cy)
+	local shift = IsShiftKeyDown and IsShiftKeyDown()
+	if button ~= "RightButton" and not (shift and button == "LeftButton") then return false end
+	local a = AreaAt(map, cx, cy)
+	if not a then return false end
+	Areas.Remove(a)
+	return true
+end
+
 local function AttachToWorldMap()
 	if provider or not WorldMapFrame then return end
 	WowMCPAreaPinMixin = CreateFromMixins(MapCanvasPinMixin, Pin) -- referenced by Areas.xml
 	provider = CreateProvider()
 	WorldMapFrame:AddDataProvider(provider)
+	if WorldMapFrame.AddCanvasClickHandler then WorldMapFrame:AddCanvasClickHandler(OnMapClick, 10) end
 end
 
 ---------------------------------------------------------------------------
@@ -186,6 +223,7 @@ local function Load(list, raw)
 		local a = type(r) == "table" and type(r.x) == "number" and type(r.y) == "number"
 			and ns.Map.Locate(r.zone, r.x, r.y, r.mapID)
 		if a then
+			a.order = i
 			a.label = tostring(r.label or ("Area " .. i))
 			a.radius = math.min(math.max(tonumber(r.radius) or 3, 0.1), 50) / 100
 			local width = Width(a.mapID)
@@ -200,6 +238,13 @@ local function Load(list, raw)
 	return missing
 end
 
+-- Takes the circles marked in gone ({ [order] = true }) out of list.
+local function Drop(list, gone)
+	for i = #list, 1, -1 do
+		if gone[list[i].order] then table.remove(list, i) end
+	end
+end
+
 -- Areas we've already announced (e.g. restored by a /reload) are shown quietly.
 function Areas.Receive(payload)
 	local isNew = payload.id ~= WowMCPDB.areasId
@@ -209,6 +254,13 @@ function Areas.Receive(payload)
 	local raw = type(payload.areas) == "table" and payload.areas or {}
 	local missing = Load(areas, raw)
 	if WowMCPDB.hiddenAreasId == payload.id then wipe(areas) end
+	-- The ones the player removed stay removed (WowMCPDB.removedAreas: { id, [order] = true }).
+	local gone = WowMCPDB.removedAreas
+	if gone and gone.id == payload.id then
+		Drop(areas, gone)
+	else
+		WowMCPDB.removedAreas = nil
+	end
 	RefreshPins()
 
 	if not isNew then return end
@@ -232,6 +284,8 @@ end
 function Areas.Guide(list, key, title)
 	local missing = Load(guided, type(list) == "table" and list or {})
 	if key ~= nil and key == WowMCPDB.hiddenGuidedAreas then wipe(guided) end
+	local gone = WowMCPDB.removedGuidedAreas -- { key, [order] = true }, as removedAreas
+	if key ~= nil and gone and gone.key == key then Drop(guided, gone) end
 	guided.key, guided.title = key, title
 	RefreshPins()
 	return missing
@@ -241,6 +295,40 @@ function Areas.Unguide()
 	if #guided == 0 then return end
 	wipe(guided)
 	RefreshPins()
+end
+
+-- Removes one circle (right-click on the map) until the AI sends new ones, or, for a plan step's,
+-- until another step's come up.
+function Areas.Remove(a)
+	local list, record
+	for _, l in ipairs({ areas, guided }) do
+		for i, other in ipairs(l) do
+			if other == a then
+				table.remove(l, i)
+				list = l
+				break
+			end
+		end
+		if list then break end
+	end
+	if not list then return end
+	if list == areas then
+		local id = current and current.id
+		record = WowMCPDB.removedAreas
+		if not record or record.id ~= id then
+			record = { id = id }
+			WowMCPDB.removedAreas = record
+		end
+	elseif guided.key ~= nil then
+		record = WowMCPDB.removedGuidedAreas
+		if not record or record.key ~= guided.key then
+			record = { key = guided.key }
+			WowMCPDB.removedGuidedAreas = record
+		end
+	end
+	if record then record[a.order] = true end
+	RefreshPins()
+	ns.Print(string.format("Removed the area %s%s|r.", ColorCode(a.color), ns.ItemText(a.label)))
 end
 
 function Areas.Command(rest)

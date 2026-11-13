@@ -117,6 +117,19 @@ def addons(wow_root, tmp_path, monkeypatch):
         opens_windows.stop(addons_dir / "WowMCP" / "out")
 
 
+def flat_bell(addons_dir):
+    """The bell as plain files for the stub client, which doesn't have Windows' link layout (bell.py): take the
+    installer's junctions away and tell the addon nothing of them."""
+    from wow_mcp import bell
+
+    folder = addons_dir / "WowMCP" / bell.FOLDER
+    for stem in (bell.LINK_CHECK, *bell.LINKS):
+        if (folder / stem).exists():
+            (folder / stem).rmdir()
+    build = addons_dir / "WowMCP" / "Build.lua"
+    build.write_text(build.read_text(encoding="utf-8").replace('ns.BELL = "links"\n', ""), encoding="utf-8")
+
+
 @pytest.fixture
 def run_client(addons, tmp_path):
     """Run a Lua test script against the stub client; it controls time with client.Tick/Wait."""
@@ -124,9 +137,10 @@ def run_client(addons, tmp_path):
     def run(script: str) -> None:
         if not LUA:
             pytest.skip("lua interpreter not installed")
+        flat_bell(addons)
         test = tmp_path / "test.lua"
         test.write_text(textwrap.dedent(script), encoding="utf-8")
-        result = subprocess.run([LUA, str(STUB), str(addons), str(test)], capture_output=True, text=True)
+        result = subprocess.run([LUA, STUB.as_posix(), addons.as_posix(), test.as_posix()], capture_output=True, text=True)
         assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
     return run
@@ -139,12 +153,13 @@ def live_game(addons, tmp_path, monkeypatch):
     if not LUA:
         pytest.skip("lua interpreter not installed")
     monkeypatch.setattr(game, "running_folders", lambda proc=None: {"_forever_"})
+    flat_bell(addons)
 
     @contextlib.contextmanager
     def start(setup: str = "", seconds: int = 8):
         script = tmp_path / "game.lua"
         script.write_text(f"{textwrap.dedent(setup)}\nclient.LoadAddon()\nclient.RunFor({seconds})\n")
-        client = subprocess.Popen([LUA, str(STUB), str(addons), str(script)],
+        client = subprocess.Popen([LUA, STUB.as_posix(), addons.as_posix(), script.as_posix()],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             time.sleep(1.5)  # logged in and polling

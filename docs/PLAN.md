@@ -34,6 +34,7 @@ only by the integrator, who merges the workstreams one by one.
 | W27 | Auction history: own sales, expiries, wins, listings, kept for good | – | `tools/auction_history.py` | KNOWLEDGE section `myAuctions`, ITEMS section `mail`; data `~/.local/share/wow-mcp/auction-history.jsonl` |
 | W28 | Spells and talents, spell details | `Player.lua` (own do-block) | `tools/spells.py` | REPUTATION sections `spellbook`, `talents`; payload key `spellLookup`, ITEM_DETAILS section `spellDetails` |
 | W29 | Lists the player owns; curated and automatic named views; fixed layouts | – | `tools/lists.py`, `tools/visuals.py`, `bridge.py` | data `~/.local/share/wow-mcp/lists.json`; named visual keys `list`, layout from blocks |
+| W30 | Glow in the game's windows (items, spells, frames) | `Glow.lua` | `tools/glow.py` | payload key `glow` |
 | W19 | Auction house prices (full scans, priority list) | `Auction.lua` | `tools/auction.py` | payload key `auctionWatch` (items `{item, at}`, `cleared`, `lookup {id, at, items}`), KNOWLEDGE section `auction` |
 
 Each workstream also owns `server/tests/test_<feature>.py` and `server/tests/stub/apis/<feature>.lua`

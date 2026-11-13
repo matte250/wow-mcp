@@ -880,7 +880,7 @@ STREAMING_AGENT = """
 import json, os, sys, time
 sys.stdin.read()
 open(sys.argv[4], "w").write(str(os.getpid()))
-for delay, out in json.loads(sys.argv[1]):
+for delay, out in json.load(open(sys.argv[1], encoding="utf-8")):
     time.sleep(delay)
     if isinstance(out, int):
         sys.exit(out)
@@ -911,7 +911,10 @@ def streaming(addons, tmp_path):
 
     def make(schedule, **limits):
         pid = tmp_path / f"agent{len(made)}.pid"
-        agent = CommandAgent([sys.executable, "-c", STREAMING_AGENT, json.dumps(schedule), "--output-format",
+        # The schedule goes in a file: a long one doesn't fit on a Windows command line (32,767 characters).
+        events = tmp_path / f"agent{len(made)}.json"
+        events.write_text(json.dumps(schedule), encoding="utf-8")
+        agent = CommandAgent([sys.executable, "-c", STREAMING_AGENT, str(events), "--output-format",
                               "stream-json", str(pid)], addons, **limits)
         agent.pid = pid
         made.append(agent)

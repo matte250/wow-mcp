@@ -75,6 +75,23 @@ function WorldMapFrame:RemoveAllPinsByTemplate(template)
 	end
 end
 
+-- Click handlers on the map itself (MapCanvasMixin:AddCanvasClickHandler): higher priority first,
+-- and one returning true stops the rest and the map's own zooming.
+WorldMapFrame.clickHandlers = {}
+function WorldMapFrame:AddCanvasClickHandler(handler, priority)
+	table.insert(self.clickHandlers, { handler = handler, priority = priority or 0 })
+	table.sort(self.clickHandlers, function(a, b) return a.priority > b.priority end)
+end
+
+-- A click on the map, where no clickable pin is, at x, y (0-1 of the map shown). Returns whether
+-- a handler took it (otherwise the map would zoom).
+function client.ClickMap(button, x, y)
+	for _, h in ipairs(WorldMapFrame.clickHandlers) do
+		if h.handler(WorldMapFrame, button, x, y) then return true end
+	end
+	return false
+end
+
 -- The pins of one template currently on the map, in the order they were acquired.
 function client.Pins(template)
 	local found = {}

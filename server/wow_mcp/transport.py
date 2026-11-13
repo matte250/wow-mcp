@@ -13,6 +13,7 @@ missed; several MCP servers and the bridge take turns through a lock.
 
 import contextlib
 import json
+import logging
 import os
 import struct
 import sys
@@ -22,7 +23,9 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from wow_mcp import bell, game, locking, stream
+from wow_mcp import bell, game, junction_windows, locking, stream
+
+log = logging.getLogger("wow_mcp.transport")
 
 ADDON = "WowMCP"
 INTERFACE = "16001"
@@ -42,6 +45,7 @@ HANDSHAKE_TESTS = 2  # test frames at most, to show the game a marker going from
 # Windows refuses to replace a file while another program has it open (the game reading it, a
 # virus scanner looking at a new file). That passes within moments, so keep trying this long.
 REPLACE_PATIENCE = 2.0
+LINK_PATIENCE = 0.5  # the same for re-pointing a junction of the bell's link layout
 
 
 # A short silent wav: the client keeps it once read (the probes use it).
@@ -143,9 +147,19 @@ class Bell:
         self.out_dir = addon_dir / "out"
         self.state_path = addon_dir / BELL_STATE
         self._silence: bytes | None = None
+        self._links = False
+
+    def links(self) -> bool:
+        """Whether the bits are junctions here (Windows, as the installer makes them: bell.py's link layout)."""
+        if not self._links and sys.platform == "win32":
+            self._links = junction_windows.target(self.dir / bell.link(bell.SEAL)) is not None
+        return self._links
 
     def is_on(self, name: str) -> bool:
         """Whether a bell file is valid now. Only its size is looked at: the server never opens these files."""
+        if self.links():
+            found = junction_windows.target(self.dir / bell.link(name))
+            return found is not None and found.name == bell.LINK_ON
         try:
             return (self.dir / name).stat().st_size > 0
         except FileNotFoundError:
@@ -154,6 +168,18 @@ class Bell:
     def _set(self, name: str, on: bool) -> None:
         if self.is_on(name) == on:
             return
+        if self.links():
+            # Re-point the bit's junction: no file is written, replaced or opened, so what the game holds open
+            # doesn't matter. Something else looking at the folder (a virus scanner) passes within moments.
+            deadline = time.monotonic() + LINK_PATIENCE
+            while True:
+                try:
+                    junction_windows.point(self.dir / bell.link(name), self.dir / (bell.LINK_ON if on else bell.LINK_OFF))
+                    return
+                except PermissionError:
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.01)
         path = self.dir / name
         if not on:
             write_atomic(path, b"")
@@ -221,7 +247,8 @@ class Bell:
                 start = len(receiver.symbols)
                 try:
                     expected = self.write(pending.pop(0))
-                except OSError:  # Windows kept a file the game streams for too long: the next frame mends it
+                except OSError as error:  # Windows kept a file the game streams for too long: the next frame mends it
+                    log.warning("The bell's frame wasn't written: %s", error)
                     receipt = None
                 else:
                     wait = SHORT_WAIT if state["missed"] >= MISSED_BEFORE_SHORT else RECEIPT_WAIT

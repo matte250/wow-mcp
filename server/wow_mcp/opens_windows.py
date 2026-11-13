@@ -227,7 +227,9 @@ def _start(folder: Path) -> None:
     names = _names(folder)
     if _exists(names["ready"]):
         return
-    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    # A console without a window, not no console at all: a venv's python.exe starts the real one as its child,
+    # and a console program whose parent has no console gets a new window of its own, which pops up over the game.
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     package = str(Path(__file__).resolve().parents[1])
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [package, os.environ.get("PYTHONPATH")]))}
     folder = Path(os.path.abspath(folder))

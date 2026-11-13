@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from wow_mcp import bell
+from wow_mcp import bell, junction_windows
 from wow_mcp.transport import ADDON, INTERFACE, SLOT_COUNT, render_payload, slot_name, write_atomic
 
 ADDON_SOURCE = Path(__file__).resolve().parents[2] / "addon" / ADDON
@@ -42,6 +42,31 @@ def slot_toc(i: int) -> str:
         "Inbox.lua",
         "",
     ])
+
+
+def link_bell(folder: Path) -> int | None:
+    """The junctions of the bell's link layout (bell.py), for Windows: one per bit, pointing at off/ when new,
+    and chk at on/. Returns how many it made (new to the game: restart it), or None, with a warning, where the
+    drive can't have junctions.
+
+    The game may be running: a junction that's there keeps its target, unless it points outside this folder
+    (the game was moved), when it's pointed back at this folder's on/ or off/."""
+    made, here = 0, os.path.normcase(folder.absolute())
+    try:
+        for stem in (bell.LINK_CHECK, *bell.LINKS):
+            link, default = folder / stem, bell.LINK_ON if stem == bell.LINK_CHECK else bell.LINK_OFF
+            found = junction_windows.target(link)
+            if found is None:
+                junction_windows.create(link, folder / default)
+                made += 1
+            elif os.path.normcase(found.parent) != here or found.name not in (bell.LINK_ON, bell.LINK_OFF):
+                kept = found.name in (bell.LINK_ON, bell.LINK_OFF) and stem != bell.LINK_CHECK
+                junction_windows.point(link, folder / (found.name if kept else default))
+    except OSError as error:
+        print(f"Couldn't make the live channel's folder links ({error}). They need an NTFS drive; "
+              "without them live updates don't reach the game on Windows.", file=sys.stderr)
+        return None
+    return made
 
 
 @dataclass(frozen=True)
@@ -74,7 +99,7 @@ def install(addons_dir: Path) -> Installed:
             addon_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, addon_dir / src.name)
 
-    (addon_dir / "Build.lua").write_text(f'local _, ns = ...\nns.BUILD = "{addon_build()}"\n', encoding="utf-8")
+    build = f'local _, ns = ...\nns.BUILD = "{addon_build()}"\n'
 
     empty_payload = render_payload({"seq": 0}).encode("utf-8")
     ensure(addon_dir / "Inbox.lua", empty_payload)
@@ -86,6 +111,15 @@ def install(addons_dir: Path) -> Installed:
     on = addon_dir / bell.FOLDER / bell.ON
     if on.stat().st_size != len(silence):
         write_atomic(on, silence)
+    if sys.platform == "win32":
+        # The files behind the junctions: written here and never again (the game holds them open).
+        ensure(addon_dir / bell.FOLDER / bell.LINK_ON / bell.LINK_FILE, silence)
+        ensure(addon_dir / bell.FOLDER / bell.LINK_OFF / bell.LINK_FILE, b"")
+        links = link_bell(addon_dir / bell.FOLDER)
+        if links is not None:
+            created += links
+            build += 'ns.BELL = "links"\n'
+    (addon_dir / "Build.lua").write_text(build, encoding="utf-8")
     removed = 0
     for pool in OLD_POOLS:
         if (addon_dir / pool).is_dir():
