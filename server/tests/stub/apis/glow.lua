@@ -13,6 +13,8 @@ function Frame:GetFrameLevel() return self.level or 1 end
 function Frame:GetFrameStrata() return self.strata or "MEDIUM" end
 function Frame:GetEffectiveScale() return self.scale or 1 end
 function Frame:GetSize() return self.width or 36, self.height or 36 end
+-- The mouse is over a frame a test says it is over.
+function Frame:IsMouseOver() return self.mouseOver == true end
 function Frame:GetObjectType() return "Frame" end
 function Frame:SetID(id) self.id = id end
 function Frame:GetID() return self.id or 0 end

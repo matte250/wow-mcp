@@ -14,6 +14,10 @@
 -- plus BetterBags' bags when that addon is loaded (an optional integration: if BetterBags changes,
 -- its part quietly stops working). Buttons are found again on the events that change them and,
 -- while anything is marked, every half second (vendor pages, scrolled loot, bags just opened).
+--
+-- Moving the mouse over a glowing button (or showing its tooltip some other way, e.g. a gamepad) means
+-- "seen": that mark stops glowing everywhere until the AI sends new marks. That's kept per update, so a
+-- /reload doesn't bring it back.
 
 local _, ns = ...
 
@@ -29,8 +33,10 @@ local ANTS_TEXTURE = "Interface\\SpellActivationOverlay\\IconAlertAnts"
 local ANT_FRAMES, ANT_STEP = 22, 0.02 -- the ants texture: 22 frames of 48 px in a 256 px sheet, 5 per row
 local POLL = 0.5
 
-local marks = { items = {}, spells = {}, frames = {} } -- items/spells: id -> colour; frames: { path, colour }
-local count = 0
+-- A mark is { key, colour } (frames also { path }); items/spells: id -> mark; frames: a list.
+local marks = { items = {}, spells = {}, frames = {} }
+local count = 0      -- marks not dismissed
+local dismissed = {} -- key -> true: hovered since the last update (WowMCPDB.glowDismissed.keys)
 local hidden = false -- /mcp glow off, until the next update
 local glows = {}     -- target frame -> our glow frame
 local missing = {}   -- frame paths already reported as not found
@@ -39,9 +45,20 @@ local missing = {}   -- frame paths already reported as not found
 -- The glow
 ---------------------------------------------------------------------------
 
+local Dismiss
+
+local function Hovered(target)
+	if target.IsMouseOver and target:IsMouseOver() then return true end
+	return GameTooltip:IsShown() and GameTooltip:GetOwner() == target
+end
+
 local function Animate(self, elapsed)
 	if not (self.target:IsVisible()) then
 		self:Hide()
+		return
+	end
+	if self.mark and Hovered(self.target) then
+		Dismiss(self.mark.key)
 		return
 	end
 	self.t = self.t + elapsed
@@ -98,14 +115,15 @@ local function Paint(g, colour)
 	for _, edge in ipairs(g.edges) do edge:SetColorTexture(r, gr, b, 1) end
 end
 
-local function Show(target, colour)
+local function Show(target, mark)
 	local g = glows[target]
 	if not g then
 		local ok, made = pcall(NewGlow, target)
 		if not ok then return end
 		g, glows[target] = made, made
 	end
-	Paint(g, colour)
+	g.mark = mark
+	Paint(g, mark.colour)
 	pcall(function()
 		g:SetFrameStrata(target:GetFrameStrata())
 		g:SetFrameLevel((target:GetFrameLevel() or 0) + 5)
@@ -118,7 +136,7 @@ end
 -- Finding the buttons
 ---------------------------------------------------------------------------
 
-local function ItemColour(id)
+local function ItemMark(id)
 	-- pcall: restricted content can hand out secret values that can't be used as keys.
 	local ok, colour = pcall(function() return type(id) == "number" and marks.items[id] or nil end)
 	return ok and colour or nil
@@ -134,7 +152,7 @@ local function SpellName(id)
 	return GetSpellInfo and (GetSpellInfo(id))
 end
 
-local function SpellColour(id, name)
+local function SpellMark(id, name)
 	local ok, colour = pcall(function()
 		return type(id) == "number" and marks.spells[id] or spellNames[name or SpellName(id)] or nil
 	end)
@@ -155,7 +173,7 @@ local function BagItemID(bag, slot)
 	return info and info.itemID
 end
 
--- Each finder calls want(button, colour) for every marked thing it sees.
+-- Each finder calls want(button, mark) for every marked thing it sees (mark nil: not marked).
 local finders = {}
 
 -- The game's bags and bank: container frames list their item buttons, or name them <frame>Item<n>.
@@ -177,7 +195,7 @@ function finders.Bags(want)
 				local bag = button.GetBagID and button:GetBagID()
 					or button.GetBankTabID and button:GetBankTabID() or frame:GetID()
 				local slot = button.GetContainerSlotID and button:GetContainerSlotID() or button:GetID()
-				want(button, ItemColour(BagItemID(bag, slot)))
+				want(button, ItemMark(BagItemID(bag, slot)))
 			end
 			if frame.EnumerateValidItems then
 				for _, button in frame:EnumerateValidItems() do pcall(Visit, button) end
@@ -194,7 +212,7 @@ function finders.Bags(want)
 	if Shown(BankFrame) then
 		for i = 1, NUM_BANKGENERIC_SLOTS or 28 do
 			local button = _G["BankFrameItem" .. i]
-			if button then pcall(function() want(button, ItemColour(BagItemID(-1, button:GetID()))) end) end
+			if button then pcall(function() want(button, ItemMark(BagItemID(-1, button:GetID()))) end) end
 		end
 	end
 end
@@ -204,7 +222,7 @@ function finders.Merchant(want)
 	if not Shown(MerchantFrame) or (MerchantFrame.selectedTab or 1) ~= 1 then return end
 	for i = 1, MERCHANT_ITEMS_PER_PAGE or 10 do
 		local button = _G["MerchantItem" .. i .. "ItemButton"]
-		if Shown(button) then pcall(function() want(button, ItemColour(GetMerchantItemID(button:GetID()))) end) end
+		if Shown(button) then pcall(function() want(button, ItemMark(GetMerchantItemID(button:GetID()))) end) end
 	end
 end
 
@@ -212,7 +230,7 @@ end
 function finders.Loot(want)
 	if not Shown(LootFrame) then return end
 	local function Visit(button, slot)
-		want(button, ItemColour(LinkID(GetLootSlotLink(slot))))
+		want(button, ItemMark(LinkID(GetLootSlotLink(slot))))
 	end
 	if LootFrame.ScrollBox and LootFrame.ScrollBox.ForEachFrame then
 		LootFrame.ScrollBox:ForEachFrame(function(frame)
@@ -244,7 +262,7 @@ function finders.QuestRewards(want)
 			pcall(function()
 				local link = fromLog and GetQuestLogItemLink(button.type, button:GetID())
 					or GetQuestItemLink(button.type, button:GetID())
-				want(button, ItemColour(LinkID(link)))
+				want(button, ItemMark(LinkID(link)))
 			end)
 		end
 	end
@@ -258,7 +276,7 @@ function finders.Gear(want)
 	if not Shown(CharacterFrame) then return end
 	for _, name in ipairs(GEAR_SLOTS) do
 		local button = _G["Character" .. name .. "Slot"]
-		if Shown(button) then pcall(function() want(button, ItemColour(GetInventoryItemID("player", button:GetID()))) end) end
+		if Shown(button) then pcall(function() want(button, ItemMark(GetInventoryItemID("player", button:GetID()))) end) end
 	end
 end
 
@@ -276,9 +294,9 @@ function finders.ActionBars(want)
 					if not action then return end
 					local kind, id = GetActionInfo(action)
 					if kind == "spell" then
-						want(button, SpellColour(id))
+						want(button, SpellMark(id))
 					elseif kind == "item" then
-						want(button, ItemColour(id))
+						want(button, ItemMark(id))
 					end
 				end)
 			end
@@ -294,9 +312,9 @@ function finders.Trainer(want)
 		local data = C_TooltipInfo.GetTrainerService(index)
 		if type(data) ~= "table" or not data.id then return end
 		if data.type == Enum.TooltipDataType.Item then
-			want(button, ItemColour(data.id))
+			want(button, ItemMark(data.id))
 		else
-			want(button, SpellColour(data.id, (GetTrainerServiceInfo(index))))
+			want(button, SpellMark(data.id, (GetTrainerServiceInfo(index))))
 		end
 	end
 	local scroll = ClassTrainerFrame.ScrollBox
@@ -326,7 +344,7 @@ function finders.SpellBook(want)
 			pcall(function()
 				local info = frame.spellBookItemInfo
 				local id = type(info) == "table" and (info.spellID or info.actionID)
-				if id then want(frame.Button or frame, SpellColour(id, info.name)) end
+				if id then want(frame.Button or frame, SpellMark(id, info.name)) end
 			end)
 		end)
 	end
@@ -344,7 +362,7 @@ function finders.SpellBook(want)
 					else
 						id = select(2, GetSpellBookItemInfo(slot, SpellBookFrame.bookType))
 					end
-					want(button, SpellColour(id))
+					want(button, SpellMark(id))
 				end)
 			end
 		end
@@ -362,7 +380,7 @@ function finders.BetterBags(want)
 		local bag, slot = tostring(slotkey):match("^(%-?%d+)_(%d+)$")
 		local frame = type(item) == "table" and item.frame
 		if bag and Shown(frame) then
-			pcall(function() want(frame, ItemColour(BagItemID(tonumber(bag), tonumber(slot)))) end)
+			pcall(function() want(frame, ItemMark(BagItemID(tonumber(bag), tonumber(slot)))) end)
 		end
 	end
 end
@@ -380,7 +398,7 @@ function finders.Frames(want)
 	for _, mark in ipairs(marks.frames) do
 		local frame = Resolve(mark.path)
 		if frame then
-			if Shown(frame) then want(frame, mark.colour) end
+			if Shown(frame) then want(frame, mark) end
 		elseif not missing[mark.path] then
 			missing[mark.path] = true
 			ns.Print("Can't find '" .. ns.Escape(mark.path) .. "' in the game's UI, so it can't glow.")
@@ -394,8 +412,8 @@ local ORDER = { "Bags", "BetterBags", "Merchant", "Loot", "QuestRewards", "Gear"
 function Glow.Refresh()
 	local wanted = {}
 	if count > 0 and not hidden then
-		local function want(frame, colour)
-			if frame and colour then wanted[frame] = colour end
+		local function want(frame, mark)
+			if frame and mark and not dismissed[mark.key] then wanted[frame] = mark end
 		end
 		for _, name in ipairs(ORDER) do
 			pcall(finders[name], want) -- a window that isn't like we expect only loses its own glow
@@ -404,7 +422,15 @@ function Glow.Refresh()
 	for target, g in pairs(glows) do
 		if not wanted[target] then g:Hide() end
 	end
-	for target, colour in pairs(wanted) do Show(target, colour) end
+	for target, mark in pairs(wanted) do Show(target, mark) end
+end
+
+-- Hovered: this mark stops glowing everywhere until the next update.
+function Dismiss(key)
+	if dismissed[key] then return end
+	dismissed[key] = true
+	count = count - 1
+	Glow.Refresh()
 end
 
 -- What glows right now, for tests and /mcp glow: { [frame] = colour }.
@@ -460,21 +486,30 @@ local function Receive(payload)
 	if type(payload) ~= "table" then return end
 	wipe(marks.items); wipe(marks.spells); wipe(marks.frames); wipe(missing); wipe(spellNames)
 	count, hidden = 0, false
+	-- What was hovered stays dismissed across /reload, until the next update.
+	local kept = WowMCPDB.glowDismissed
+	if type(kept) ~= "table" or kept.id ~= payload.id then
+		kept = { id = payload.id, keys = {} }
+		WowMCPDB.glowDismissed = kept
+	end
+	dismissed = kept.keys
 	for _, mark in ipairs(type(payload.marks) == "table" and payload.marks or {}) do
 		if type(mark) == "table" then
 			local colour = COLORS[mark.color] and mark.color or "gold"
+			local key
 			if type(mark.item) == "number" then
-				marks.items[mark.item] = colour
+				key = "item:" .. mark.item
+				marks.items[mark.item] = { key = key, colour = colour }
 			elseif type(mark.spell) == "number" then
-				marks.spells[mark.spell] = colour
+				key = "spell:" .. mark.spell
+				marks.spells[mark.spell] = { key = key, colour = colour }
 				local name = SpellName(mark.spell)
-				if name then spellNames[name] = colour end
+				if name then spellNames[name] = marks.spells[mark.spell] end
 			elseif type(mark.frame) == "string" then
-				table.insert(marks.frames, { path = mark.frame, colour = colour })
-			else
-				colour = nil
+				key = "frame:" .. mark.frame
+				table.insert(marks.frames, { key = key, path = mark.frame, colour = colour })
 			end
-			if colour then count = count + 1 end
+			if key and not dismissed[key] then count = count + 1 end
 		end
 	end
 	Wake()
@@ -485,7 +520,8 @@ local function Receive(payload)
 		ns.Print("Glow cleared.")
 	else
 		ns.Print("Your AI marked " .. Describe() .. ": they glow wherever they show up in your bags, at vendors, "
-			.. "in loot, quest rewards, your gear, at trainers, in your spellbook and action bars. /mcp glow off hides it.")
+			.. "in loot, quest rewards, your gear, at trainers, in your spellbook and action bars, until you hover "
+			.. "them. /mcp glow off hides it all.")
 	end
 end
 
@@ -495,7 +531,10 @@ function Glow.Command(_, rest)
 		Glow.Refresh()
 		ns.Print("Glow hidden until your AI marks something new.")
 	elseif rest == "on" then
+		-- Also what was hovered: everything marked glows again.
 		hidden = false
+		for _ in pairs(dismissed) do count = count + 1 end
+		wipe(dismissed)
 		Wake()
 		ns.Print(count > 0 and "Glow shown again." or "Nothing is marked.")
 	elseif count == 0 then
@@ -506,7 +545,7 @@ function Glow.Command(_, rest)
 end
 
 ns.RegisterReceiver("glow", Receive)
-ns.RegisterCommand("glow", "/mcp glow [off, on] - what your AI made glow in the game's windows; hide or show it", Glow.Command)
+ns.RegisterCommand("glow", "/mcp glow [off, on] - what your AI made glow in the game's windows; hide it, or show it all again", Glow.Command)
 
 -- Bags opened by key or click show their buttons before any event says so.
 for _, name in ipairs({ "ToggleBag", "OpenBag", "ToggleBackpack", "OpenAllBags", "ToggleAllBags", "MerchantFrame_Update",

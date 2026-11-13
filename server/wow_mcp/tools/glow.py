@@ -19,8 +19,8 @@ guidance(
     "buy at a vendor, a gear upgrade in their bags or among quest rewards, what to sell or keep, the loot worth "
     "taking, the spell to train or use (any rank of it glows at the trainer, in the spellbook and on action bars). "
     "Mark what you recommend when you recommend it, even if the player isn't at the vendor or trainer yet: it glows "
-    "when they get there. Use green for buy/equip/keep, red for sell/destroy/avoid, gold for 'look here'. It "
-    "adds to what already glows; pass replace when the earlier marks no longer apply, and call "
+    "when they get there. Use green for buy/equip/keep, red for sell/destroy/avoid, gold for 'look here'. A mark "
+    "stops glowing once the player hovers it, so mark again what still matters. It adds to what already glows; pass replace when the earlier marks no longer apply, and call "
     "clear_ui_highlights when they're done. Combine it with set_item_notes when the reason matters.",
     order=76,
 )
@@ -95,7 +95,8 @@ def highlight_in_ui(
     wherever it shows up (bags, bank, a vendor's items, loot, quest rewards, the character frame, a trainer's
     recipes, action bars; BetterBags' bags too), a spell (any rank) at trainers, in the spellbook and on action
     bars, a frame by its global name. It keeps
-    glowing until replaced or cleared. Only the game's own windows (and BetterBags) are covered, not other
+    glowing until the player hovers it with the mouse (then that mark stops glowing everywhere, until your next
+    highlight_in_ui), or until replaced or cleared. Only the game's own windows (and BetterBags) are covered, not other
     addons' windows."""
     total = dropped = 0
 

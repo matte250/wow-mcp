@@ -139,6 +139,55 @@ def test_marked_things_glow_where_they_show(publish_glow, run_client):
     """)
 
 
+def test_hovering_a_glow_dismisses_that_mark(publish_glow, run_client):
+    run_client(r"""
+        client.GlowUI()
+        client.LoadAddon()
+        client.Wait()
+        local bags = ContainerFrameCombinedBags
+        client.actions[4] = { "item", 2589 }
+        client.Publish('{"highlights":[{"item_id":2589,"color":"green"},{"item_id":4865}]}')
+        client.Wait()
+        bags:Show()
+        client.Wait(1)
+        assert(client.Glowing()[bags.buttons[2]] == "green" and client.Glowing()[ActionButton4] == "green")
+        assert(client.Glowing()[bags.buttons[3]] == "gold")
+
+        -- Hovering Linen Cloth in the bags: it stops glowing everywhere, the other mark stays.
+        bags.buttons[2].mouseOver = true
+        client.Tick()
+        bags.buttons[2].mouseOver = false
+        client.Wait(2)
+        local shown = client.Glowing()
+        assert(shown[bags.buttons[2]] == nil and shown[ActionButton4] == nil, "dismissed everywhere")
+        assert(shown[bags.buttons[3]] == "gold")
+
+        -- A /reload keeps it dismissed.
+        wipe(client.loaded); wipe(client.tickers); wipe(client.timers); wipe(client.frames); wipe(client.chat)
+        client.GlowUI()
+        client.LoadAddon()
+        ContainerFrameCombinedBags:Show()
+        client.Wait(2)
+        shown = client.Glowing()
+        assert(shown[ContainerFrameCombinedBags.buttons[2]] == nil and shown[ContainerFrameCombinedBags.buttons[3]] == "gold")
+
+        -- /mcp glow on brings back what was hovered.
+        SlashCmdList.WOWMCP("glow on")
+        client.Wait(1)
+        assert(client.Glowing()[ContainerFrameCombinedBags.buttons[2]] == "green")
+
+        -- So does a new update from the AI, even of the same item.
+        ContainerFrameCombinedBags.buttons[2].mouseOver = true
+        client.Tick()
+        ContainerFrameCombinedBags.buttons[2].mouseOver = false
+        client.Wait(1)
+        assert(client.Glowing()[ContainerFrameCombinedBags.buttons[2]] == nil)
+        client.Publish('{"highlights":[{"item_id":2589,"color":"green"}]}')
+        client.Wait()
+        assert(client.Glowing()[ContainerFrameCombinedBags.buttons[2]] == "green")
+    """)
+
+
 def test_better_bags_buttons_glow(publish_glow, run_client):
     run_client(r"""
         client.GlowUI({ betterBags = true })
