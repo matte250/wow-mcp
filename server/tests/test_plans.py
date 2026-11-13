@@ -109,7 +109,7 @@ PRELUDE = (
                              client.fontStrings, client.opened }) do
             wipe(t)
         end
-        WorldMapFrame.providers = {}
+        WorldMapFrame.providers, WorldMapFrame.clickHandlers = {}, {}
         wipe(WorldMapFrame.pins)
         WowMCPRouteNavigator, WowMCPPlanFrame = nil, nil
         return client.LoadAddon()
@@ -1997,5 +1997,24 @@ def test_hovering_a_step_shows_its_npcs(game):
         assert(#shown == 1 and shown[1].creature == 12 and name(shown[1]) == "" and not tip():find("NPC:", 1, true))
         enter(2)
         assert(#models(true) == 0)
+        noErrors()
+    """)
+
+
+def test_right_click_removes_the_plan_steps_area(game):
+    game(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish([[""" + FARM + r"""]])
+        client.Wait()
+        moveTo(1411, 0.6, 0.5)
+        client.AddItem(2589, 5)
+        client.Wait(2)
+        WorldMapFrame:SetMapID(1411)
+        assert(#client.Pins(AREA) == 1 and #client.Pins(STOP) == 3)
+        assert(client.ClickMap("RightButton", 0.56, 0.45))
+        assert(#client.Pins(AREA) == 0 and #client.Pins(STOP) == 3 and has("Removed the area"), chat())
+        Reload()
+        assert(#client.Pins(AREA) == 0 and #client.Pins(STOP) == 3, "stays removed through a /reload")
         noErrors()
     """)

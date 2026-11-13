@@ -304,3 +304,30 @@ def test_map_helpers_for_other_features(run_client):
         assert(ns.Map.SetWaypoint(loc) and client.waypoint.uiMapID == 1454)
         assert(ns.SLOT_COUNT == 300)
     """)
+
+
+def test_marker_clicks_on_the_classic_map_canvas(run_client):
+    # The classic UI's map canvas only calls a pin's OnClick; the newer one passes it on to
+    # OnMouseClickAction. Both remove and navigate, and only once.
+    run_client(r"""
+        client.LoadAddon()
+        client.Wait()
+        client.Publish('{"markers":[{"zone":"Durotar","x":50,"y":50,"label":"Razor Hill"},{"zone":"Durotar","x":40,"y":60,"label":"Bank"},{"zone":"Durotar","x":45,"y":20,"label":"Inn"}]}')
+        client.Wait()
+        local function pin(label)
+            for _, p in ipairs(WorldMapFrame.pins) do if p.marker.label == label then return p end end
+        end
+        local function removed()
+            local n = 0
+            for _, line in ipairs(client.chat) do if line:find("Removed marker", 1, true) then n = n + 1 end end
+            return n
+        end
+        pin("Bank"):OnClick("RightButton")
+        assert(not pin("Bank") and removed() == 1, "newer canvas: once")
+        client.classicCanvas = true
+        pin("Inn"):OnClick("RightButton")
+        assert(not pin("Inn") and removed() == 2, "classic canvas")
+        client.waypoint = nil
+        pin("Razor Hill"):OnClick("LeftButton")
+        assert(client.waypoint, "a click navigates there")
+    """)
