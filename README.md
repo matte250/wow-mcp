@@ -260,6 +260,9 @@ latest snapshot and how much history there is; `houses`, `refresh` and `match` d
 | `/mcp messages` | Repeat the last messages from your AI |
 | `/mcp reminders` | Reminders waiting to fire |
 | `/mcp status` | Live-update status and slots left |
+| `/mcp window` | The WowMCP window: plan, goals, route and recent messages as tabs, the connection, and a line to ask your AI. The minimap button opens it too (right-click: settings; drag: move it) |
+| `/mcp settings` | Options > AddOns > WowMCP: turn features off and on, see whether Questie is there, the minimap button and the window's scale |
+| `/mcp minimap [show, hide]` | Show or hide the minimap button |
 
 ## Development
 
