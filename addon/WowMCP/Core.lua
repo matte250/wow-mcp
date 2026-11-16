@@ -264,10 +264,23 @@ function ns.CommandUsages()
 	return usages
 end
 
+-- A feature the player turned off in the settings (UI.lua's WowMCPDB.ui.off) gets no new data
+-- until it's turned on again.
+function ns.IsOff(key)
+	local ui = WowMCPDB and WowMCPDB.ui
+	return type(ui) == "table" and type(ui.off) == "table" and ui.off[key] == true
+end
+
 local function Apply(payload)
 	for key, receive in pairs(receivers) do
-		if payload[key] ~= nil then receive(payload[key]) end
+		if payload[key] ~= nil and not ns.IsOff(key) then receive(payload[key]) end
 	end
+end
+
+-- Hands a feature turned on again what the newest payload has for it.
+function ns.Reapply(key)
+	local payload, receive = run.payload, receivers[key]
+	if run.loggedIn and payload and payload[key] ~= nil and receive then receive(payload[key]) end
 end
 
 -- Called by Inbox.lua and by every slot addon's Inbox.lua.

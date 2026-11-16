@@ -750,6 +750,19 @@ function Goals.List()
 	end
 end
 
+-- The goals for the main window (UI.lua), in the list's order: title and progress as the goals
+-- window shows them, whether each is done or muted.
+function Goals.Snapshot()
+	local list = {}
+	for _, goal in ipairs(Listed()) do
+		local entry = Entry(goal)
+		if goal.text == nil then CheckGoal(goal) end
+		list[#list + 1] = { title = FrameText(goal.title), text = goal.text and ns.RenderItems(ns.Escape(goal.text)) or "",
+			done = entry.done ~= nil, muted = entry.muted and true or false }
+	end
+	return list
+end
+
 function Goals.Mute(arg, on)
 	local goal = Find(arg)
 	if not goal then

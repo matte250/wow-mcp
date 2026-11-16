@@ -1382,6 +1382,19 @@ function Plans.List()
 	end
 end
 
+-- The open plan for the main window (UI.lua), or nil: its title and steps, each with its text as
+-- the window shows it, whether it's ticked and whether it's the current one.
+function Plans.Snapshot()
+	if not Active() then return nil end
+	local state = State()
+	local list = {}
+	for _, step in ipairs(steps) do
+		list[#list + 1] = { n = step.n, text = ns.RenderItems(StepText(step.n)),
+			done = state.done[step.n] ~= nil, current = step.n == state.current }
+	end
+	return { title = ns.Escape(plan.title or "Plan"), current = state.current, steps = list }
+end
+
 function Plans.Show()
 	if not Active() and #Archived() > 0 then -- just the archive button
 		WindowSaved().shelfHidden = nil

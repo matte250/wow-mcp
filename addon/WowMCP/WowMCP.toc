@@ -4,6 +4,7 @@
 ## Author: wow-mcp
 ## Version: 0.1.0
 ## SavedVariables: WowMCPDB
+## IconTexture: Interface\Icons\INV_Misc_Orb_01
 
 Core.lua
 Requests.lua
@@ -31,5 +32,6 @@ Tooltips.lua
 Glow.lua
 Status.lua
 SlashHelp.lua
+UI.lua
 Build.lua
 Inbox.lua

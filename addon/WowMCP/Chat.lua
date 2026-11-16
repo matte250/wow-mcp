@@ -362,6 +362,11 @@ function AIChat.Status(m)
 end
 
 -- Whether answers are due: the bell is read more often meanwhile (Core.lua).
+-- GetTime() of the last news from the bridge (-math.huge before any), for the main window (UI.lua).
+function AIChat.LastHeard()
+	return heard
+end
+
 function AIChat.Waiting()
 	return #pending > 0
 end

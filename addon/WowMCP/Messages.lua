@@ -183,6 +183,17 @@ function Messages.Receive(list)
 	end
 end
 
+-- The newest messages from the AI for the main window (UI.lua), oldest first: text as shown outside
+-- chat, who sent it and when ("14:05").
+function Messages.Recent(count)
+	local list = {}
+	for i = math.max(1, #recent - (count or 20) + 1), #recent do
+		local m = recent[i]
+		list[#list + 1] = { text = ns.ItemText(m.text), from = type(m.from) == "string" and ns.Escape(m.from) or nil, sent = Sent(m) }
+	end
+	return list
+end
+
 function Messages.List()
 	if #recent == 0 then
 		ns.Print("No messages yet.")

@@ -628,6 +628,20 @@ function Routes.List()
 	for _, s in ipairs(t.stops) do ns.Print(StopLine(s)) end
 end
 
+-- The route (or a guide's directions) for the main window (UI.lua), or nil: its title and stops,
+-- each with its label, zone, distance in yards when known and whether it's the current one.
+function Routes.Snapshot()
+	local t = Target()
+	if not t then return nil end
+	local saved = t.Saved()
+	local list = {}
+	for _, s in ipairs(t.stops) do
+		list[#list + 1] = { n = s.n, label = ns.Escape(s.label), zone = ns.Escape(s.zone or ""),
+			yards = ns.Map.Distance(s), current = s.n == saved.index and not saved.done }
+	end
+	return { title = Title(t), loop = Loops(t) and true or false, hidden = saved.hidden and true or false, stops = list }
+end
+
 function Routes.GoTo(index, t)
 	t = t or Target()
 	if NoRoute(t) then return end
