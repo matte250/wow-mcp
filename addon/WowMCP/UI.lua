@@ -5,7 +5,12 @@
 -- none. The window only shows what the other features already have (their Snapshot functions), so
 -- the plan window, goals list, route navigator and chat keep working as before, with or without it.
 --
--- WowMCPDB.ui: { minimap = { angle (degrees around the minimap), hidden }, window = { point,
+-- When another addon has loaded LibDataBroker and LibDBIcon (button collectors such as
+-- MinimapButtonButton and HidingBar, and Titan Panel, use them), the button is registered through
+-- them instead of drawn by hand, so those addons can gather it. Neither library ships with WowMCP.
+--
+-- WowMCPDB.ui: { minimap = { angle (degrees around the minimap), hidden }, icon = { LibDBIcon's
+-- own settings }, window = { point,
 -- relativePoint, x, y, tab, locked }, scale, off = { [payload key] = true } (features turned off in
 -- the settings: Core.lua's Apply skips them) }.
 
@@ -28,6 +33,7 @@ local function DB()
 	WowMCPDB.ui = type(WowMCPDB.ui) == "table" and WowMCPDB.ui or {}
 	local db = WowMCPDB.ui
 	db.minimap = type(db.minimap) == "table" and db.minimap or { angle = 225 }
+	db.icon = type(db.icon) == "table" and db.icon or {}
 	db.window = type(db.window) == "table" and db.window or {}
 	db.off = type(db.off) == "table" and db.off or {}
 	db.scale = tonumber(db.scale) or 1
@@ -78,24 +84,48 @@ local function DragUpdate()
 	PlaceButton()
 end
 
-local function ButtonTooltip(self)
+local function TooltipLines(tip)
 	local state, line, detail = UI.Connection()
-	GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-	GameTooltip:AddLine("WowMCP", 1, 1, 1)
+	tip:AddLine("WowMCP", 1, 1, 1)
 	local r, g, b = 0.12, 1, 0
 	if state == "wait" then r, g, b = 1, 0.82, 0 elseif state == "off" then r, g, b = 1, 0.23, 0.23 end
-	GameTooltip:AddLine(line, r, g, b)
-	GameTooltip:AddLine(detail, 0.62, 0.62, 0.62)
-	GameTooltip:AddLine(" ")
-	GameTooltip:AddLine(GOLD .. "Left-click|r open the window", 1, 1, 1)
-	GameTooltip:AddLine(GOLD .. "Right-click|r settings", 1, 1, 1)
-	GameTooltip:AddLine(GOLD .. "Drag|r move the button", 1, 1, 1)
+	tip:AddLine(line, r, g, b)
+	tip:AddLine(detail, 0.62, 0.62, 0.62)
+	tip:AddLine(" ")
+	tip:AddLine(GOLD .. "Left-click|r open the window", 1, 1, 1)
+	tip:AddLine(GOLD .. "Right-click|r settings", 1, 1, 1)
+	tip:AddLine(GOLD .. "Drag|r move the button", 1, 1, 1)
+end
+
+local function ButtonTooltip(self)
+	GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+	TooltipLines(GameTooltip)
 	GameTooltip:Show()
 end
 
+local function ButtonClick(_, which)
+	if which == "RightButton" then UI.OpenSettings() else UI.Toggle() end
+end
+
+-- The connection dot, on whichever button there is.
+local function AddDot(frame)
+	frame.WowMCPDot = frame:CreateTexture(nil, "OVERLAY", nil, 2)
+	frame.WowMCPDot:SetSize(12, 12)
+	frame.WowMCPDot:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+	return frame.WowMCPDot
+end
+
+local broker, icons -- LibDataBroker's object for WowMCP, and LibDBIcon, when another addon loaded them
+
 local function UpdateButton()
+	local state, line = UI.Connection()
+	if broker then
+		broker.text = (state == "on" and GREEN or state == "wait" and GOLD or RED) .. line .. "|r"
+		local libButton = icons.GetMinimapButton and icons:GetMinimapButton("WowMCP")
+		if libButton then (libButton.WowMCPDot or AddDot(libButton)):SetTexture(DOTS[state]) end
+		return
+	end
 	if not button then return end
-	local state = UI.Connection()
 	button.Dot:SetTexture(DOTS[state])
 	button.Icon:SetDesaturated(state == "off")
 	button.Icon:SetVertexColor(state == "off" and 0.7 or 1, state == "off" and 0.7 or 1, state == "off" and 0.7 or 1)
@@ -131,9 +161,7 @@ local function MakeButton()
 	button.Dot:SetSize(12, 12)
 	button.Dot:SetPoint("TOPLEFT", 20, -19)
 
-	button:SetScript("OnClick", function(_, which)
-		if which == "RightButton" then UI.OpenSettings() else UI.Toggle() end
-	end)
+	button:SetScript("OnClick", ButtonClick)
 	button:SetScript("OnDragStart", function(self)
 		self:LockHighlight()
 		self:SetScript("OnUpdate", DragUpdate)
@@ -150,9 +178,32 @@ local function MakeButton()
 	UpdateButton()
 end
 
+-- Registers through LibDataBroker and LibDBIcon when both are loaded. Returns whether it did.
+local function UseLibraries()
+	local stub = _G.LibStub
+	local ldb = stub and stub("LibDataBroker-1.1", true)
+	local dbi = stub and stub("LibDBIcon-1.0", true)
+	if not (ldb and dbi) then return false end
+	local object = ldb:NewDataObject("WowMCP", {
+		type = "data source", label = "WowMCP", icon = ICON, text = "WowMCP",
+		OnClick = ButtonClick,
+		OnTooltipShow = function(tip) TooltipLines(tip) end,
+	})
+	if not object then return false end
+	DB().icon.hide = DB().minimap.hidden and true or nil
+	dbi:Register("WowMCP", object, DB().icon)
+	broker, icons = object, dbi
+	return true
+end
+
 function UI.ShowButton(shown)
 	DB().minimap.hidden = not shown
-	if button then button:SetShown(shown) end
+	if icons then
+		DB().icon.hide = (not shown) or nil
+		if shown then icons:Show("WowMCP") else icons:Hide("WowMCP") end
+	elseif button then
+		button:SetShown(shown)
+	end
 end
 
 ---------------------------------------------------------------------------
@@ -553,10 +604,23 @@ local function Group(parent, label, y)
 	line:SetPoint("RIGHT", parent, "RIGHT", -16, 0)
 end
 
-local function QuestieFound()
+local function Loaded(name)
 	local loaded = C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded
-	return loaded and loaded("Questie") and true or false
+	return loaded and loaded(name) and true or false
 end
+
+-- Addons WowMCP works with or plans to. Only the ones marked used are read today; the rest show
+-- here so you can see what is installed before their integration lands.
+local INTEGRATIONS = {
+	{ "Questie", "Questie", true },
+	{ "RestedXP", "RXPGuides" },
+	{ "TomTom", "TomTom" },
+	{ "Auctionator", "Auctionator" },
+	{ "Pawn", "Pawn" },
+	{ "Altoholic", "Altoholic" },
+	{ "Details!", "Details" },
+	{ "BugSack", "BugSack" },
+}
 
 local function MakePanel()
 	panel = CreateFrame("Frame", "WowMCPSettingsPanel")
@@ -607,15 +671,21 @@ local function MakePanel()
 	local rowsUsed = math.ceil(#FEATURES / 2)
 	local y = -166 - rowsUsed * 26 - 14
 	Group(panel, "Optional integrations", y)
-	local questie = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-	questie:SetPoint("TOPLEFT", 20, y - 26)
+	local found = {}
+	for i, addon in ipairs(INTEGRATIONS) do
+		local column, row = (i - 1) % 2, math.floor((i - 1) / 2)
+		local line = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+		line:SetPoint("TOPLEFT", 20 + column * 200, y - 26 - row * 18)
+		found[i] = line
+	end
+	local listRows = math.ceil(#INTEGRATIONS / 2)
 	local note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-	note:SetPoint("TOPLEFT", questie, "BOTTOMLEFT", 0, -4)
-	note:SetWidth(380)
+	note:SetPoint("TOPLEFT", 20, y - 30 - listRows * 18)
+	note:SetWidth(390)
 	note:SetJustifyH("LEFT")
-	note:SetText("Your AI looks up NPCs, quests and item sources in Questie's database when it's installed. WowMCP works without it.")
+	note:SetText("WowMCP works without all of them. Questie is used today; the others are planned.")
 
-	y = y - 82
+	y = y - 70 - listRows * 18
 	Group(panel, "Appearance", y)
 	Check(panel, "Show minimap button", 18, y - 22, function() return not DB().minimap.hidden end, UI.ShowButton)
 	Check(panel, "Lock window position", 18, y - 48, function() return DB().window.locked and true or false end,
@@ -645,7 +715,11 @@ local function MakePanel()
 
 	panel:SetScript("OnShow", function()
 		Show()
-		questie:SetText("Questie: " .. (QuestieFound() and (GREEN .. "found|r") or (GREY .. "not installed|r")))
+		for i, addon in ipairs(INTEGRATIONS) do
+			local name, folder, used = addon[1], addon[2], addon[3]
+			found[i]:SetText(WHITE .. name .. "|r: " .. (Loaded(folder) and (GREEN .. (used and "used" or "found") .. "|r")
+				or (GREY .. "not installed|r")))
+		end
 		slider:SetValue(DB().scale)
 		label:SetText("Window scale: " .. math.floor(DB().scale * 100 + 0.5) .. "%")
 	end)
@@ -674,7 +748,9 @@ end
 ns.OnLogin(function()
 	DB()
 	if not (Minimap and GameTooltip and UIParent) then return end -- not the game's UI (the tests' stub client)
-	local ok, err = pcall(MakeButton)
+	local ok, usedLibraries = pcall(UseLibraries)
+	local err
+	if not (ok and usedLibraries) then ok, err = pcall(MakeButton) end
 	if not ok then ns.Print("Couldn't make the minimap button: " .. tostring(err)) end
 	ok, err = pcall(MakePanel)
 	if not ok then ns.Print("Couldn't make the settings page: " .. tostring(err)) end

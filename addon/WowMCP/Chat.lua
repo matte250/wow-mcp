@@ -814,6 +814,57 @@ local function MakeButton(parent)
 	return button, Update
 end
 
+-- Quick questions: small buttons left of the picker that ask the AI a common question in one click.
+-- They're the picker's children, so they show, hide and fade with it (and with the AI tab: a minimized
+-- or closed chat window takes them away too).
+local QUICK = {
+	{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "What should I do now?",
+		question = "What should I do now? Look at my quests, goals and where I am." },
+	{ icon = "Interface\\Icons\\INV_Misc_Map_01", title = "Where should I go next?",
+		question = "Where should I go next, and what's the fastest way there?" },
+	{ icon = "Interface\\Icons\\INV_Misc_Coin_01", title = "How can I make some gold here?",
+		question = "How can I make some gold around here at my level?" },
+}
+local QUICK_SIZE, QUICK_GAP = 20, 3
+local quickButtons = {}
+
+local function MakeQuick(frame)
+	local previous
+	for i = #QUICK, 1, -1 do
+		local q = QUICK[i]
+		local b = CreateFrame("Button", "WowMCPQuickQuestion" .. i, frame)
+		b:SetSize(QUICK_SIZE, QUICK_SIZE)
+		if previous then
+			b:SetPoint("RIGHT", previous, "LEFT", -QUICK_GAP, 0)
+		else
+			b:SetPoint("RIGHT", frame, "LEFT", -4, 0)
+		end
+		local icon = b:CreateTexture(nil, "ARTWORK")
+		icon:SetAllPoints()
+		icon:SetTexture(q.icon)
+		icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+		b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+		b:SetScript("OnClick", function() Ask(q.question) end)
+		b:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText(q.title, 1, 1, 1)
+			GameTooltip:AddLine("Asks your AI, with your quests, goals and where you are.", 0.8, 0.8, 0.8, true)
+			GameTooltip:Show()
+		end)
+		b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		quickButtons[#quickButtons + 1] = b
+		previous = b
+	end
+end
+
+local function MouseOnPicker(frame)
+	if frame:IsMouseOver() then return true end
+	for _, b in ipairs(quickButtons) do
+		if b:IsMouseOver() then return true end
+	end
+	return false
+end
+
 -- Every frame: shown while the AI tab is on screen, at its alpha unless the mouse is on the picker.
 local function Follow(_, elapsed)
 	local frame = picker.frame
@@ -831,7 +882,7 @@ local function Follow(_, elapsed)
 	if not frame:IsShown() then return end
 	local chatTab = _G[followTab:GetName() .. "Tab"]
 	local open = frame.IsMenuOpen and frame:IsMenuOpen()
-	frame:SetAlpha((open or frame:IsMouseOver() or not chatTab) and 1 or chatTab:GetAlpha())
+	frame:SetAlpha((open or MouseOnPicker(frame) or not chatTab) and 1 or chatTab:GetAlpha())
 end
 
 local function MakePicker()
@@ -840,6 +891,8 @@ local function MakePicker()
 	local ok, frame, update = pcall(MakeDropdown, holder)
 	if not ok then frame, update = MakeButton(holder) end
 	picker = { frame = frame, Update = update }
+	local made, err = pcall(MakeQuick, frame)
+	if not made then ns.Print("Couldn't make the quick question buttons: " .. tostring(err)) end
 	holder:SetScript("OnUpdate", Follow)
 end
 
